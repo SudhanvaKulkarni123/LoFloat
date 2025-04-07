@@ -1,5 +1,5 @@
 /// @author Sudhanva Kulkarni
-/// Simplke implementation of Vector
+/// Simple implementation of Vector and MXVector objects
 
 
 #include <cassert>

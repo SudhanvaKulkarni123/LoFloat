@@ -4,15 +4,14 @@
 #include <stdlib.h>
 #include <cstdint>
 #include "lo_float.h"
-
 //#include "tlapack/plugins/lo_float_sci.hpp"
 
 
 int main() {
 
-    using fp4 = lo_float::float4_p<2>;
-    using fp6 = lo_float::float6_p<3>;
-    using fp8 = lo_float::float8_ieee_p<4>;
+    using fp4 = lo_float::float4_p<2, lo_float::RoundToNearestEven>;
+    using fp6 = lo_float::float6_p<3, lo_float::RoundToNearestEven>;
+    using fp8 = lo_float::float8_ieee_p<4, lo_float::RoundToNearestEven>;
 
 
     // Random number generation
@@ -87,7 +86,7 @@ int main() {
     std::cout << " Highest fp8: " << Eigen::NumTraits<fp8>::highest() << "\n";
     std::cout << " Highest fp32: " << std::numeric_limits<float>::max() << "\n";
 
-    std::cout << "generate fp4 numbers : \n";
+    std::cout << "generate fp8 numbers : \n";
 
     for(u_int8_t i = 0; i < 128;i++) {
         std::cout << fp8::FromRep(i) << ",";
