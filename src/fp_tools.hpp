@@ -13,7 +13,7 @@ namespace lo_float {
 
 /**
  * @enum Rounding_Mode
- * @brief Defines different rounding strategies for floating-point operations.
+ * @brief Defines different rounding strategies for floating-point operations. Note that if the length of the stochastic bitstring cannot be set to 0 if the rounding mode is StochasticRounding.
  */
 enum Rounding_Mode : uint8_t {
     /// @brief Round to the nearest representable value.  
@@ -159,7 +159,7 @@ struct FloatingPointParams
     /// @brief A functor for checking and generating NaN values (must satisfy @ref NaNChecker).
     IsNaNFunctor IsNaN;
 
-    /// @brief Number of bits used for stochastic rounding (0 means no stochastic rounding).
+    /// @brief Number of bits used for stochastic rounding. This value is ignored if the rounding mode is not StochasticRounding. If set to 0 with StochasticRounding, we throw an error
     int StochasticRoundingBits;
 
     /**
