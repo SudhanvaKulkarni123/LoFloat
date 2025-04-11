@@ -1,0 +1,5 @@
+var structlo__float_1_1lo__float__internal_1_1_integer_by_size_3_01a_00_01std_1_1enable__if__t_3_07a_01_4_014_08_4_01_4 =
+[
+    [ "signed_type", "structlo__float_1_1lo__float__internal_1_1_integer_by_size_3_01a_00_01std_1_1enable__if__t_3_07a_01_4_014_08_4_01_4.html#a79adef834bf0c70dba82bc3ced0ad8b5", null ],
+    [ "unsigned_type", "structlo__float_1_1lo__float__internal_1_1_integer_by_size_3_01a_00_01std_1_1enable__if__t_3_07a_01_4_014_08_4_01_4.html#a2e2965e7103a62f63709d971b1aa989b", null ]
+];
