@@ -114,10 +114,10 @@ public:
 
   /* --------------- limits --------------- */
   static constexpr i_n lowest() {
-    if constexpr (Signed) return i_n(Storage(1) << (LEN - 1)); // two's-complement min
+    if constexpr (Signedness = lo_float::Signedness::Signed) return i_n(Storage(1) << (LEN - 1)); // two's-complement min
     else                  return i_n(0);
   }
-  static constexpr i_n highest() { return i_n(MASK - (Signed ? (Storage(1) << (LEN - 1)) : 0)); }
+  static constexpr i_n highest() { return i_n(MASK - (Signedness = lo_float::Signedness::Signed ? (Storage(1) << (LEN - 1)) : 0)); }
 
   /* --------------- misc --------------- */
   friend std::ostream& operator<<(std::ostream& os, const i_n& x) {
@@ -142,10 +142,10 @@ using uint8 = uint_n<8>;              // … and so on
  *          numeric_limits specialisation (partial)                *
  * =============================================================== */
 namespace internal {
-template<int LEN, bool Signed>
+template<int LEN, lo_float::Signedness signedness>
 struct intn_numeric_limits_base {
   static constexpr bool is_specialized = true;
-  static constexpr bool is_signed      = Signed;
+  static constexpr bool is_signed      = signedness == lo_float::Signedness::Signed;
   static constexpr bool is_integer     = true;
   static constexpr bool is_exact       = true;
   static constexpr bool has_infinity   = false;
@@ -156,9 +156,9 @@ struct intn_numeric_limits_base {
   static constexpr std::float_round_style round_style = std::round_toward_zero;
   static constexpr bool is_iec559 = false;
   static constexpr bool is_bounded = true;
-  static constexpr bool is_modulo  = !Signed;
+  static constexpr bool is_modulo  = !is_signed;
   static constexpr int  radix = 2;
-  static constexpr int  digits    = Signed ? (LEN - 1) : LEN;
+  static constexpr int  digits    = is_signed ? (LEN - 1) : LEN;
   static constexpr int  digits10  = 0;
   static constexpr int  max_digits10 = 0;
   static constexpr int  min_exponent = 0, min_exponent10 = 0;
@@ -166,22 +166,22 @@ struct intn_numeric_limits_base {
   static constexpr bool traps = true;
   static constexpr bool tinyness_before = false;
 
-  static constexpr i_n<LEN, Signed> min()      noexcept { return i_n<LEN, Signed>::lowest(); }
-  static constexpr i_n<LEN, Signed> lowest()   noexcept { return i_n<LEN, Signed>::lowest(); }
-  static constexpr i_n<LEN, Signed> max()      noexcept { return i_n<LEN, Signed>::highest(); }
-  static constexpr i_n<LEN, Signed> epsilon()  noexcept { return i_n<LEN, Signed>(0); }
-  static constexpr i_n<LEN, Signed> round_error() noexcept { return i_n<LEN, Signed>(0); }
-  static constexpr i_n<LEN, Signed> infinity() noexcept { return i_n<LEN, Signed>(0); }
-  static constexpr i_n<LEN, Signed> quiet_NaN() noexcept { return i_n<LEN, Signed>(0); }
-  static constexpr i_n<LEN, Signed> signaling_NaN() noexcept { return i_n<LEN, Signed>(0); }
-  static constexpr i_n<LEN, Signed> denorm_min() noexcept { return i_n<LEN, Signed>(0); }
+  static constexpr i_n<LEN, signedness> min()      noexcept { return i_n<LEN, signedness>::lowest(); }
+  static constexpr i_n<LEN, signedness> lowest()   noexcept { return i_n<LEN, signedness>::lowest(); }
+  static constexpr i_n<LEN, signedness> max()      noexcept { return i_n<LEN, signedness>::highest(); }
+  static constexpr i_n<LEN, signedness> epsilon()  noexcept { return i_n<LEN, signedness>(0); }
+  static constexpr i_n<LEN, signedness> round_error() noexcept { return i_n<LEN, signedness>(0); }
+  static constexpr i_n<LEN, signedness> infinity() noexcept { return i_n<LEN, signedness>(0); }
+  static constexpr i_n<LEN, signedness> quiet_NaN() noexcept { return i_n<LEN, signedness>(0); }
+  static constexpr i_n<LEN, signedness> signaling_NaN() noexcept { return i_n<LEN, signedness>(0); }
+  static constexpr i_n<LEN, signedness> denorm_min() noexcept { return i_n<LEN, signedness>(0); }
 };
 } // namespace internal
 } // namespace lo_float
 
 /* -------- std::numeric_limits specialisations (all LEN) -------- */
 namespace std {
-template<int LEN, bool Signed>
+template<int LEN, lo_float::Signedness Signed>
 struct numeric_limits<lo_float::i_n<LEN, Signed>>
     : public lo_float::internal::intn_numeric_limits_base<LEN, Signed> {};
 } // namespace std

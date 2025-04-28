@@ -95,12 +95,36 @@ size_t get_TLB_size(int level) {
 #endif
 }
 
-int main() {
-    printf("L1 Cache: %zu bytes\n", get_cache_size(0));
-    printf("L2 Cache: %zu bytes\n", get_cache_size(1));
-    printf("L3 Cache: %zu bytes\n", get_cache_size(2));
-    printf("Cache line size: %zu bytes\n", get_cache_line_size());
-    printf("Page size (TLB line size): %zu bytes\n", get_page_size());
-    get_TLB_size(0); // Just prints descriptors for now
-    return 0;
+
+
+//test function for rate of streaming from L2 cache
+double L2_streaming_rate() {
+constexpr size_t N = 8 * 1024 * 1024; // 8M floats = 32MB (fits in L2 cache for many CPUs)
+std::vector<float> data(N, 1.0f);
+
+// Warm-up: read all the data to ensure it's in L2
+volatile float sink = 0.0f;
+for (size_t i = 0; i < N; ++i) {
+    sink += data[i];
+}
+
+// Real measurement
+uint64_t start_cycles = rdtsc();
+
+float sum0 = 0, sum1 = 0, sum2 = 0, sum3 = 0;
+for (size_t i = 0; i < N; i += 4) {
+    sum0 += data[i + 0];
+    sum1 += data[i + 1];
+    sum2 += data[i + 2];
+    sum3 += data[i + 3];
+}
+
+uint64_t end_cycles = rdtsc();
+
+float total = sum0 + sum1 + sum2 + sum3;
+
+uint64_t elapsed_cycles = end_cycles - start_cycles;
+double cycles_per_element = static_cast<double>(elapsed_cycles) / N;
+
+return cycles_per_element;
 }

@@ -499,17 +499,18 @@ namespace lo_float_internal {
         }  // +∞ => 0x7F800000
     };
 
+    template<Signedness signedness = Signedness::Signed>
     struct IEEE_F8_NaNChecker {
         bool operator()(uint32_t bits) const {
-            return bits == 0x00000080;
+            return bits == (signedness == Signedness::Signed ? 0x00000080 : 0x000000FF);
         }
 
         uint32_t qNanBitPattern() const {
-            return 0x00000080;
+            return signedness == Signedness::Signed ? 0x00000080 : 0x000000FF;
         }  // typical QNaN
 
         uint32_t sNanBitPattern() const {
-            return 0x00000080;
+            return signedness == Signedness::Signed ? 0x00000080 : 0x000000FF;
         }  // some SNaN pattern
     };
 
@@ -1266,7 +1267,7 @@ inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
   //if RTTTT != 0, add a coin flip to samp
   Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
   samp += ((bottom_bits != 0) && (distribution(mt) % 2)) ? 1 : 0;
-  Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len));
+  Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len)) ;
   return bits + (top_bits);
 }
 

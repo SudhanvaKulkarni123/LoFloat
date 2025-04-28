@@ -40,6 +40,25 @@ inline void euler_step(F& u, F& v, float h)
     v = static_cast<F>((float)v + h * (float)dv);
 }
 
+// Full Leapfrog Integrator Step
+template<typename F>
+inline void leapfrog_step(F& u, F& v, const F& u_old, const F& v_old, float h)
+{
+    // Half-step position update
+    F u_half = static_cast<F>((float)u_old + 0.5f * h * (float)v_old);
+    
+    // Full-step velocity update (using u_half)
+    F v_new = static_cast<F>((float)v_old - h * (float)u_half);
+    
+    // Another half-step position update using v_new
+    F u_new = static_cast<F>((float)u_half + 0.5f * h * (float)v_new);
+
+    // Assign updated values back
+    u = u_new;
+    v = v_new;
+}
+
+
 int main()
 {
 

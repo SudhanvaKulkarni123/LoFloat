@@ -9,51 +9,47 @@
 #include <cstdint>
 #include <concepts>
 
+#define rounding_modes \
+    X(RoundToNearestEven) \
+    X(RoundTowardsZero) \
+    X(RoundAwayFromZero) \
+    X(StochasticRoundingA) \
+    X(RoundToNearestOdd) \
+    X(RoundDown) \
+    X(RoundUp) \
+    X(RoundTiesToAway) \
+    X(StochasticRoundingB) \
+    X(StochasticRoundingC) \
+    X(True_StochasticRounding) \
+    X(ProbabilisticRounding) 
+
+#define signednesses \
+    X(Signed) \
+    X(Unsigned)
+
+#define inf_behaviors \
+    X(Extended) \
+    X(Saturating)
+
+#define nan_behaviors \
+    X(QuietNaN) \
+    X(NoNaN) \
+    X(SignalingNaN)
+
+#define unsigned_behaviors \
+    X(NegtoZero) \
+    X(NegtoNaN)
+
+
 namespace lo_float {
 
 /**
  * @enum Rounding_Mode
  * @brief Defines different rounding strategies for floating-point operations.
- */
-enum Rounding_Mode : uint8_t {
-    /// @brief Round to the nearest representable value.  
-    /// If equidistant between two representable values, round to the one with an even least significant bit.
-    RoundToNearestEven = 0,
-
-    /// @brief Round toward zero (truncate fractional part).
-    RoundTowardsZero = 1,
-
-    /// @brief Round away from zero (always go to the numerically larger magnitude).
-    RoundAwayFromZero = 2,
-
-    /// @brief Stochastic rounding with a random bitstring of specified length - biases towards rounding tpwards zero.
-    StochasticRoundingA = 3,
-
-    /// @brief Round to the nearest representable value.  
-    /// If equidistant, pick the one whose least significant bit is odd.
-    RoundToNearestOdd = 4,
-
-    /// @brief Round down (toward -∞)
-    RoundDown = 5,
-
-    /// @brief Round up (toward +∞)
-    RoundUp = 6,
-
-    /// @brief Round ties away from zero.  
-    /// If exactly halfway between two representable values, pick the one with larger magnitude.
-    RoundTiesToAway = 7,
-
-    /// @brief Stochastic rounding with a random bitstring of specified length - biases towards rounding away from zero.
-    StochasticRoundingB = 8,
-
-    /// @brief Stochastic rounding with a random bitstring of specified length - rounds away or towards zeero with a coin flip
-    StochasticRoundingC = 9,
-
-    /// @brief True stochastic rounding - rounds up using rejection sampling against
-    True_StochasticRounding = 10,
-
-    /// @brief Probabilistic rounding - rounds up or down with a probability of 0.5.
-    ProbabilisticRounding = 11,
+ */enum class Rounding_Mode : uint8_t {
+    #define X(name) name,
+    rounding_modes
+    #undef X
 };
 
 /**
@@ -61,19 +57,15 @@ enum Rounding_Mode : uint8_t {
  * @brief Indicates whether a floating-point format is signed or unsigned.
  */
 enum Signedness : uint8_t {
-    /// @brief The format uses one sign bit (positive/negative).
-    Signed = 0,
-
-    /// @brief The format has no sign bit (only non-negative values).
-    Unsigned = 1
+    #define X(name) name,
+    signednesses
+    #undef X
 };
 
 enum Unsigned_behavior : uint8_t {
-    /// @brief send negatives to zero
-    NegtoZero = 0,
-
-    /// @brief send negatives to NaN
-    NegtoNaN  = 1
+    #define X(name) name,
+    unsigned_behaviors
+    #undef X
 };
 
 /**
@@ -81,10 +73,9 @@ enum Unsigned_behavior : uint8_t {
  * @brief Describes how infinities behave or are handled by the format.
  */
 enum Inf_Behaviors : uint8_t {
-    /// @brief Non-trapping infinities are allowed (like IEEE 754 behavior).
-    Extended = 0,
-    /// @brief Saturate to the maximum representable value instead of producing an infinity.
-    Saturating = 1,
+    #define X(name) name,
+    inf_behaviors
+    #undef X
 };
 
 /**
@@ -92,14 +83,9 @@ enum Inf_Behaviors : uint8_t {
  * @brief Describes how NaNs (Not-a-Number) are handled by the format.
  */
 enum NaN_Behaviors : uint8_t {
-    /// @brief Support quiet NaNs (non-signaling) in the format (like IEEE 754).
-    QuietNaN = 0,
-
-    /// @brief No NaN support (e.g., produce some alternate representation or saturate).
-    NoNaN = 1,
-
-    /// @brief Use signaling NaNs, which can trigger additional exceptions or checks.
-    SignalingNaN = 2
+    #define X(name) name,
+    nan_behaviors
+    #undef X
 };
 
 // -------------------------------------------------------------------------

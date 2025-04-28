@@ -16,22 +16,22 @@ using GemmMicroKernel =
              std::size_t rs_c, std::size_t cs_c,
              std::size_t k_stride /* = KC */);
 
-//  Default reference micro-kernel (naïve – replace for speed).
-template<typename T, int MR, int NR>
-static void ref_kernel(const T* A, const T* B, T* C,
+//  Default reference micro-kernel (naive), only adds loop reordering depending on formats of matrices
+template<typename T_in, typename T_out, int MR, int NR, Layout layout>
+static void ref_kernel(const T_in* A, const T_in* B, T_out* C,
                        std::size_t rs_c, std::size_t cs_c,
                        std::size_t K) noexcept
 {
     for (std::size_t k = 0; k < K; ++k)           // kc loop
         for (int j = 0; j < NR; ++j)
             for (int i = 0; i < MR; ++i)
-                C[i*rs_c + j*cs_c] += A[i + k*MR] * B[k*NR + j];
+                C[i*rs_c + j*cs_c] += static_cast<T_out>(A[i + k*MR]) * static_cast<T_out>(B[k*NR + j]);
 }
 
 
-template<typename MatrixA, typename MatrixB, typename MatrixC, typename MatrixAccum1 = void, typename MatrixAccum2 = void>
+template<typename MatrixA, typename MatrixB, typename MatrixC, typename MatrixAccum1 = void, typename MatrixAccum2 = void, bool use_custom_tiling = false>
 class Gemm {
-    using value_type = typename MatrixA::value_type;
+    using input_value_type = typename MatrixA::value_type;
 
     static_assert(MatrixA::layout == MatrixB::layout,
                   "Matrix A and B must have the same layout");
@@ -42,12 +42,8 @@ class Gemm {
     static_assert(MatrixA::layout == MatrixAccum2::layout,
                   "Matrix A and Accum2 must have the same layout");
     
-    // Tile sizes – query cache or use sensible defaults
-    static constexpr std::size_t NC = 512;
-    static constexpr std::size_t KC = 128;
-    static constexpr std::size_t MC = 256;
-    static constexpr std::size_t MR =  4;
-    static constexpr std::size_t NR =  4;
+    
+
 
     MicroKernel<value_type> ukr_ = &ref_kernel<value_type,MR,NR>;
 
@@ -56,6 +52,12 @@ public:
     explicit Gemm(MicroKernel<value_type> user_kernel) : ukr_(user_kernel) {}
 
     void set_micro_kernel(MicroKernel<value_type> k) noexcept { ukr_ = k; }
+
+
+    void get_cache_sizes() {
+
+
+    }
 
     //---------------------------------------------------------------------
     //  C ← C + A·B            ( no transposition for brevity )            //
@@ -71,6 +73,34 @@ public:
 
         //change loops based on layout
 
+        //choose m_c so that A' fills half of L2 cache
+        // Tile sizes – query cache or use sensible defaults
+        std::size_t NC = 512;
+        std::size_t KC = 128;
+        std::size_t MC = 256;
+        std::size_t MR =  4;
+        std::size_t NR =  4;
+
+        if constexpr(use_custom_tiling) {
+            //set NC = KC = sqrt(L2_cache /2) as a starting point
+            double L2_size = get_cache_size(2);
+            double L1_size = get_cache_size(1);
+
+            //want KC * NR < L1_size / 2
+            KC = L1_size / 8;
+
+            MC = L2_size / (2 * KC);
+        }
+
+        //keep Nc default for now
+
+        input_value_type* A_pack = (input_value_type*) malloc(MC * KC);
+
+        input_value_type* B_pack = (input_value_type*) malloc(NC* KC);
+
+        MatrixAccum1* C_accum_first = (MatrixAccum1*) malloc();
+
+
 
 
 
@@ -79,28 +109,20 @@ public:
         {
             const std::size_t nc = std::min<std::size_t>(NC, n - jc);
 
-            //  ─────── PC loop  (K dimension, shared by A & B panels) ────
             for (std::size_t pc = 0; pc < k; pc += KC)
             {
                 const std::size_t kc = std::min<std::size_t>(KC, k - pc);
 
-                // ---- pack B_panel (KC×nc) into contiguous buffer ----
-                std::vector<value_type> Bp(kc*nc);
-                for (std::size_t kk = 0; kk < kc; ++kk)
-                    for (std::size_t jj = 0; jj < nc; ++jj)
-                        Bp[kk*nc + jj] = B(pc+kk, jc+jj);
+                // ---- pack A (m_c by k_c) into a contiguous buffer ----
+                pack_submatrix(A, lo_float::range{jc, jc + nc}, lo_float::range{pc, pc + kc}, A_pack);
 
                 //  ───── IC loop  (M dimension, A panels) ─────
                 for (std::size_t ic = 0; ic < m; ic += MC)
                 {
                     const std::size_t mc = std::min<std::size_t>(MC, m - ic);
 
-                    // pack A_panel (mc×KC) into contiguous buffer
-                    std::vector<value_type> Ap(mc*kc);
-                    for (std::size_t ii = 0; ii < mc; ++ii)
-                        for (std::size_t kk = 0; kk < kc; ++kk)
-                            Ap[ii*kc + kk] = A(ic+ii, pc+kk);
-
+                    //pack B into some B_j
+                    pack_submatrix(B, lo_float::range{pc, pc+kc}, lo_float::range{ic, ic + mc}, B_pack);
                     //  ─── jr / ir loops at micro-kernel granularity ───
                     for (std::size_t jr = 0; jr < nc; jr += NR)
                     {
