@@ -15,7 +15,8 @@ using range = std::pair<T, T>;
 
 template<typename T, typename idx, Layout L = ColMajor>
 class Matrix {
-    
+    public:
+
     idx m;
     idx n;
     idx ld;
@@ -61,7 +62,8 @@ class Matrix {
 
 template<typename T, typename idx, typename T_scal , Layout L = ColMajor>
 class MX_Matrix {
-    
+    public:
+
     idx m;
     idx n;
     idx ld;
@@ -148,8 +150,11 @@ class MX_Matrix {
 template<typename T>
 concept MatrixType = requires (T t) {
     typename T::matrix_type_tag;    // Check if matrix_type_tag exists
-} || requires (T t) {
-    typename T::MX_matrix_type_tag; // OR check if MX_matrix_type_tag exists
+};
+
+template<typename T>
+concept MX_MatrixType = requires (T t) {
+    typename T::MX_matrix_type_tag; // Check if MX_matrix_type_tag exists
 };
 
 // Trait: true if T has MX_matrix_type_tag
@@ -188,119 +193,145 @@ struct is_MX_format<Matrix<T, idx>> {
 
 
 template<MatrixType SrcMatrixType, MatrixType DstMatrixType>
-void lacpy(const SrcMatrixType& A, DstMatrixType& B) {
+void lacpy(const SrcMatrixType& A, DstMatrixType& B, Uplo uplo) {
     assert(A.rows() == B.rows() && A.cols() == B.cols());
     using B_type = scalar_type<DstMatrixType>;
-    //if both are vanilla matrices, just copy over data
-    
-    if constexpr (is_Vanilla_MatrixType<SrcMatrixType>::value && is_Vanilla_MatrixType<DstMatrixType>::value) {
-        std::memcpy(B.data, A.data, A.rows()*A.cols()*sizeof(typename SrcMatrixType::scalar_type));
-    } else if constexpr (is_MX_MatrixType<SrcMatrixType>::value && is_MX_MatrixType<DstMatrixType>::value) {
-        //if both are MX matrices, check if r values are same. If yes, make two calls to memcpy. If they are diferent, then create a small buffer to use an intermediate
-        if constexpr (A.r == B.r) {
-            std::memcpy(B.data, A.data, A.rows()*A.cols()*sizeof(typename SrcMatrixType::scalar_type));
-            std::memcpy(B.shared_exp, A.shared_exp, A.rows()*A.cols()*sizeof(typename SrcMatrixType::shared_exp_type)/SrcMatrixType::r);
-        } else {
-            //create a small buffer to use as intermediate
-            int r1 = A.r;
-            int r2 = B.r;
-            float* buffer = new float[r2];
-            //for 
-            if(A::layout == Layout::RowMajor) {
-                for(int i = 0; i < A.rows(); i++) {
-                    for(int j_block = 0; j_block < A.cols()/A.r; j_block++) {
-                        //get true values of A
-                        float blk_max = 0.0f;
-                        for(int j = 0; j < B.r; j++) {
-                            buffer[j] = A.scaled_val(i, j_block*A.r + j);
-                            blk_max = std::max(blk_max, abs(buffer[j]));
-                        }
-                        for(int j = 0; j < B.r; j++) {
-                            B(i, j_block*A.r +j) = static_cast<B_type>(buffer[j]/blk_max);
-                            buffer[j] = 0.0f;
-                        }
-                        blk_max = 0.0f;
+    using A_type = scalar_type<SrcMatrixType>;
 
-                    }
-                }
-            } else {
-                for(int i = 0; i < A.cols(); i++) {
-                    for(int j_block = 0; j_block < A.rows()/A.r; j_block++) {
-                        //get true values of A
-                        float blk_max = 0.0f;
-                        for(int j = 0; j < B.r; j++) {
-                            buffer[j] = A.scaled_val(i, j_block*A.r + j);
-                            blk_max = std::max(blk_max, abs(buffer[j]));
-                        }
-                        for(int j = 0; j < B.r; j++) {
-                            B(i, j_block*A.r +j) = static_cast<B_type>(buffer[j]/blk_max);
-                            buffer[j] = 0.0f;
-                        }
-                        blk_max = 0.0f;
-
-                    }
-                }
-            }
-            
-
-            
-            
-        }
-        
-    } else if constexpr (is_Vanilla_MatrixType<SrcMatrixType>::value && is_MX_MatrixType<DstMatrixType>::value) {
-
-        if constexpr (SrcMatrixType::layout == Layout::ColMajor) {
-            for(int i = 0; i < A.rows(); i++) {
-                for(int j = 0; j < A.cols()/A.r; j++) {
-                    //TODO : parallelize with OpenMP
-                    auto blk_max = static_cast<typename SrcMatrixType::scalar_type>(0.0);
-                    for(int k = 0; k < A.r; k++) {
-                        blk_max = std::max(blk_max, A(i,j*A.r + k));
-                    }
-                    B.set_exp(i, j*A.r, blk_max);
-                    
-                   
-                }
-            }
-        } else {
-            for(int i = 0; i < A.rows(); i++) {
-                for(int j = 0; j < A.cols(); j++) {
-                    B.data[B.get_idx(i,j)] = A.data[A.get_idx(j,i)];
-                }
+    if (uplo == Uplo::Upper) {
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = i; j < A.cols(); j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
             }
         }
-       
+    } else if (uplo == Uplo::Lower) {
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = 0; j <= i; j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
+            }
+        }
+    } else {
+        // General case
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = 0; j < A.cols(); j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
+            }
+        }
     }
+
+    return;
+    
 }
 
+template<MX_MatrixType SrcMatrixType, MX_MatrixType DstMatrixType>
+void lacpy(const SrcMatrixType& A, DstMatrixType& B, Uplo uplo) {
+    assert(A.rows() == B.rows() && A.cols() == B.cols());
+    using B_type = typename DstMatrixType::scalar_type;
+    using A_type = typename SrcMatrixType::scalar_type;
 
-template<typename MatrixA, typename MatrixA_t, int n_block_size, int m_block_size>
+    if (uplo == Uplo::Upper) {
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = i; j < A.cols(); j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
+                B.set_exp(i,j, A.get_exp(i,j));
+            }
+        }
+        
+    } else if (uplo == Uplo::Lower) {
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = 0; j <= i; j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
+                B.set_exp(i,j, A.get_exp(i,j));
+            }
+        }
+    } else {
+        // General case
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = 0; j < A.cols(); j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
+                B.set_exp(i,j, A.get_exp(i,j));
+            }
+        }
+    }
+
+    return;
+    
+}
+
+template<MatrixType SrcMatrixType, MX_MatrixType DstMatrixType>
+void lacpy(const SrcMatrixType& A, DstMatrixType& B, Uplo uplo) {
+    assert(A.rows() == B.rows() && A.cols() == B.cols());
+    using B_type = typename DstMatrixType::scalar_type;
+    using A_type = typename SrcMatrixType::scalar_type;
+
+    if (uplo == Uplo::Upper) {
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = i; j < A.cols(); j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
+                B.set_exp(i,j, A.get_exp(i,j));
+            }
+        }
+        
+    } else if (uplo == Uplo::Lower) {
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = 0; j <= i; j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
+                B.set_exp(i,j, A.get_exp(i,j));
+            }
+        }
+    } else {
+        // General case
+        for(int i = 0; i < A.rows(); i++) {
+            for(int j = 0; j < A.cols(); j++) {
+                B(i,j) = static_cast<B_type>(A(i,j));
+                B.set_exp(i,j, A.get_exp(i,j));
+            }
+        }
+    }
+
+    return;
+    
+}
+
+template<MatrixType SrcMatrixType, MatrixType DstMatrixType>
+using copy = lacpy<SrcMatrixType, DstMatrixType>;
+
+
+template<MatrixType MatrixA, MatrixType MatrixA_t, int n_block_size = 1, int m_block_size = 1>
 void transpose(MatrixA& A, MatrixA_t& At) {
 
     At.m = A.n;
     At.n = A.m;
     int n_blocks = (A.n + n_block_size - 1) / n_block_size;
     int m_blocks = (A.m + m_block_size - 1) / m_block_size;
-    if constexpr (At::layout != A::layout) {
-        //just copy over the data with memcpy
-        std::memcpy(At.data, A.data, A.m*A.n*sizeof(typename MatrixA::value_type));
-    } else {
+    using At_type = typename MatrixA_t::scalar_type;
+    using A_type = typename MatrixA::scalar_type;
+
+    //break inrto cases - if layouts are different just copy over. If same, block the transpose
+    if constexpr (MatrixA::layout == MatrixA_t::layout) {
         // blocked transpose
         for(int b_row = 0; b_row < n_blocks; b_row++) {
             for(int b_col = 0; b_col < m_blocks; b_col++) {
                 for(int row = b_row*n_block_size; row < std::min(A.m, row + n_block_size); row++) {
                     for(int col = b_col*m_block_size; col < std::min(A.n, col + m_block_size); col++) {
-                            At.data[At.get_idx(row, col)] = A.data[A.get_idx(col, row)];
+                            At.data[At.get_idx(row, col)] = static_cast<At_type>(A.data[A.get_idx(col, row)]);
                     }
                 }
             }
         }
+    } else {
+        // simnple copy
+        for(int i = 0; i < A.rows()*A.cols(); i++) {
+            At.data[i] = static_cast<At_type>(A.data[i]);
+        }
     }
+
+    
     
 }
 
 
-//main edge case here is when A.r != At.r
+//for the case where At.r != A.r, just cast to a full precision matrix first and then cast back to a microsaled matrix
 template<typename MX_MatrixA, typename MX_MatrixAt, int n_block_size, int m_block_size>
 void transpose(MX_MatrixA& A, MX_MatrixAt& At)
 {
@@ -312,154 +343,49 @@ void transpose(MX_MatrixA& A, MX_MatrixAt& At)
     int n_blocks = (A.n + n_block_size - 1) / n_block_size;
     int m_blocks = (A.m + m_block_size - 1) / m_block_size;
 
-    if constexpr (A::layout != At::layout) {
-        std::memcpy(At.data, A.data, A.m*A.n*sizeof(typename MatrixA::value_type));
-        if constexpr (A.r = At.r) {
-            std::memcpy(A.shared_exp, At.shared_exp, A.m*A.n*sizeof(typename MatrixA::value_type)/A.r);
-
-        } else {
-            //traverse At and set exponents
-            if constexpr (At::layout == Layout::ColMajor) {
-                for(int i = 0; i < At.n; i++) {
-                    //TODO : parallelize with OpenMP
-                    for(int j_block = 0; j_block < At.m/r; j_block++) {
-                        //find max
-                        auto blk_max = static_cast<A_type>(0.0);
-                        for(int j = j_block*r; j < std::min(At.m, j + r); j++) {
-                            blk_max = std::max(blk_max, At(i,j));
-                        }
-                        //set blk_max to exp array -
-                        At.set_exp(i, j_block*r, blk_max);
-                    }
-                }
-            } else {
-                for(int i = 0; i < At.m; i++) {
-                    //TODO : parallelize with OpenMP
-                    for(int j_block = 0; j_block < At.n/r; j_block++) {
-                        //find max
-                        auto blk_max = static_cast<A_type>(0.0);
-                        for(int j = j_block*r; j < std::min(At.n, j + r); j++) {
-                            blk_max = std::max(blk_max, At(i,j));
-                        }
-                        //set blk_max to exp array -
-                        At.set_exp(i, j_block*r, blk_max);
-
-                    }
-                }
-            }
-        }
-    } else {
+    //cases - if layouts are different just copy over. If same, block the transpose
+    if constexpr (MX_MatrixA::layout == MX_MatrixAt::layout) {
         // blocked transpose
         for(int b_row = 0; b_row < n_blocks; b_row++) {
             for(int b_col = 0; b_col < m_blocks; b_col++) {
                 for(int row = b_row*n_block_size; row < std::min(A.m, row + n_block_size); row++) {
                     for(int col = b_col*m_block_size; col < std::min(A.n, col + m_block_size); col++) {
-                            At.data[At.get_idx(row, col)] = A.data[A.get_idx(col, row)];
+                            At.data[At.get_idx(row, col)] = static_cast<A_type>(A.data[A.get_idx(col, row)]);
+                            if(A.get_idx(col, row) % A.r == 0) {
+                                At.set_exp(row, col, A.get_exp(col, row));
+                            }
                     }
                 }
             }
         }
-
-    }
-
-
-}
-
-
-/// @brief @brief
-/// @tparam packing_type 
-/// @tparam Matrix_t 
-/// @param A 
-/// @param rows 
-/// @param cols 
-/// @param packing_buff 
-/// @param trans 
-template<typename Matrix_t, typename packing_type>
-void pack_submatrix(Matrix_t& A, range<int> rows_range, range<int> cols_range, packing_type* packing_buff, bool trans)
-{
-    int row_start = rows_range.first;
-    int row_end   = rows_range.second;
-    int col_start = cols_range.first;
-    int col_end   = cols_range.second;
-
-    int rows = row_end - row_start;
-    int cols = col_end - col_start;
-
-    if (trans) {
-        // Pack with transpose: (i,j) -> (j,i)
-        if constexpr (Matrix_t::layout == Layout::ColMajor) {
-            for (int j = row_start; j < row_end; ++j) {
-                for (int i = col_start; i < col_end; ++i) {
-                    packing_buff[(j - col_start) * cols + (i - row_start)] = A(i, j);
-                }
-            }
-        } else {
-        for (int j = col_start; j < col_end; ++j) {
-            for (int i = row_start; i < row_end; ++i) {
-                packing_buff[(j - col_start) * rows + (i - row_start)] = A(i, j);
-            }
-        }
-    }
     } else {
-        if constexpr (Matrix_t::layout == Layout::ColMajor) {
-            for (int j = col_start; j < col_end; ++j) {
-                for (int i = row_start; i < row_end; ++i) {
-                    packing_buff[(i - row_start) + (j - col_start) * rows] = A(i, j);
-                }
-            }
-        } else { // RowMajor
-            for (int i = row_start; i < row_end; ++i) {
-                for (int j = col_start; j < col_end; ++j) {
-                    packing_buff[(j - col_start) + (i - row_start) * cols] = A(i, j);
-                }
-            }
+        // simple copy
+        for(int i = 0; i < A.rows()*A.cols(); i++) {
+            At.data[i] = static_cast<A_type>(A.data[i]);
+            At.set_exp(i, A.get_exp(i));
         }
     }
+
+
+
 }
 
-template<typename Matrix_t, typename packing_type>
-void unpack_submatrix(Matrix_t& A, range<int> rows_range, range<int> cols_range, packing_type* packing_buff, bool trans)
-{
-    int row_start = rows_range.first;
-    int row_end   = rows_range.second;
-    int col_start = cols_range.first;
-    int col_end   = cols_range.second;
-
-    int rows = row_end - row_start;
-    int cols = col_end - col_start;
-
-    if (trans) {
-        // Pack with transpose: (i,j) -> (j,i)
-        if constexpr (Matrix_t::layout == Layout::ColMajor) {
-            for (int j = row_start; j < row_end; ++j) {
-                for (int i = col_start; i < col_end; ++i) {
-                    A(i,j) = packing_buff[(j - col_start) * cols + (i - row_start)];
-                }
-            }
-        } else {
-        for (int j = col_start; j < col_end; ++j) {
-            for (int i = row_start; i < row_end; ++i) {
-                A(i,j) = packing_buff[(j - col_start) * rows + (i - row_start)];
-            }
-        }
-    }
-    } else {
-        if constexpr (Matrix_t::layout == Layout::ColMajor) {
-            for (int j = col_start; j < col_end; ++j) {
-                for (int i = row_start; i < row_end; ++i) {
-                    A(i,j) = packing_buff[(i - row_start) + (j - col_start) * rows];
-                }
-            }
-        } else { // RowMajor
-            for (int i = row_start; i < row_end; ++i) {
-                for (int j = col_start; j < col_end; ++j) {
-                    A(i,j) = packing_buff[(j - col_start) + (i - row_start) * cols];
-                }
-            }
-        }
-    }
-
+//slice to get submatrix
+template<typename T, typename idx>
+Matrix<T, idx> slice(const Matrix<T, idx>& a, range<idx> range) {
+    assert(range.first >= 0 && range.second <= a.m);
+    
+    return Matrix<T, idx>(a.data + range.first * a.stride, range.second - range.first, a.n - range.first * a.stride);
 }
+
+template<typename T, typename idx, typename T_scal>
+MX_Matrix<T, idx, T_scal> slice(const MX_Matrix<T, idx, T_scal>& a, range<idx> range) {
+    assert(range.first >= 0 && range.second <= a.m);
+    
+    return MX_Matrix<T, idx, T_scal>(a.data + range.first * a.stride, a.shared_exps + range.first * a.r, range.second - range.first, a.n - range.first * a.r, a.stride);
+}
+
+
 
 
 

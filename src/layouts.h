@@ -12,6 +12,12 @@ enum MX_Layout : uint8_t {
     byBlock = 2
 };
 
+enum Uplo : uint8_t {
+    Upper = 0,
+    Lower = 1, 
+    General = 2
+};
+
 struct MX_tuple {
     MX_Layout layout;
     int m;

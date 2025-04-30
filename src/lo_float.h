@@ -1262,12 +1262,12 @@ inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
   // corresponding to  RTT...T and adding the genned number.
   //Then we truncate the mantissa
   //auto len = 2;
-  std::uniform_int_distribution<unsigned int> distribution(0, (1<< (len)) - 1);
+  std::uniform_int_distribution<unsigned int> distribution(0, (1<< (len - 1)) - 1);
   unsigned int samp = distribution(mt); // Generate a random integer of length len, next get top "roundoff" bits
   //if RTTTT != 0, add a coin flip to samp
   Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
   samp += ((bottom_bits != 0) && (distribution(mt) % 2)) ? 1 : 0;
-  Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len)) ;
+  Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len + 1)) ;
   return bits + (top_bits);
 }
 
