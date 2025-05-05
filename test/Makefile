@@ -41,4 +41,10 @@ ROUNDING_MODES:
 SMALL:
 	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) small_rounding_test.cpp -o test_small
 
+ENUM:
+	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) fp8_enum_test.cpp -o test_enum
+
+SUBNORMAL:
+	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) subnormal_test.cpp -o test_subnormal
+
 ALL: LO_FLOAT LO_INT EXPECTATION PROBABILITY EXCEPTIONS UNSIGNED ULTRA_LOW ROUNDING_MODES

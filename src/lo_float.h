@@ -200,7 +200,7 @@ namespace lo_float_internal {
         
         __attribute__((always_inline)) Derived operator-() const {
             //check spl case of -0 for nan
-            if (rep_ == 0 && Derived::IsNaNFunctor.sNanBitPattern() == (1 << (get_bitwidth_v<Derived> - 1))) {
+            if (rep_ == 0 && Derived::IsNaNFunctor((get_bitwidth_v<Derived> - 1))) {
                 return FromRep(0);
             }
             if (get_signedness_v<Derived> == Signedness::Signed) {
@@ -1237,7 +1237,7 @@ inline Bits Stochastic_Round_A(Bits bits, const int roundoff, const int len = 0)
   //samp += ((bottom_bits != 0) && (distribution(mt) % 2)) ? 1 : 0;
  
   Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len));
-  return bits + (top_bits);
+  return (len == 0 || bottom_bits == 0) ? bits + (top_bits) : bits;
 }
 
 template <typename Bits>
@@ -1253,7 +1253,7 @@ inline Bits Stochastic_Round_B(Bits bits, const int roundoff, const int len = 0)
   samp += ((bottom_bits != 0)) ? 1 : 0;
  
   Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len));
-  return bits + (top_bits);
+  return (len == 0 || bottom_bits == 0) ? bits + (top_bits) : bits;
 }
 
 template <typename Bits>
@@ -1268,7 +1268,7 @@ inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
   Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
   samp += ((bottom_bits != 0) && (distribution(mt) % 2)) ? 1 : 0;
   Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len + 1)) ;
-  return bits + (top_bits);
+  return (len == 0 || bottom_bits == 0) ? bits + (top_bits) : bits;
 }
 
 template <typename Bits>
@@ -1335,11 +1335,16 @@ template<typename Bits>
 inline Bits RoundUp(Bits bits, int roundoff, bool positive = true) {
   //round bit pattern up by adding 1 to the bit pattern if positive, truncate if negative
   //in bits FFF...FLRTT...T, set RTT...T to be 0 and add 1 to FFF...F
-  auto mask = ~((Bits{1} << roundoff) - 1);
-  Bits truncated = bits & mask;
-  return truncated + (positive ? (bits > 0 ? Bits{1} << roundoff : 0) : 0);
+  const Bits low_mask   = (Bits{1} << roundoff) - 1;   // 000…0111…1
+    const Bits high_mask  = ~low_mask;                   // 111…1000…0
+    Bits       truncated  = bits & high_mask;            // keep the high part
 
+   
+    truncated += (positive && ((bits & low_mask) != 0)) ? Bits{1} << roundoff : 0;
+
+    return truncated;
 }
+
 template <typename Bits>
 inline Bits RoundDown(Bits bits, int roundoff, bool positive = true) {
   //just truncate the bits
@@ -1442,7 +1447,6 @@ struct ConvertImpl<From, To,
       return std::numeric_limits<To>::quiet_NaN();
     }
     if (from_bits == 0) {
-      if(std::isnan(-To{})) { return To{};}
       return from_sign_bit ? -To{} : To{};
     }
 
@@ -1530,7 +1534,6 @@ struct ConvertImpl<From, To,
         
         
         To to = std::bit_cast<To>(static_cast<ToBits>(bits));
-        if(std::isnan(-to)) return to;
         return from_sign_bit ? -to : to;
       }
     }
@@ -1549,8 +1552,8 @@ struct ConvertImpl<From, To,
       if (biased_to_exponent <= 0) {
         // Round and shift mantissa down.
         FromBits from_has_leading_one = (biased_from_exponent > 0 ? 1 : 0);
-        int exponent_shift =
-            -kDigitShift - biased_to_exponent + from_has_leading_one;
+        const int exponent_shift =
+            -kDigitShift - (biased_to_exponent - 1);
         // Insert the implicit leading 1 bit on the mantissa for normalized
         // inputs.
         FromBits rounded_from_bits =
@@ -1565,6 +1568,7 @@ struct ConvertImpl<From, To,
             // otherwise the lower precision bits may already be lost.  There is
             // an edge-case where rounding to a normalized value would normally
             // round down, but for a subnormal, we need to round up.
+         
             switch (round_mode) {
                 case Rounding_Mode::RoundToNearestOdd:
                   rounded_from_bits = RoundBitsToNearestOdd(rounded_from_bits, exponent_shift);
@@ -1610,9 +1614,13 @@ struct ConvertImpl<From, To,
         } else {
             //else we are zero anyway, so deal with teh stoch round and round up, etc cases
             switch(round_mode) {
+                
                 case Rounding_Mode::RoundAwayFromZero :
                     rounded_from_bits = (rounded_from_bits > 0 ? 1 : 0);
                     bits = (rounded_from_bits);
+                    break;
+                case Rounding_Mode::RoundTowardsZero :
+                    bits = 0;
                     break;
                 case Rounding_Mode::RoundUp :
                     rounded_from_bits = (rounded_from_bits && !from_sign_bit > 0 ? 1 : 0);
@@ -1642,13 +1650,11 @@ struct ConvertImpl<From, To,
                     rounded_from_bits = Probabilistic_Round(rounded_from_bits, exponent_shift);
                     bits = (rounded_from_bits >> exponent_shift);
                     break;
-                
             }
         }
         // Insert sign and return.
-        
         To to = std::bit_cast<To>(bits);
-        if(std::isnan(-to)) { return to;}
+    
         return from_sign_bit ? -to : to;
       }
     }
@@ -1703,8 +1709,9 @@ struct ConvertImpl<From, To,
     }
 
     // Re-bias the exponent.
-    rounded_from_bits += static_cast<WideBits>(kExponentOffset)
-                         << kFromMantissaBits;
+    if (biased_from_exponent != 0) {          
+        rounded_from_bits += kExponentOffset << kFromMantissaBits;
+    }
 
     ToBits bits;
     // Check for overflows by aligning the significands. We always align the
@@ -1750,7 +1757,6 @@ struct ConvertImpl<From, To,
 
 
     // Insert sign bit.
-    if(std::isnan(-to)) { return to;}
     return from_sign_bit ? -to : to;
   }
 };

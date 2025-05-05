@@ -1,0 +1,6 @@
+1. Report/user guide for simulator - make sure to add test code stuff
+2. Arith work
+3. Mixed precision Cholesky - add H100
+4. Randomly pivoted Cholesky / Mixed precision LU - literature review
+5. GEMM error testing for DeepGEMM, etc 
+6. Pseudo Stochastic Rounding + ODE or whatever (Mathematical analysis and such)

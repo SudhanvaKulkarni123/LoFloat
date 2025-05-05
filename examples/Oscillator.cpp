@@ -1,116 +1,178 @@
 // examples/oscillator_8bit.cpp
-// -----------------------------------------------------------
-// 8‑bit LoFloat demo (no plotting):
-//   u'(t) = v(t),  v'(t) = −u(t),  u(0)=1, v(0)=0
-//   Forward Euler, h = 0.05, T = 20
-//   Dumps CSV with columns: t, u_rne, u_sr, u_exact
-// -----------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 8-bit LoFloat demo:
+//   u'(t)=v(t), v'(t)=−u(t),  u(0)=1, v(0)=0
+//   • Heun (explicit midpoint, 2-nd order)
+//   • Implicit midpoint (2-nd order, A-stable)
+//   • “Mixed precision” implicit midpoint:
+//       state stored in float, stage equations solved in rne8 / sr8
+//
+//   h = 0.1,  T = 15
+//   CSV columns: t,
+//                u_rne_2nd,v_rne_2nd,u_sr_2nd,v_sr_2nd,
+//                u_rne_imp,v_rne_imp,u_sr_imp,v_sr_imp,
+//                u_rne_mix,v_rne_mix,u_sr_mix,v_sr_mix,
+//                u_exact,v_exact
+// ---------------------------------------------------------------------------
+
 #include <vector>
 #include <fstream>
 #include <cmath>
+#include <iostream>
+#include <chrono>
 #include "lo_float.h"
-#include <chrono>   
 
 using namespace lo_float;
 
-// ---------- 8‑bit parameter packs ------------------------------------------
-
-
-//define FloatingPointParams for 8-bit floats
+// ────────────────────────────────────────────────────────────────────────────
+// 8-bit parameter packs
+// ────────────────────────────────────────────────────────────────────────────
 static constexpr FloatingPointParams param_fp8(
-    8, /*mant*/5, /*bias*/3,
-    Rounding_Mode::StochasticRoundingC,
+    8, /*mant*/6, /*bias*/1,
+    Rounding_Mode::StochasticRoundingA,
     Inf_Behaviors::Saturating, NaN_Behaviors::QuietNaN,
     Signedness::Signed,
     lo_float_internal::IEEE_F8_InfChecker(),
     lo_float_internal::IEEE_F8_NaNChecker(),
-    6
+    0
+);
+static constexpr FloatingPointParams param2_fp8(
+    8, 6, 1,
+    Rounding_Mode::StochasticRoundingA,
+    Inf_Behaviors::Saturating, NaN_Behaviors::QuietNaN,
+    Signedness::Signed,
+    lo_float_internal::IEEE_F8_InfChecker(),
+    lo_float_internal::IEEE_F8_NaNChecker(),
+    0
 );
 
-using rne8 = float8_ieee_p<6, RoundToNearestEven>;
-using sr8  = Templated_Float<param_fp8>;
+using rne8 = Templated_Float<param2_fp8>;   // round-to-nearest-even
+using sr8  = Templated_Float<param_fp8>;    // stochastic rounding
 
-// ---------- one Euler step --------------------------------------------------
-template<typename F>
-inline void euler_step(F& u, F& v, float h)
+// ────────────────────────────────────────────────────────────────────────────
+// Heun (explicit midpoint) step
+// ────────────────────────────────────────────────────────────────────────────
+template<class F>
+inline void heun_step(F& u, F& v, float h)
 {
-    const F du = v;
-    const F dv = -u;
-    u = static_cast<F>((float)u + h * (float)du);
-    v = static_cast<F>((float)v + h * (float)dv);
+    const F du0 = v,   dv0 = -u;
+
+    F u_pred = F(float(u) + h * float(du0));
+    F v_pred = F(float(v) + h * float(dv0));
+
+    const F du1 = v_pred, dv1 = -u_pred;
+
+    u = F(float(u) + 0.5f * h * (float(du0) + float(du1)));
+    v = F(float(v) + 0.5f * h * (float(dv0) + float(dv1)));
 }
 
-// Full Leapfrog Integrator Step
-template<typename F>
-inline void leapfrog_step(F& u, F& v, const F& u_old, const F& v_old, float h)
+// ────────────────────────────────────────────────────────────────────────────
+// Implicit midpoint step (generic: state type vs stage precision type)
+// ────────────────────────────────────────────────────────────────────────────
+template<class StageT, class StateT>
+inline void implicit_midpoint_step(StateT& u, StateT& v, float h)
 {
-    // Half-step position update
-    F u_half = static_cast<F>((float)u_old + 0.5f * h * (float)v_old);
-    
-    // Full-step velocity update (using u_half)
-    F v_new = static_cast<F>((float)v_old - h * (float)u_half);
-    
-    // Another half-step position update using v_new
-    F u_new = static_cast<F>((float)u_half + 0.5f * h * (float)v_new);
+    const float half_h = 0.5f * h;                 // h/2
+    const float denom  = 1.0f + half_h * half_h;   // 1 + (h/2)^2
 
-    // Assign updated values back
-    u = u_new;
-    v = v_new;
+    // Solve k = f(z + h/2 k)   with stage variables in StageT
+    const StageT k1 = StageT( (static_cast<float>(v) - half_h * static_cast<float>(u)) / denom );
+    const StageT k2 = StageT( static_cast<float>(-u) - half_h * float(k1) );
+
+    u = StateT((float)u + h * float(k1));
+    v = StateT((float)v + h * float(k2));
 }
 
-
+// ────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    constexpr float T = 1.0f, h = 0.00001f;
+    const int N = static_cast<int>(T / h);
 
-    constexpr float T = 10.0, h = 0.001;
-    int N = static_cast<int>(T / h);
-    std::cout << "N = " << N << "\n";
-
-    //set seed with time
     lo_float::set_seed(static_cast<unsigned int>(std::time(nullptr)));
 
-    // printr max vals of the formats
-    std::cout << "max rne8 = " << static_cast<float>(std::numeric_limits<rne8>::max()) << "\n";
-    std::cout << "max sr8  = " << static_cast<float>(std::numeric_limits<sr8>::max()) << "\n";
-    std::cout << "min rne8 = " << static_cast<float>(std::numeric_limits<rne8>::min()) << "\n";
-    std::cout << "min sr8  = " << static_cast<float>(std::numeric_limits<sr8>::min()) << "\n";
-    std::cout << "denorm rne8 = " << static_cast<float>(std::numeric_limits<rne8>::denorm_min()) << "\n";
-    std::cout << "denorm sr8  = " << static_cast<float>(std::numeric_limits<sr8>::denorm_min()) << "\n";
-
-
-    std::vector<float> t, u_rne, v_rne, u_sr, v_sr, u_exact, v_exact;
+    // ── storage ────────────────────────────────────────────────────────────
+    std::vector<float> t;
+    std::vector<float> u_rne_2nd, v_rne_2nd, u_sr_2nd, v_sr_2nd;      // Heun
+    std::vector<float> u_rne_imp, v_rne_imp, u_sr_imp, v_sr_imp;      // ImpMid
+    std::vector<float> u_rne_mix, v_rne_mix, u_sr_mix, v_sr_mix;      // mixed
+    std::vector<float> u_exact,   v_exact;
     t.reserve(N + 1);
 
-    rne8 u_r = rne8(1.0), v_r = rne8(0.0);
-    sr8  u_s = sr8(1.0), v_s = sr8(-0.0);
+    // ── initial conditions ────────────────────────────────────────────────
+    rne8 u_r2 = (rne8)1.0f , v_r2 = (rne8)0.0f;      // Heun  (RNE)
+    sr8  u_s2 = (sr8)1.0f , v_s2 = (sr8)0.0f;      // Heun  (SR)
 
-    std::cout << "u_s = " << static_cast<float>(u_s) << "\n";
-    std::cout << "v_s = " << static_cast<float>(v_s) << "\n";
+    rne8 u_r_imp = (rne8)1.0f , v_r_imp = (rne8)0.0f;   // ImpMid (RNE)
+    sr8  u_s_imp = (sr8)1.0f , v_s_imp = (sr8)0.0f;   // ImpMid (SR)
 
-    for (int k = 0; k <= N; ++k) {
+    float u_r_mix = 1.0f, v_r_mix = 0.0f;   // state=float, stage=rne8
+    float u_s_mix = 1.0f, v_s_mix = 0.0f;   // state=float, stage=sr8
+
+    // ── time-march loop ───────────────────────────────────────────────────
+    for (int k = 0; k <= N; ++k)
+    {
         float tk = k * h;
         t.push_back(tk);
-        u_rne.push_back(static_cast<float>(u_r));
-        v_rne.push_back(static_cast<float>(v_r));
-        u_sr .push_back(static_cast<float>(u_s));
-        v_sr .push_back(static_cast<float>(v_s));
+
+        // store
+        u_rne_2nd.push_back(float(u_r2));   v_rne_2nd.push_back(float(v_r2));
+        u_sr_2nd .push_back(float(u_s2));   v_sr_2nd .push_back(float(v_s2));
+
+        u_rne_imp.push_back(float(u_r_imp)); v_rne_imp.push_back(float(v_r_imp));
+        u_sr_imp .push_back(float(u_s_imp)); v_sr_imp .push_back(float(v_s_imp));
+
+        u_rne_mix.push_back(u_r_mix);       v_rne_mix.push_back(v_r_mix);
+        u_sr_mix .push_back(u_s_mix);       v_sr_mix .push_back(v_s_mix);
+
         u_exact.push_back(std::cos(tk));
         v_exact.push_back(-std::sin(tk));
 
-        euler_step(u_r, v_r, h);
-        euler_step(u_s, v_s, h);
+        // advance one step
+        heun_step(u_r2, v_r2, h);
+        heun_step(u_s2, v_s2, h);
 
+        implicit_midpoint_step<rne8>(u_r_imp, v_r_imp, h);
+        implicit_midpoint_step<sr8 >(u_s_imp, v_s_imp, h);
+
+        implicit_midpoint_step<rne8>(u_r_mix, v_r_mix, h);
+        implicit_midpoint_step<sr8 >(u_s_mix, v_s_mix, h);
     }
 
-    // Write CSV with u and v for both modes
+    // ── write CSV ──────────────────────────────────────────────────────────
     std::ofstream out("oscillator_8bit.csv");
-    out << "t,u_rne,v_rne,u_sr,v_sr,u_exact,v_exact\n";
+    out << "t,"
+        << "u_rne_2nd,v_rne_2nd,u_sr_2nd,v_sr_2nd,"
+        << "u_rne_imp,v_rne_imp,u_sr_imp,v_sr_imp,"
+        << "u_rne_mix,v_rne_mix,u_sr_mix,v_sr_mix,"
+        << "u_exact,v_exact\n";
+
     for (std::size_t i = 0; i < t.size(); ++i)
         out << t[i] << ","
-            << u_rne[i] << "," << v_rne[i] << ","
-            << u_sr[i]  << "," << v_sr[i]  << ","
-            << u_exact[i] << "," << v_exact[i] << "\n";
+            << u_rne_2nd[i] << "," << v_rne_2nd[i] << ","
+            << u_sr_2nd[i]  << "," << v_sr_2nd[i]  << ","
+            << u_rne_imp[i] << "," << v_rne_imp[i] << ","
+            << u_sr_imp[i]  << "," << v_sr_imp[i]  << ","
+            << u_rne_mix[i] << "," << v_rne_mix[i] << ","
+            << u_sr_mix[i]  << "," << v_sr_mix[i]  << ","
+            << u_exact[i]   << "," << v_exact[i]   << "\n";
 
-    std::cout << "✅ Wrote oscillator_8bit.csv with u(t) and v(t) for both rounding modes\n";
+    // ── L2 error helper ───────────────────────────────────────────────────
+    auto l2 = [&](const std::vector<float>& num)
+    {
+        double acc = 0.0;
+        for (std::size_t i = 0; i < num.size(); ++i)
+            acc += std::pow(u_exact[i] - num[i], 2);
+        return std::sqrt(acc / num.size());
+    };
+
+    std::cout << "L2 error Heun   (RNE)      = " << l2(u_rne_2nd)  << '\n';
+    std::cout << "L2 error Heun   (SR )      = " << l2(u_sr_2nd)   << '\n';
+    std::cout << "L2 error ImpMid (RNE)      = " << l2(u_rne_imp)  << '\n';
+    std::cout << "L2 error ImpMid (SR )      = " << l2(u_sr_imp)   << '\n';
+    std::cout << "L2 error ImpMid (mix-RNE)  = " << l2(u_rne_mix)  << '\n';
+    std::cout << "L2 error ImpMid (mix-SR )  = " << l2(u_sr_mix)   << '\n';
+
+    std::cout << "✅  Wrote oscillator_8bit.csv\n";
     return 0;
 }

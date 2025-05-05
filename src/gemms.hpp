@@ -30,7 +30,7 @@ static void ref_kernel(const T_in* A, const T_in* B, T_out* C,
                        std::size_t K) noexcept
                        {
                         if constexpr (layout == Layout::ColMajor) {
-                            // ColMajor: Iterate C by columns (j), then rows (i)
+                          
                             for (std::size_t k = 0; k < K; ++k)           // kc loop
                                 for (int j = 0; j < NR; ++j)              // loop over columns
                                     for (int i = 0; i < MR; ++i)          // loop over rows
@@ -54,10 +54,21 @@ static void ref_kernel(const T_in* A, const T_scal* shared_exps_A, const T_in* B
                        std::size_t rs_c, std::size_t cs_c,
                        std::size_t K) noexcept
 {
-    for (std::size_t k = 0; k < K; ++k)           // kc loop
-        for (int j = 0; j < NR; ++j)
-            for (int i = 0; i < MR; ++i)
-                C[i*rs_c + j*cs_c] += static_cast<T_out>(A[i + k*MR]) * static_cast<T_out>(B[k*NR + j]);
+    //assumption in this microkernel is that shared exp is such that there is one shared exp for each row (if row major) or column (if column major)
+    if constexpr (layout == Layout::ColMajor) {
+        for(int i = 0; i < MR; i++) {
+            for(int j = 0; j < NR; j++) {
+                C[i*rs_c + j] += static_cast<T_out>(A[i + j*MR]) * static_cast<T_out>(B[j + i*NR]) * shared_exps_A[i] * shared_exps_B[j];
+            }
+        }
+    } else if constexpr (layout == Layout::RowMajor) {
+        for(int i = 0; i < MR; i++) {
+            for(int j = 0; j < MR; j++) {
+                C[i*rs_c + j] += static_cast<T_out>(A[i + j*MR]) * static_cast<T_out>(B[j + i*NR]) * shared_exps_A[j] * shared_exps_B[i];
+            }
+        }
+    
+    }
 }
 
 
@@ -86,10 +97,11 @@ public:
     void set_micro_kernel(MicroKernel<value_type> k) noexcept { ukr_ = k; }
 
 
-    // void get_cache_sizes() {
+    void autotune(int m, int n, int k) {
+        
 
 
-    // }
+    }
 
 
     /*
