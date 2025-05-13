@@ -29,7 +29,7 @@ using namespace lo_float;
 // ────────────────────────────────────────────────────────────────────────────
 static constexpr FloatingPointParams param_fp8(
     8, /*mant*/6, /*bias*/1,
-    Rounding_Mode::StochasticRoundingA,
+    Rounding_Mode::StochasticRoundingC,
     Inf_Behaviors::Saturating, NaN_Behaviors::QuietNaN,
     Signedness::Signed,
     lo_float_internal::IEEE_F8_InfChecker(),

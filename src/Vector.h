@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include "layouts.h"
+#include <type_traits>
 
 
 namespace Lo_Gemm {
@@ -21,11 +22,11 @@ class Vector {
 
     Vector(T* data, idx m, idx stride = static_cast<idx>(1)) : data(data), m(m), stride(stride) {}
 
-    constexpr inline T& operator[] const (idx i) {
+    T& constexpr inline  operator[] const (idx i) {
         return data[i*stride];
     }
 
-    constexpr inline T& operator() const (idx i) {
+    T& constexpr inline operator() const (idx i) {
         return data[i*stride];
     }   
     
@@ -129,7 +130,7 @@ void copy(const Vector<T1, idx>& a, MX_Vector<T2, idx2, T_scal>& b) {
             else b.set_exp(i, static_cast<T_scal>(maximum));
             cnt = 0;
             }
-            maximum = std::max(maximum, a[i])
+            maximum = std::max(maximum, a[i]);
             cnt++;
         }
         for(int i = 0; i < a.m; i++) {

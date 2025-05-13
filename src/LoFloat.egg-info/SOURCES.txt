@@ -1,0 +1,8 @@
+pybind_instantiations.cpp
+setup.py
+LoFloat.egg-info/PKG-INFO
+LoFloat.egg-info/SOURCES.txt
+LoFloat.egg-info/dependency_links.txt
+LoFloat.egg-info/not-zip-safe
+LoFloat.egg-info/requires.txt
+LoFloat.egg-info/top_level.txt

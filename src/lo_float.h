@@ -198,9 +198,9 @@ namespace lo_float_internal {
         using UnderlyingFloat = AOpType<get_mantissa_bits_v<Derived>>;
         
         
-        __attribute__((always_inline)) Derived operator-() const {
+         __attribute__((always_inline)) Derived operator-() const {
             //check spl case of -0 for nan
-            if (rep_ == 0 && Derived::IsNaNFunctor((get_bitwidth_v<Derived> - 1))) {
+            if (rep_ == 0 && Derived::IsNaNFunctor((1 << (get_bitwidth_v<Derived> - 1)))) {
                 return FromRep(0);
             }
             if (get_signedness_v<Derived> == Signedness::Signed) {
@@ -219,23 +219,23 @@ namespace lo_float_internal {
             }
         }
 
-        __attribute__((always_inline)) inline  Derived
+         __attribute__((always_inline)) inline  Derived
         operator+(const Derived& other) const {
             return Derived{UnderlyingFloat{derived()} + UnderlyingFloat{other}};
         }
-        __attribute__((always_inline)) inline  Derived
+         __attribute__((always_inline)) inline  Derived
         operator=(const Derived& other) const {
             return Derived{UnderlyingFloat{other}};
         }
-        __attribute__((always_inline)) inline  Derived
+         __attribute__((always_inline)) inline  Derived
         operator-(const Derived& other) const {
             return Derived{UnderlyingFloat{derived()} - UnderlyingFloat{other}};
         }
-        __attribute__((always_inline)) inline  Derived
+         __attribute__((always_inline)) inline  Derived
         operator*(const Derived& other) const {
             return Derived{UnderlyingFloat{derived()} * UnderlyingFloat{other}};
         }
-        __attribute__((always_inline)) inline  Derived
+         __attribute__((always_inline)) inline  Derived
         operator/(const Derived& other) const {
             #ifdef ENABLE_EXCEPT
             if (!other) {
@@ -267,46 +267,46 @@ namespace lo_float_internal {
         }
 
         template<typename T>
-        __attribute__((always_inline)) inline  bool operator<(
+         __attribute__((always_inline)) inline  bool operator<(
             const T& other) const {
             return Compare(derived(), other) == Ordering::kLess;
         }
 
         template<typename T>
-        __attribute__((always_inline)) inline  bool operator<=(
+         __attribute__((always_inline)) inline  bool operator<=(
             const T& other) const {
             return Compare(derived(), other) <= Ordering::kEquivalent;
         }
 
         template<typename T>
-        __attribute__((always_inline)) inline  bool operator>(
+         __attribute__((always_inline)) inline  bool operator>(
             const T& other) const {
             return Compare(derived(), other) == Ordering::kGreater;
         }
 
         template<typename T>
-        __attribute__((always_inline)) inline  bool operator>=(
+         __attribute__((always_inline)) inline  bool operator>=(
             const T& other) const {
             auto ordering = Compare(derived(), other);
             return ordering == kGreater || ordering == kEquivalent;
         }
         
-        __attribute__((always_inline)) inline  Derived& operator+=(
+         __attribute__((always_inline)) inline  Derived& operator+=(
             const Derived& other) {
             derived() = derived() + other;
             return derived();
         }
-        __attribute__((always_inline)) inline  Derived& operator-=(
+         __attribute__((always_inline)) inline  Derived& operator-=(
             const Derived& other) {
             derived() = derived() - other;
             return derived();
         }
-        __attribute__((always_inline)) inline  Derived& operator*=(
+         __attribute__((always_inline)) inline  Derived& operator*=(
             const Derived& other) {
             derived() = derived() * other;
             return derived();
         }
-        __attribute__((always_inline)) inline  Derived& operator/=(
+         __attribute__((always_inline)) inline  Derived& operator/=(
             const Derived& other) {
             #ifdef ENABLE_EXCEPT
             if constexpr (!other) {
@@ -328,7 +328,7 @@ namespace lo_float_internal {
         using Signed_type = typename std::make_signed<UnderlyingType>::type;
 
         // Helper for compare:
-        static __attribute__((always_inline)) inline  std::pair<UnderlyingType, UnderlyingType>
+        static  __attribute__((always_inline)) inline std::pair<UnderlyingType, UnderlyingType>
         SignAndMagnitude(Derived x) {
             const UnderlyingType x_abs_bits =
                 std::bit_cast<UnderlyingType>(abs(x));
@@ -337,14 +337,14 @@ namespace lo_float_internal {
             return {x_sign, x_abs_bits};
         }
 
-        static __attribute__((always_inline)) inline  Signed_type
+        static  __attribute__((always_inline)) inline  Signed_type
         SignAndMagnitudeToTwosComplement(UnderlyingType sign, UnderlyingType magnitude) {
             return magnitude ^ (static_cast<Signed_type>(sign) < 0 ? -1 : 0);
         }
 
         // Compare function. For signed floats tak eTwos complement path. For unsigned just compare represntations
         template<typename T>
-        __attribute__((always_inline)) inline  friend constexpr Ordering Compare(
+         __attribute__((always_inline)) inline  friend constexpr Ordering Compare(
             const Derived& lhs, const T& rhs) {
             if (isnan(lhs) || isnan(rhs)) {
                 return kUnordered;
@@ -386,7 +386,7 @@ namespace lo_float_internal {
         using SType = typename std::make_signed<UType>::type;
 
 
-        static __attribute__((always_inline)) inline  SType
+        static  __attribute__((always_inline)) inline  SType
         SignAndMagnitudeToTwosComplement(UType sign, UType magnitude) {
                 return magnitude ^ (static_cast<SType>(sign << Fp.Len) < 0 ? -1 : 0);
         }
@@ -628,7 +628,7 @@ namespace lo_float_internal {
     constexpr FloatingPointParams param_float8_ieee_p(
         8, //totoal bitwidth
         p - 1, // mantissa bits
-        (1 << (8 - p)) - 1,  //bias
+        (1 << (7 - p)),  //bias
         round_mode,  // rounding mode
         Inf_Behaviors::Extended,  //No infinity
         NaN_Behaviors::QuietNaN,    //NaN behavior
@@ -1174,6 +1174,7 @@ struct Traits<float> : public TraitsBase<float> {
   static constexpr int kExponentBits = 8;
   static constexpr int kMantissaBits = 23;
   static constexpr int kExponentBias = (1 << (kExponentBits - 1)) - 1;
+  static constexpr BitsType kMantissaMask = (BitsType{1} << 23) - 1;
 };
 
 template <>
@@ -1183,6 +1184,7 @@ struct Traits<double> : public TraitsBase<double> {
   static constexpr int kExponentBits = 11;
   static constexpr int kMantissaBits = 52;
   static constexpr int kExponentBias = (1 << (kExponentBits - 1)) - 1;
+  static constexpr BitsType kMantissaMask = (BitsType{1} << 52) - 1;
 };
 
 
@@ -1300,7 +1302,8 @@ template <typename Bits>
 inline Bits RoundBitsTowardsZero(Bits bits, int roundoff) {
     // Round towards zero by just truncating the bits
     //in bits FFF...FLRTT....T RTT....T needs to be rounded off, so just set  RTT..T to be 0
-    auto mask = ~((Bits{1} << roundoff) - 1);
+    auto mask = ~((Bits{1} << (roundoff)) - 1);
+
     return bits & mask;
 }
 
@@ -1405,9 +1408,10 @@ struct ConvertImpl<From, To,
   static  inline To run(const From& from, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven) {
     // Shift bits to destination type, without sign bit.
 
-    const bool from_sign_bit = (get_signedness_v<From> == Signedness::Unsigned ||
-         (sizeof(ToBits) == 1 && std::abs(from) == From{})) ? false :
+    const bool from_sign_bit = (get_signedness_v<From> == Signedness::Unsigned) ? false :
         std::bit_cast<FromBits>(from) >> (kFromBits - 1);
+    
+    
 
     
     if(get_signedness_v<To> == Signedness::Unsigned && from_sign_bit) {
@@ -1451,8 +1455,10 @@ struct ConvertImpl<From, To,
     }
 
     
-
+    
     const int biased_from_exponent = from_bits >> kFromMantissaBits;  //check if number is subnormal
+
+    
 
 
     // `To` supports more exponents near zero which means that some subnormal
@@ -1540,35 +1546,47 @@ struct ConvertImpl<From, To,
     // `To` supports fewer exponents near zero which means that some values in
     // `From` may become subnormal.
     
-    
+    // Enter this case for round from double to fp8
     if constexpr (std::numeric_limits<To>::min_exponent >
                   std::numeric_limits<From>::min_exponent) {
       const int unbiased_exponent = biased_from_exponent - kFromExponentBias;
+
       
       const int biased_to_exponent = unbiased_exponent + kToExponentBias;
-
+    
+    
 
       // Subnormals and zero.
       if (biased_to_exponent <= 0) {
         // Round and shift mantissa down.
-        FromBits from_has_leading_one = (biased_from_exponent > 0 ? 1 : 0);
-        const int exponent_shift =
-            -kDigitShift - (biased_to_exponent - 1);
+        //unbiased exp = -8
+        //biased_to_exp = -8 + 8 = 0 
+        //kdigitShft = 3 - 52 = -49
+
+        const FromBits from_has_leading_one = (biased_from_exponent > 0) ? 1 : 0;
+        int exponent_shift =
+        -kDigitShift - biased_to_exponent + from_has_leading_one;
+        //exp_shift = 49 + 1 = 50
         // Insert the implicit leading 1 bit on the mantissa for normalized
         // inputs.
+        //std::cout << std::hex << "from bits: " << from_bits << std::endl;
         FromBits rounded_from_bits =
             (from_bits & FromTraits::kMantissaMask) |
-            (from_has_leading_one << kFromMantissaBits);
+             (from_has_leading_one << (kFromMantissaBits));
+         //   std::cout << std::dec << "kfromm bits: " << kFromMantissaBits << std::endl;
+       // std::cout << std::hex << "from bits: " << rounded_from_bits << std::endl;
         ToBits bits = 0;
         // To avoid UB, limit rounding and shifting to the full mantissa plus
         // leading 1.
-    
+        
+        //enter this case for rounding 1.95e-3
+        
         if (exponent_shift <= kFromMantissaBits + 1) {
             // NOTE: we need to round again from the original from_bits,
             // otherwise the lower precision bits may already be lost.  There is
             // an edge-case where rounding to a normalized value would normally
             // round down, but for a subnormal, we need to round up.
-         
+
             switch (round_mode) {
                 case Rounding_Mode::RoundToNearestOdd:
                   rounded_from_bits = RoundBitsToNearestOdd(rounded_from_bits, exponent_shift);
@@ -1607,12 +1625,17 @@ struct ConvertImpl<From, To,
                     rounded_from_bits = RoundBitsToNearestEven(rounded_from_bits, exponent_shift);
               }
 
-              
-              
+
           bits = (rounded_from_bits >> exponent_shift);
+
+          
           
         } else {
-            //else we are zero anyway, so deal with teh stoch round and round up, etc cases
+            //else we are zero anyway, so deal with teh stoch round and round up, etc cases.
+            //may need to cast to a wider type for stochastic rounding
+            // << "exp_shift: " << exponent_shift << std::endl;
+            unsigned long long widened_bits = (unsigned long long)(rounded_from_bits);
+            //std::cout << std::hex << "widened bits: " << widened_bits << std::endl;
             switch(round_mode) {
                 
                 case Rounding_Mode::RoundAwayFromZero :
@@ -1627,33 +1650,35 @@ struct ConvertImpl<From, To,
                     bits = (rounded_from_bits);
                     break;
                 case Rounding_Mode::RoundDown :
-                    rounded_from_bits =((rounded_from_bits) &&  from_sign_bit > 0 ? 1 : 0);
+                    rounded_from_bits = ((rounded_from_bits) &&  from_sign_bit > 0 ? 1 : 0);
                     bits = (rounded_from_bits);
                     break;
                 case Rounding_Mode::StochasticRoundingA :
-                    rounded_from_bits = Stochastic_Round_A(rounded_from_bits, exponent_shift, get_stochastic_length_v<To>);
-                    bits = (rounded_from_bits >> exponent_shift);
+                    widened_bits = Stochastic_Round_A(widened_bits, exponent_shift, get_stochastic_length_v<To>);
+                    bits = (widened_bits >> (exponent_shift));
                     break;
                 case Rounding_Mode::StochasticRoundingB :
-                    rounded_from_bits = Stochastic_Round_B(rounded_from_bits, exponent_shift, get_stochastic_length_v<To>);
-                    bits = (rounded_from_bits >> exponent_shift);
+                    widened_bits = Stochastic_Round_B(widened_bits, exponent_shift, get_stochastic_length_v<To>);
+                   // std::cout << std::hex << "widened bits: " << widened_bits << std::endl;
+                    bits = (widened_bits >> exponent_shift);
                     break;
                 case Rounding_Mode::StochasticRoundingC :
-                    rounded_from_bits = Stochastic_Round_C(rounded_from_bits, exponent_shift, get_stochastic_length_v<To>);
-                    bits = (rounded_from_bits >> exponent_shift);
+                    widened_bits = Stochastic_Round_C(widened_bits, exponent_shift, get_stochastic_length_v<To>);
+                    bits = (widened_bits >> exponent_shift);
                     break;
                 case Rounding_Mode::True_StochasticRounding :
-                    rounded_from_bits = True_Stochastic_Round(rounded_from_bits, exponent_shift);
-                    bits = (rounded_from_bits >> exponent_shift);
+                    widened_bits = True_Stochastic_Round(widened_bits, exponent_shift);
+                    bits = (widened_bits >> exponent_shift);
                     break;
                 case Rounding_Mode::ProbabilisticRounding :
-                    rounded_from_bits = Probabilistic_Round(rounded_from_bits, exponent_shift);
-                    bits = (rounded_from_bits >> exponent_shift);
+                    widened_bits = Probabilistic_Round(widened_bits, exponent_shift);
+                    bits = (widened_bits >> exponent_shift);
                     break;
             }
         }
         // Insert sign and return.
         To to = std::bit_cast<To>(bits);
+
     
         return from_sign_bit ? -to : to;
       }
@@ -1661,6 +1686,7 @@ struct ConvertImpl<From, To,
 
     // Round the mantissa if it is shrinking.
     WideBits rounded_from_bits = from_bits;
+
     if constexpr (kDigitShift < 0) {
         
         switch (round_mode) {
@@ -1708,10 +1734,9 @@ struct ConvertImpl<From, To,
       
     }
 
-    // Re-bias the exponent.
-    if (biased_from_exponent != 0) {          
-        rounded_from_bits += kExponentOffset << kFromMantissaBits;
-    }
+
+    rounded_from_bits += static_cast<WideBits>(kExponentOffset)
+                         << kFromMantissaBits;
 
     ToBits bits;
     // Check for overflows by aligning the significands. We always align the
