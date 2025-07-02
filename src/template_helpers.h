@@ -162,6 +162,8 @@ template <class T>
 inline constexpr int get_bias_v = get_bias<T>::value;
 
 
+
+
 // pointers to NaN and Inf checkers 
 
 template <class T, class = void>

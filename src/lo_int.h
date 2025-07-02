@@ -1,6 +1,14 @@
 #ifndef LO_FLOAT_INTN_H_
 #define LO_FLOAT_INTN_H_
 
+/*
+  Fixed version that preserves original namespace layout and relies on an
+  externally‑defined enum class `Signedness` (e.g. in "fp_tools.hpp").
+  The implementation supports arbitrary‑bit signed and unsigned integers
+  (1 – 128 bits) with proper two's‑complement behaviour, masking on every
+  operation, and full constexpr friendliness.
+*/
+
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -8,118 +16,206 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
-#include "fp_tools.hpp" 
+
+#include "fp_tools.hpp"  // provides Signedness and any helper utilities
 
 namespace lo_float {
 
-/* ------------------------------------------------------------------ *
- *  Helper: pick the narrowest unsigned host type that fits LEN bits  *
- * ------------------------------------------------------------------ */
-template<int LEN>
+
+//---------------------------------------------------------------------------//
+//  Implementation‑detail helpers
+//---------------------------------------------------------------------------//
+namespace lo_float_internal {
+
+template <typename T>
+constexpr inline T bit_mask(int bits) {
+  return bits == int(sizeof(T) * 8) ? T(~T(0)) : (T(1) << bits) - 1;
+}
+
+template <typename T>
+constexpr inline T mask_to_bits(T x, int bits) {
+  return x & bit_mask<T>(bits);
+}
+
+// -----------------------------------------------------------------------------
+//  Type‑level map from bit‑length → storage type.
+// -----------------------------------------------------------------------------
+template <int len>
 struct get_unsigned_type {
-  static_assert(LEN >= 1 && LEN <= 64, "LEN must be 1-64");
-  using type = std::conditional_t<
-      (LEN <= 8),  uint8_t,
-      std::conditional_t<
-          (LEN <= 16), uint16_t,
-          std::conditional_t<
-              (LEN <= 32), uint32_t,
-              uint64_t>>>;
+  static_assert(len >= 1 && len <= 128, "len must be in [1,128]");
+  using type = std::conditional_t< (len <= 8),  uint8_t,
+                std::conditional_t< (len <= 16), uint16_t,
+                std::conditional_t< (len <= 32), uint32_t,
+                std::conditional_t< (len <= 64), uint64_t,
+#if defined(__SIZEOF_INT128__)
+                __uint128_t
+#else
+                void
+#endif
+                >>>>;
 };
-template<int LEN> using get_unsigned_type_t = typename get_unsigned_type<LEN>::type;
 
-template<int LEN, lo_float::Signedness Signedness>
+template<int len>
+using get_unsigned_type_t = typename get_unsigned_type<len>::type;
+
+template<int len>
+using get_signed_type_t = typename std::make_signed< get_unsigned_type_t<len> >::type;
+
+// -----------------------------------------------------------------------------
+//  i_n  – core arbitrary‑bit integer class (saturating variant)
+// -----------------------------------------------------------------------------
+
+template <int len, lo_float::Signedness Sign>
 class i_n {
-  using Storage = get_unsigned_type_t<LEN>;
-  static constexpr Storage MASK = (LEN == 64) ? Storage(-1) : ((Storage(1) << LEN) - 1);
+  static_assert(len >= 1 && len <= 128, "len must be in [1,128]");
+  using Storage = std::conditional_t< Sign == Signedness::Signed,
+                                     get_signed_type_t<len>,
+                                     get_unsigned_type_t<len> >;
+  static constexpr Storage STORAGE_MASK = bit_mask<Storage>(len);
 
-  Storage v_{0};
+  // Signed range expressed as 128‑bit integers (to avoid UB on shifts).
+  static constexpr __int128_t LOWEST_RAW  = (Sign == Signedness::Signed)
+                                            ? -(__int128_t(1) << (len-1))
+                                            : 0;
+  static constexpr __int128_t HIGHEST_RAW = (Sign == Signedness::Signed)
+                                            ? ((__int128_t(1) << (len-1)) - 1)
+                                            : ((__int128_t(1) << len) - 1);
 
-  static constexpr Storage mask(Storage x) { return x & MASK; }
-
-  static constexpr Storage sign_extend(Storage x) {
-    if constexpr (Signedness != lo_float::Signedness::Signed) return mask(x);              // unsigned view
-    else {
-      const Storage sign_bit = Storage(1) << (LEN - 1);
-      return mask(x) ^ sign_bit ? (mask(x) | ~MASK) : mask(x);
+  // Sign‑extend masked Storage to full signed 128‑bit value.
+  static constexpr __int128_t sign_extend(Storage x) noexcept {
+    if constexpr (Sign == Signedness::Signed) {
+      const Storage sign_bit = Storage(1) << (len - 1);
+      Storage masked = mask_to_bits(x, len);
+      return (masked & sign_bit) ? (__int128_t(masked) | ~__int128_t(STORAGE_MASK))
+                                 : __int128_t(masked);
+    } else {
+      return __int128_t(mask_to_bits(x, len));
     }
   }
 
-  constexpr Storage int_value() const { return sign_extend(v_); }
+  // Clamp raw 128‑bit integer into representable range, then mask.
+  static constexpr Storage clamp_to_storage(__int128_t raw) noexcept {
+    if (raw < LOWEST_RAW)  raw = LOWEST_RAW;
+    if (raw > HIGHEST_RAW) raw = HIGHEST_RAW;
+    return Storage(mask_to_bits(static_cast<Storage>(raw), len));
+  }
 
 public:
-  /* --------------------- ctors --------------------- */
-  constexpr i_n() = default;
-  constexpr i_n(const i_n&) noexcept = default;
-  constexpr i_n(i_n&&) noexcept = default;
-  constexpr i_n& operator=(const i_n&) = default;
+  // ------------------------------------------------------------------------
+  //  Ctors
+  // ------------------------------------------------------------------------
+  constexpr i_n() : v_(0) {}
+  constexpr i_n(const i_n&)            noexcept = default;
+  constexpr i_n(i_n&&)                 noexcept = default;
+  constexpr i_n& operator=(const i_n&) noexcept = default;
 
-  template<typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
-  explicit constexpr i_n(T x) : v_(mask(Storage(x))) {}
+  template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+  explicit constexpr i_n(T x) : v_(clamp_to_storage(__int128_t(x))) {}
 
-  /* ---------------- arithmetic / bit-wise ---------------- */
-  #define LOF_BINARY_OP(op)                                           \
-    constexpr i_n operator op(const i_n& o) const {                   \
-      return i_n(int_value() op o.int_value());                       \
+  // ------------------------------------------------------------------------
+  //  Limits helpers
+  // ------------------------------------------------------------------------
+  static constexpr i_n lowest()  noexcept { return i_n(LOWEST_RAW);  }
+  static constexpr i_n highest() noexcept { return i_n(HIGHEST_RAW); }
+
+  // ------------------------------------------------------------------------
+  //  Conversion helpers
+  // ------------------------------------------------------------------------
+  constexpr __int128_t   int_value() const noexcept { return sign_extend(v_); }
+  constexpr Storage      raw_storage() const noexcept { return v_; }
+
+  template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+  explicit constexpr operator T() const { return static_cast<T>(int_value()); }
+
+  constexpr inline operator int() const { return static_cast<int>(int_value()); }
+  explicit constexpr operator bool() const { return int_value() != 0; }
+  constexpr operator std::optional<int64_t>() const { return static_cast<int64_t>(int_value()); }
+
+  // ------------------------------------------------------------------------
+  //  Arithmetic (all saturating via ctor)
+  // ------------------------------------------------------------------------
+#define LOF_BIN_OP(op)                                                                       \
+  constexpr i_n operator op(const i_n& o) const noexcept {                                   \
+    return i_n( int_value() op o.int_value() );                                              \
+  }
+  LOF_BIN_OP(+)
+  LOF_BIN_OP(-)
+  LOF_BIN_OP(*)
+  LOF_BIN_OP(/)   // undefined behav. if div by 0 – same as built‑in ints
+  LOF_BIN_OP(%)
+#undef LOF_BIN_OP
+
+  // ------------------------------------------------------------------------
+  //  Bitwise (masking keeps value in range, saturation not needed)
+  // ------------------------------------------------------------------------
+#define LOF_BIT_OP(op)                                                                       \
+  constexpr i_n operator op(const i_n& o) const noexcept {                                   \
+    return i_n( Storage( mask_to_bits(v_ op o.v_, len) ) );                                  \
+  }
+  LOF_BIT_OP(&)
+  LOF_BIT_OP(|)
+  LOF_BIT_OP(^)
+#undef LOF_BIT_OP
+
+  constexpr i_n operator~() const noexcept { return i_n( Storage(~v_) ); }
+
+  // Shifts: left shift may overflow → saturate (unsigned) or wrap towards sign boundaries (signed)
+  constexpr i_n operator<<(int k) const noexcept {
+    if (k >= len) return highest();
+    return i_n( int_value() << k );
+  }
+  constexpr i_n operator>>(int k) const noexcept {
+    if constexpr (Sign == Signedness::Signed) {
+      return i_n( int_value() >> k ); // arithmetic shift already sign‑propagates
+    } else {
+      return i_n( Storage(v_ >> k) ); // logical shift, already in range
     }
-  LOF_BINARY_OP(+)
-  LOF_BINARY_OP(-)
-  LOF_BINARY_OP(*)
-  LOF_BINARY_OP(/)
-  LOF_BINARY_OP(%)
-  LOF_BINARY_OP(&)
-  LOF_BINARY_OP(|)
-  LOF_BINARY_OP(^)
-  #undef LOF_BINARY_OP
-
-  constexpr i_n operator~() const { return i_n(~int_value()); }
-  constexpr i_n operator<<(int k) const { return i_n(mask(v_ << k)); }
-  constexpr i_n operator>>(int k) const {
-    if constexpr (Signedness = lo_float::Signedness::Signed) return i_n(int_value() >> k);   // arithmetic shift
-    else                  return i_n(v_ >> k);            // logical shift
   }
 
-  /* --------------- comparisons --------------- */
-  #define LOF_CMP(op)                                                 \
-    constexpr bool operator op(const i_n& o) const {                  \
-      return int_value() op o.int_value();                            \
-    }
-  LOF_CMP(==) LOF_CMP(!=) LOF_CMP(<) LOF_CMP(>) LOF_CMP(<=) LOF_CMP(>=)
-  #undef LOF_CMP
-
-  /* --------------- compound ops --------------- */
-  #define LOF_COMPOUND(op)                                            \
-    constexpr i_n& operator op##=(const i_n& o) {                     \
-      *this = *this op o;                                             \
-      return *this;                                                   \
-    }
-  LOF_COMPOUND(+) LOF_COMPOUND(-) LOF_COMPOUND(*) LOF_COMPOUND(/)
-  LOF_COMPOUND(%) LOF_COMPOUND(&) LOF_COMPOUND(|) LOF_COMPOUND(^)
-  LOF_COMPOUND(<<) LOF_COMPOUND(>>)
-  #undef LOF_COMPOUND
-
-  /* --------------- increment / decrement --------------- */
-  constexpr i_n& operator++()              { return *this += i_n(1); }
-  constexpr i_n  operator++(int)           { i_n t=*this; ++*this; return t; }
-  constexpr i_n& operator--()              { return *this -= i_n(1); }
-  constexpr i_n  operator--(int)           { i_n t=*this; --*this; return t; }
-
-  /* --------------- cast helpers --------------- */
-  template<typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
-  explicit constexpr operator T() const    { return static_cast<T>(int_value()); }
-
-  constexpr operator std::optional<int64_t>() const {
-    return static_cast<int64_t>(int_value());
+  // ------------------------------------------------------------------------
+  //  Compound‑assignment
+  // ------------------------------------------------------------------------
+#define LOF_COMPOUND(op)                                                                     \
+  constexpr i_n& operator op##=(const i_n& o) noexcept {                                     \
+    *this = *this op o;                                                                      \
+    return *this;                                                                            \
   }
+  LOF_COMPOUND(+)
+  LOF_COMPOUND(-)
+  LOF_COMPOUND(*)
+  LOF_COMPOUND(/)
+  LOF_COMPOUND(%)
+  LOF_COMPOUND(&)
+  LOF_COMPOUND(|)
+  LOF_COMPOUND(^)
+  LOF_COMPOUND(<<)
+  LOF_COMPOUND(>>)
+#undef LOF_COMPOUND
 
-  /* --------------- limits --------------- */
-  static constexpr i_n lowest() {
-    if constexpr (Signedness = lo_float::Signedness::Signed) return i_n(Storage(1) << (LEN - 1)); // two's-complement min
-    else                  return i_n(0);
+  // ++ / --
+  constexpr i_n& operator++()    noexcept { return *this += i_n(1); }
+  constexpr i_n  operator++(int) noexcept { i_n t = *this; ++*this; return t; }
+  constexpr i_n& operator--()    noexcept { return *this -= i_n(1); }
+  constexpr i_n  operator--(int) noexcept { i_n t = *this; --*this; return t; }
+
+  // ------------------------------------------------------------------------
+  //  Comparisons (use extended values)
+  // ------------------------------------------------------------------------
+#define LOF_CMP(op)                                                                          \
+  constexpr bool operator op(const i_n& o) const noexcept {                                  \
+    return int_value() op o.int_value();                                                     \
   }
-  static constexpr i_n highest() { return i_n(MASK - (Signedness = lo_float::Signedness::Signed ? (Storage(1) << (LEN - 1)) : 0)); }
+  LOF_CMP(==)
+  LOF_CMP(!=)
+  LOF_CMP(<)
+  LOF_CMP(>)
+  LOF_CMP(<=)
+  LOF_CMP(>=)
+#undef LOF_CMP
 
-  /* --------------- misc --------------- */
+  // ------------------------------------------------------------------------
+  //  String / stream helpers
+  // ------------------------------------------------------------------------
   friend std::ostream& operator<<(std::ostream& os, const i_n& x) {
     os << static_cast<int64_t>(x.int_value());
     return os;
@@ -127,25 +223,47 @@ public:
   std::string ToString() const {
     std::ostringstream ss; ss << *this; return ss.str();
   }
+
+
+private:
+  Storage v_{};  // Always holds a masked representation (no sign‑extension)
 }; // class i_n
 
-/* -------------------- convenience aliases -------------------- */
-template<int LEN> using  int_n = i_n<LEN, true>;
-template<int LEN> using uint_n = i_n<LEN, false>;
+//---------------------------------------------------------------------------//
+//  Convenience aliases (retain original names)
+//---------------------------------------------------------------------------//
+
+template <int len>
+using  int_n = i_n<len, Signedness::Signed>;
+
+template <int len>
+using uint_n = i_n<len, Signedness::Unsigned>;
+
+
+} // namespace lo_float_internal
+
+template <int len>
+using int_n = lo_float_internal::i_n<len, Signedness::Signed>;
+
+template <int len>
+using uint_n = lo_float_internal::i_n<len, Signedness::Unsigned>;
+
 
 using  int4 = int_n<4>;
 using uint4 = uint_n<4>;
-using  int8 = int_n<8>;
-using uint8 = uint_n<8>;              // … and so on
 
-/* =============================================================== *
- *          numeric_limits specialisation (partial)                *
- * =============================================================== */
-namespace internal {
-template<int LEN, lo_float::Signedness signedness>
+
+
+
+//---------------------------------------------------------------------------//
+//  numeric_limits specialisations (kept in `lo_float::internal`)
+//---------------------------------------------------------------------------//
+namespace lo_float_internal {
+
+template <int len, Signedness Sign>
 struct intn_numeric_limits_base {
   static constexpr bool is_specialized = true;
-  static constexpr bool is_signed      = signedness == lo_float::Signedness::Signed;
+  static constexpr bool is_signed      = Sign == Signedness::Signed;
   static constexpr bool is_integer     = true;
   static constexpr bool is_exact       = true;
   static constexpr bool has_infinity   = false;
@@ -158,7 +276,7 @@ struct intn_numeric_limits_base {
   static constexpr bool is_bounded = true;
   static constexpr bool is_modulo  = !is_signed;
   static constexpr int  radix = 2;
-  static constexpr int  digits    = is_signed ? (LEN - 1) : LEN;
+  static constexpr int  digits    = is_signed ? (len - 1) : len;
   static constexpr int  digits10  = 0;
   static constexpr int  max_digits10 = 0;
   static constexpr int  min_exponent = 0, min_exponent10 = 0;
@@ -166,24 +284,30 @@ struct intn_numeric_limits_base {
   static constexpr bool traps = true;
   static constexpr bool tinyness_before = false;
 
-  static constexpr i_n<LEN, signedness> min()      noexcept { return i_n<LEN, signedness>::lowest(); }
-  static constexpr i_n<LEN, signedness> lowest()   noexcept { return i_n<LEN, signedness>::lowest(); }
-  static constexpr i_n<LEN, signedness> max()      noexcept { return i_n<LEN, signedness>::highest(); }
-  static constexpr i_n<LEN, signedness> epsilon()  noexcept { return i_n<LEN, signedness>(0); }
-  static constexpr i_n<LEN, signedness> round_error() noexcept { return i_n<LEN, signedness>(0); }
-  static constexpr i_n<LEN, signedness> infinity() noexcept { return i_n<LEN, signedness>(0); }
-  static constexpr i_n<LEN, signedness> quiet_NaN() noexcept { return i_n<LEN, signedness>(0); }
-  static constexpr i_n<LEN, signedness> signaling_NaN() noexcept { return i_n<LEN, signedness>(0); }
-  static constexpr i_n<LEN, signedness> denorm_min() noexcept { return i_n<LEN, signedness>(0); }
+  static constexpr lo_float_internal::i_n<len, Sign> min()      noexcept { return lo_float_internal::i_n<len, Sign>::lowest(); }
+  static constexpr lo_float_internal::i_n<len, Sign> lowest()   noexcept { return lo_float_internal::i_n<len, Sign>::lowest(); }
+  static constexpr lo_float_internal::i_n<len, Sign> max()      noexcept { return lo_float_internal::i_n<len, Sign>::highest(); }
+  static constexpr lo_float_internal::i_n<len, Sign> epsilon()  noexcept { return lo_float_internal::i_n<len, Sign>(0); }
+  static constexpr lo_float_internal::i_n<len, Sign> round_error() noexcept { return lo_float_internal::i_n<len, Sign>(0); }
+  static constexpr lo_float_internal::i_n<len, Sign> infinity() noexcept { return lo_float_internal::i_n<len, Sign>(0); }
+  static constexpr lo_float_internal::i_n<len, Sign> quiet_NaN() noexcept { return lo_float_internal::i_n<len, Sign>(0); }
+  static constexpr lo_float_internal::i_n<len, Sign> signaling_NaN() noexcept { return lo_float_internal::i_n<len, Sign>(0); }
+  static constexpr lo_float_internal::i_n<len, Sign> denorm_min() noexcept { return lo_float_internal::i_n<len, Sign>(0); }
 };
+
 } // namespace internal
+
 } // namespace lo_float
 
-/* -------- std::numeric_limits specialisations (all LEN) -------- */
+//---------------------------------------------------------------------------//
+//  std::numeric_limits specialisation (all bit‑lengths)
+//---------------------------------------------------------------------------//
 namespace std {
-template<int LEN, lo_float::Signedness Signed>
-struct numeric_limits<lo_float::i_n<LEN, Signed>>
-    : public lo_float::internal::intn_numeric_limits_base<LEN, Signed> {};
+
+template <int len, lo_float::Signedness Sign>
+struct numeric_limits<lo_float::lo_float_internal::i_n<len, Sign>>
+    : public lo_float::lo_float_internal::intn_numeric_limits_base<len, Sign> {};
+
 } // namespace std
 
 #endif /* LO_FLOAT_INTN_H_ */

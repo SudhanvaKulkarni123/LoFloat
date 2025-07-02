@@ -10,16 +10,27 @@ class get_pybind_include(object):
         import pybind11
         return pybind11.get_include()
 
+def get_torch_include_paths():
+    """Get the required PyTorch include directories."""
+    import torch
+    torch_path = torch.__path__[0]
+    return [
+        os.path.join(torch_path, "include"),
+        os.path.join(torch_path, "include", "torch", "csrc", "api", "include"),
+    ]
+
+
 ext_modules = [
     Extension(
         "LoFloat",  # name of the resulting Python module
-        ["pybind_instantiations.cpp"],  # path to your C++ source(s)
+        ["Torch_overload.cpp"],  # path to your C++ source(s)
         include_dirs=[
             # Path to pybind11 headers
-            get_pybind_include(),
+            str(get_pybind_include()),
+            *get_torch_include_paths(),
         ],
         language="c++",
-        extra_compile_args=["-O3", "-std=c++20"],
+        extra_compile_args=["-O3", "-std=c++20", "-w"],
     ),
 ]
 

@@ -2,9 +2,10 @@
 #include <iostream>
 #include <cstdlib>  // For rand()
 #include <ctime>    // For seeding random numbers
-#include "lo_int.h"  // Assuming this provides ml_dtypes::uint4 and int4
+#include "lo_int.h"  
 
 using namespace std;
+using namespace lo_float;
 
 int main() {
     srand(time(nullptr));  // Seed random number generator
@@ -14,12 +15,15 @@ int main() {
         uint8_t rand_u = rand() % 16;  // [0, 15]
         int8_t rand_s = (rand() % 16) - 8;  // [-8, 7] for int4
 
-        // Cast to uint4 and int4
-        ml_dtypes::uint4 a = static_cast<ml_dtypes::uint4>(rand_u);
-        ml_dtypes::uint4 b = static_cast<ml_dtypes::uint4>(rand() % 16);
+        // using int4 = lo_float::int_n<4>;
+        // using uint4 = lo_float::uint_n<4>;
 
-        ml_dtypes::int4 c = static_cast<ml_dtypes::int4>(rand_s);
-        ml_dtypes::int4 d = static_cast<ml_dtypes::int4>((rand() % 16) - 8);
+        // Cast to uint4 and int4
+        uint4 a = static_cast<uint4>(rand_u);
+        uint4 b = static_cast<uint4>(rand() % 16);
+
+        int4 c = static_cast<int4>(rand_s);
+        int4 d = static_cast<int4>((rand() % 16) - 8);
 
         // Print values
         cout << "Test " << i + 1 << ":\n";
@@ -30,12 +34,12 @@ int main() {
         cout << "  uint4  -> Add: " << static_cast<int>(a + b)
              << ", Sub: " << static_cast<int>(a - b)
              << ", Mul: " << static_cast<int>(a * b)
-             << ", Div: " << (b != 0 ? static_cast<int>(a / b) : -1) << "\n";
+             << ", Div: " << (b != (uint4)0 ? static_cast<int>(a / b) : -1) << "\n";
 
         cout << "  int4   -> Add: " << static_cast<int>(c + d)
              << ", Sub: " << static_cast<int>(c - d)
              << ", Mul: " << static_cast<int>(c * d)
-             << ", Div: " << (d != 0 ? static_cast<int>(c / d) : -1) << "\n";
+             << ", Div: " << (d != (int4)0 ? static_cast<int>(c / d) : -1) << "\n";
 
         cout << "--------------------------------\n";
     }

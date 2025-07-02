@@ -146,6 +146,105 @@ class MX_Matrix {
 
 };
 
+struct Double_MX_Matrix {
+    // public data members (unchanged)
+    idx     m;                 // rows
+    idx     n;                 // cols
+    idx     ld;                // leading dimension
+    idx     r;                 // group / tile size
+    T*      data;              // mantissas
+    T_scal* group_exp;         // per‑r group exponents
+    T_scal* panel_exp;         // per‑tile exponents
+
+    static constexpr Layout layout = L;
+    using scalar_type       = T;
+    using shared_exp_type   = T_scal;
+    using MX_matrix_type_tag = void;
+
+    // ---------------------------------------------------------------------
+    // ctor (name corrected)
+    constexpr Double_MX_Matrix(T*      data_,
+                               T_scal* group_exp_,
+                               T_scal* panel_exp_,
+                               idx     m_, idx n_, idx ld_, idx r_)
+        : m(m_), n(n_), ld(ld_), r(r_),
+          data(data_), group_exp(group_exp_), panel_exp(panel_exp_) {}
+
+    // ---------------------------------------------------------------------
+    // raw index helpers — keep row*ld + col style intact
+    constexpr inline idx linear(idx row, idx col) const {
+        return (L == Layout::ColMajor) ? col * ld + row
+                                       : row * ld + col;
+    }
+    constexpr inline idx group_idx(idx row, idx col) const {
+        return linear(row, col) / r;
+    }
+    constexpr inline idx panel_idx(idx row, idx col) const {
+        // number of panels in leading dimension (ceil division)
+        idx panels_ld = (ld + r - 1) / r;
+        return (L == Layout::ColMajor)
+                 ? (col / r) * panels_ld + (row / r)
+                 : (row / r) * panels_ld + (col / r);
+    }
+
+    // ---------------------------------------------------------------------
+    // element access
+    constexpr inline T& operator()(idx row, idx col) {
+        return data[linear(row, col)];
+    }
+    constexpr inline const T& operator()(idx row, idx col) const {
+        return data[linear(row, col)];
+    }
+
+    // exponent getters / setters (minimal logic change)
+    constexpr inline T_scal get_group_exp(idx row, idx col) const {
+        return group_exp[group_idx(row, col)];
+    }
+    constexpr inline T_scal get_panel_exp(idx row, idx col) const {
+        return panel_exp[panel_idx(row, col)];
+    }
+
+    template<typename V>
+    constexpr inline void set_group_exp(idx row, idx col, V v) {
+        group_exp[group_idx(row, col)] = static_cast<T_scal>(v);
+    }
+    template<typename V>
+    constexpr inline void set_panel_exp(idx row, idx col, V v) {
+        panel_exp[panel_idx(row, col)] = static_cast<T_scal>(v);
+    }
+
+    // ---------------------------------------------------------------------
+    // scaled value
+    template<typename Ret = float>
+    constexpr inline Ret scaled_val(idx row, idx col) const {
+        Ret base = static_cast<Ret>((*this)(row, col));
+        if constexpr (std::is_integral_v<T_scal>) {
+            int e = get_group_exp(row, col) + get_panel_exp(row, col);
+            return std::ldexp(base, e);  // base * 2^{e}
+        } else {
+            return base * static_cast<Ret>(get_group_exp(row, col))
+                       * static_cast<Ret>(get_panel_exp(row, col));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // diagnostics: NaN / Inf checks (unchanged loops)
+    bool isNaN() const {
+        for (idx row = 0; row < m; ++row)
+            for (idx col = 0; col < n; ++col)
+                if (std::isnan(static_cast<double>(scaled_val<double>(row, col))))
+                    return true;
+        return false;
+    }
+    bool isInf() const {
+        for (idx row = 0; row < m; ++row)
+            for (idx col = 0; col < n; ++col)
+                if (std::isinf(static_cast<double>(scaled_val<double>(row, col))))
+                    return true;
+        return false;
+    }
+};
+
 // Concept: matches if T has either matrix_type_tag or MX_matrix_type_tag
 template<typename T>
 concept MatrixType = requires (T t) {

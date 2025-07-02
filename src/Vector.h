@@ -29,6 +29,10 @@ class Vector {
     T& constexpr inline operator() const (idx i) {
         return data[i*stride];
     }   
+
+    idx constexpr inline len() {
+        return m;
+    }
     
 
 };
@@ -61,11 +65,11 @@ class MX_Vector {
         shared_exps[i/r1] = value;
     }
 
-    constexpr inline idx length() const {
+    constexpr inline idx len() const {
         return m;
     }
 
-    constexpr inline idx length_exp() const {
+    constexpr inline idx len_exp() const {
         return n;
     }
 
@@ -75,25 +79,7 @@ class MX_Vector {
 
 
 
-template<typename T, typename idx>
-T dot(const Vector<T, idx>& a, const Vector<T, idx>& b) {
-    assert(a.m == b.m);
-    T sum = 0;
-    for (idx i = 0; i < a.m; ++i) {
-        sum += a[i] * b[i];
-    }
-    return sum;
-}
 
-template<typename T, typename idx, typename T_scal, typename return_type = float>
-return_type dot(const MX_Vector<T, idx, T_scal>& a, const MX_Vector<T, idx, T_scal>& b) {
-    assert(a.m == b.m);
-    return_type sum = return_type{};
-    for (idx i = 0; i < a.r; ++i) {
-        sum += a.get_exp(i) * b.get_exp(i) * a[i] * b[i];
-    }
-    return sum;
-}
 
 template<typename T1, typename idx1, typename T2, typename idx2>
 void copy(const Vector<T1, idx1>& a, Vector<T2, idx2>& b) {
