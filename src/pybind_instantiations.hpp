@@ -9,7 +9,7 @@ namespace py = pybind11;
 #define SIGN_ABBREV(A) ((A) == Signedness::Signed ? "s" : "u")
 #define INF_ABBREV(A) \
     ((A) == Inf_Behaviors::Extended ? "e" : \
-     (A) == Inf_Behaviors::Saturating ? "f" : "t")  // 't' for Saturating (trapping-style)
+      "f" )  
 
 #define ROUND_MODE_ABBREV(A) \
     ((A) == Rounding_Mode::RoundToNearestEven ? "rne" : "x")

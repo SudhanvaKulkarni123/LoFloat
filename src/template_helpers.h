@@ -192,5 +192,12 @@ struct get_IsInf<T, std::void_t<decltype(T::IsInfFunctor)>> {
 template <class T>
 inline constexpr auto get_IsInf_v = get_IsInf<T>::value;
 
+
+
+
+
 }   //namespace lo_float_internal
+
+template<typename T>
+inline constexpr auto get_mantissa_bits_v = lo_float_internal::get_mantissa_bits_v<T>;
 }   //namespace lo_float

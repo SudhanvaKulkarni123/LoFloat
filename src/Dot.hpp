@@ -1,14 +1,12 @@
 /// @author Sudhanva Kulkarni
 /// Templates to generate mixed precision routines for dot prdt of vectors
-
-#include "Vector.h"
-#include "lo_float.h"
 #include "lo_float_sci.hpp"
-#include "lo_int.h"
 
 using namespace std;
+using namespace lo_float;
 
-namespace lo_float {
+
+namespace Lo_Gemm {
 
     template<Float FP, int block_size>
     struct int_accum_size {
@@ -16,26 +14,26 @@ namespace lo_float {
     };
 
 
-    template<Float Fp_in, Int idx, Float Fp_out, Float Fp_accum1, Float Fp_accum2, int block_size>
+
+
+    template<Float Fp_in1, Float Fp_in2, Int idx, Float Fp_out, Float Fp_accum_inner, Float Fp_accum_outer, int block_size>
     Fp_out dot(Vector<Fp_in, idx>& x, Vector<Fp_in, idx>& y) 
     {
         int n = x.len();
-        Fp_accum2 to_ret = Fp_accum2{};
+        Fp_accum_outer to_ret = Fp_accum_outer{};
         int num_blocks = n/block_size;
-        Fp_accum1 partial_sum = Fp_accum1{};
+        Fp_accum_inner partial_sum = Fp_accum_inner{};
         for(int blk = 0; blk < num_blocks; blk++) {
 
             for(int i = blk*block_size; i < std::min(n, (blk+1)*block_size); i++) {
 
-                if constexpr (is_float) {
-                    partial_sum += static_cast<Fp_accum1>(double(x[i])*double(y[i]));
-                }
+                    partial_sum += static_cast<Fp_accum_inner>(double(x[i])*double(y[i]));
                     
 
             }
 
-            to_ret +=  static_cast<Fp1_accum2>(partial_sum);
-            partial_sum = Fp_accum1{};
+            to_ret +=  static_cast<Fp_accum_outer>(partial_sum);
+            partial_sum = Fp_accum_inner{0.0f};
         }
 
         return to_ret;
@@ -43,74 +41,28 @@ namespace lo_float {
     }
 
 
-    template<Float Fp_in, Int idx, Float Fp_out, Int Int_accum1, Float Fp_accum2, int block_size>
-    Fp_out fast_dot(Vector<Fp_in, idx>& x, Vector<Fp_in, idx>& y)
-    {
-        int n = x.len();
-        Fp_accum2 to_ret = Fp_accum2{};
-        int num_blocks = n/block_size;
-        Fp_accum1 partial_sum = Fp_accum1{};
-        for(int blk = 0; blk < num_blocks; blk++) {
+    /* fast dot aligns the max exp with the MSB of the int accumulator amd the min exp with the LSB
+    */
 
-            for(int i = blk*block_size; i < std::min(n, (blk+1)*block_size); i++) {
-
-                partial_sum += static_cast<Fp_accum2>(double(x[i])*double(y[i]));
-
-            }
-
-            to_ret +=  static_cast<Fp1_accum1>(partial_sum);
-            partial_sum = Fp_accum1{};
-        }
-
-        return to_ret;
-
-
-    }
-
-    template<Float Fp_in, Int idx, Float Fp_out, Int Int_accum1, Float Fp_accum2, int block_size>
-    Fp_out slow_dot(Vector<Fp_in, idx>& x, Vector<Fp_in, idx>& y)
-    {
-        int n = x.len();
-        Fp_accum2 to_ret = Fp_accum2{};
-        int num_blocks = n/block_size;
-        Fp_accum1 partial_sum = Fp_accum1{};
-        for(int blk = 0; blk < num_blocks; blk++) {
-
-            for(int i = blk*block_size; i < std::min(n, (blk+1)*block_size); i++) {
-
-                partial_sum += static_cast<Fp_accum2>(double(x[i])*double(y[i]));
-
-            }
-
-            to_ret +=  static_cast<Fp1_accum1>(partial_sum);
-            partial_sum = Fp_accum1{};
-        }
-
-        return to_ret;
-
-
-    }
-
-
-    template<Float Fp_in, Int idx, Float Fp_out, Float Fp_accum2, int block_size>
+    template<Float Fp_in, Int idx, Float Fp_out, Float Fp_accum_outer, int block_size>
     Fp_out exact_dot(Vector<Fp_in, idx>& x, Vector<Fp_in, idx>& y)
     {   
-        using Int_accum1 = 
+        using Int_accum_inner = 
         int n = x.len();
-        Fp_accum2 to_ret = Fp_accum2{};
+        Fp_accum_outer to_ret = Fp_accum_outer{};
         int num_blocks = n/block_size;
-        Fp_accum1 partial_sum = Fp_accum1{};
-        using FP_accum1 = typename int_accum_size<Fp_in, block_size>::int_type;
+        Fp_accum_inner partial_sum = Fp_accum_inner{};
+        using FP_accum_inner = typename int_accum_size<Fp_in, block_size>::int_type;
         for(int blk = 0; blk < num_blocks; blk++) {
 
             for(int i = blk*block_size; i < std::min(n, (blk+1)*block_size); i++) {
 
-                partial_sum += static_cast<Fp_accum1>(double(x[i])*double(y[i]));
+                partial_sum += static_cast<Fp_accum_inner>(double(x[i])*double(y[i]));
 
             }
 
-            to_ret +=  static_cast<Fp_accum2>(partial_sum);
-            partial_sum = Fp_accum1{};
+            to_ret +=  static_cast<Fp_accum_outer>(partial_sum);
+            partial_sum = Fp_accum_inner{};
         }
 
         return to_ret;

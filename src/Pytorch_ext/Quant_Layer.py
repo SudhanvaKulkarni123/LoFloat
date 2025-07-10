@@ -1,57 +1,57 @@
 import torch
 import torch.nn as nn
 from torch.quantization.fake_quantize import FakeQuantize
+from torch.ao.quantization.quantization_mappings import get_default_static_quant_module_mappings
+# use this to get the mapping from high prec to low prec layers - mapping = get_default_static_quant_module_mappings()
 import numpy as np
+import os
+import sys
 
-module_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../src"))
+module_path = os.path.abspath(os.path.join(os.path.expanduser('~'), 'Documents', 'LoFloat', 'src'))
 sys.path.insert(0, module_path)
 
 import LoFloat
-from LoFloat import *
+from LoFloat import fake_quantize_tensor
+from LoFloat import real_quantize_tensor
+
+
 
 __all__ = ["Quantizer"]
 
-#need a function to return data type based on input params
-floatingpoint_list = {
-    "binary8p4sf": binary8p4sf,
-    
-}
-
-def get_dtype(bitwidth : int, mantissa_bits : int, signed : bool, extended : bool):
-    #construct string for dtype
-    dtpe_str = f"binary{bitwidth}p{mantissa_bits}"
-    if signed :
-        if extended:
-            dtpe_str += "se"
-        else:
-            dtpe_str += "sf"
-    else:
-        if extended:
-            dtpe_str += "ue"
-        else:
-            dtpe_str += "uf"
-
-    return floatingpoint_list[dtpe_str]
-        
 
 
-def quantizer(bitwidth: int = 8, mantissa_bits: int = 4, bias: int = 0, signed: bool = True, extended: bool = False):
-    
 
-class LoFloatFakeQuant(FakeQuantize):
-    def forward(self, x, **kwargs):
-        self.scale = kwargs.get('scale', 1.0)
-        self.zero_point = kwargs.get('zero_point', 0)
-        self.quant_min = kwargs.get('quant_min', 0)
-        self.quant_max = kwargs.get('quant_max', 255)
-        x = (x / self.scale + self.zero_point).clamp(self.quant_min, self.quant_max).round()
-        x = (x - self.zero_point) * self.scale
-        x = torch.float32(kwargs.get('type_cast', torch.float32)(x))
+@torch.fx.wrap
+class LoFloatFakeQuant(nn.Module):
+    def __init__(self, scale, zero_point):
+        super().__init__()
+        self.scale = scale
+        self.zero_point = zero_point
+#k, p, signedness, saturating p3109<8, 4, ..>; <8, 5,...> <6, ...>
+# PyTorch -> fake_quantize -> [fake_quantize<8, 4>, fake_quantize<8, 5>]
+    def forward(self, x):
+        x = fake_quantize_tensor(x, self.scale, self.zero_point)
         return x
     
+    def backward(self, x):
+        return x
 
+@torch.fx.wrap
+class LoFloatRealQuant(nn.Module):
+    def __init__(self, scale, zero_point):
+        super().__init__()
+        self.scale = scale
+        self.zero_point = zero_point
 
-class CustomLinear(nn.Module):
-    def forward(self, x : Tensor, A: Tensor):
+    def forward(self, x):
+        x = real_quantize_tensor(x, self.scale, self.zero_point)
+        return x
+    
+    def backward(self, x):
+        return x
+
         
+QAT_mapping = {
+    LoFloatFakeQuant : LoFloatRealQuant
+}
 

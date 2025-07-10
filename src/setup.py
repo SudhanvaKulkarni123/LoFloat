@@ -4,6 +4,7 @@ import sys
 import setuptools
 import os
 
+#run file with python3 setup.py build_ext --inplace
 class get_pybind_include(object):
     """Helper class to determine the pybind11 include path."""
     def __str__(self):
@@ -14,6 +15,7 @@ def get_torch_include_paths():
     """Get the required PyTorch include directories."""
     import torch
     torch_path = torch.__path__[0]
+    print(torch_path)
     return [
         os.path.join(torch_path, "include"),
         os.path.join(torch_path, "include", "torch", "csrc", "api", "include"),
@@ -30,6 +32,7 @@ ext_modules = [
             *get_torch_include_paths(),
         ],
         language="c++",
+        # Add -mmacosx-version-min=10.12 for macOS target
         extra_compile_args=["-O3", "-std=c++20", "-w"],
     ),
 ]

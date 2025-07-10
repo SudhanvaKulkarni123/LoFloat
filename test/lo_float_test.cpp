@@ -4,14 +4,16 @@
 #include <stdlib.h>
 #include <cstdint>
 #include "lo_float.h"
-//#include "tlapack/plugins/lo_float_sci.hpp"
+#include "lo_float_sci.hpp"
 
+
+using namespace lo_float;
 
 int main() {
 
-    using fp4 = lo_float::float4_p<2, lo_float::RoundToNearestEven>;
-    using fp6 = lo_float::float6_p<3, lo_float::RoundToNearestEven>;
-    using fp8 = lo_float::float8_ieee_p<4, lo_float::RoundToNearestEven>;
+    using fp4 = float4_p<2>;
+    using fp6 = float6_p<3>;
+    using fp8 = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
 
 
     // Random number generation
@@ -32,12 +34,12 @@ int main() {
     std::cout << "Addition:\n";
     // Addition
     for(int i = 0;i < 10; i++) {
-        std::cout << " fp4:  " << static_cast<fp4>(r1) << " + " << static_cast<fp4>(r2) << " = " 
-        << static_cast<fp4>(r1) + static_cast<fp4>(r2) << "\n";
-        std::cout << " fp6:  " << static_cast<fp6>(r1) << " + " << static_cast<fp6>(r2) << " = " 
-                << static_cast<fp6>(r1) + static_cast<fp6>(r2) << "\n";
-        std::cout << " fp8:  " << static_cast<fp8>(r1) << " + " << static_cast<fp8>(r2) << " = " 
-                << static_cast<fp8>(r1) + static_cast<fp8>(r2) << "\n";
+        std::cout << " fp4:  " << (float)static_cast<fp4>(r1) << " + " << (float)static_cast<fp4>(r2) << " = " 
+        << (float)static_cast<fp4>(r1) + (float)static_cast<fp4>(r2) << "\n";
+        std::cout << " fp6:  " << (float)static_cast<fp6>(r1) << " + " << (float)static_cast<fp6>(r2) << " = " 
+                << (float)static_cast<fp6>(r1) + (float)static_cast<fp6>(r2) << "\n";
+        std::cout << " fp8:  " << (float)static_cast<fp8>(r1) << " + " << (float)static_cast<fp8>(r2) << " = " 
+                << (float)static_cast<fp8>(r1) + (float)static_cast<fp8>(r2) << "\n";
         std::cout << " fp32: " << r1 << " + " << r2 << " = " << r1 + r2 << "\n";
     }
 
@@ -45,51 +47,46 @@ int main() {
     // Multiplication
     std::cout << "\nMultiplication:\n";
     for(int i = 0;i < 10; i++) {
-    std::cout << " fp4:  " << static_cast<fp4>(r3) << " * " << static_cast<fp4>(r4) << " = " 
-              << static_cast<fp4>(r3) * static_cast<fp4>(r4) << "\n";
-    std::cout << " fp6:  " << static_cast<fp6>(r3) << " * " << static_cast<fp6>(r4) << " = " 
-              << static_cast<fp6>(r3) * static_cast<fp6>(r4) << "\n";
-    std::cout << " fp8:  " << static_cast<fp8>(r3) << " * " << static_cast<fp8>(r4) << " = " 
-              << static_cast<fp8>(r3) * static_cast<fp8>(r4) << "\n";
+    std::cout << " fp4:  " << (float)static_cast<fp4>(r3) << " * " << (float)static_cast<fp4>(r4) << " = " 
+              << (float)static_cast<fp4>(r3) * (float)static_cast<fp4>(r4) << "\n";
+    std::cout << " fp6:  " << (float)static_cast<fp6>(r3) << " * " << (float)static_cast<fp6>(r4) << " = " 
+              << (float)static_cast<fp6>(r3) * (float)static_cast<fp6>(r4) << "\n";
+    std::cout << " fp8:  " << (float)static_cast<fp8>(r3) << " * " << (float)static_cast<fp8>(r4) << " = " 
+              << (float)static_cast<fp8>(r3) * (float)(float)static_cast<fp8>(r4) << "\n";
     std::cout << " fp32: " << r3 << " * " << r4 << " = " << r3 * r4 << "\n";
     }
     // Division
     std::cout << "\nDivision:\n";
     for(int i = 0;i < 10; i++) {
-    std::cout << " fp4:  " << static_cast<fp4>(r1) << " / " << static_cast<fp4>(r3) << " = " 
-              << static_cast<fp4>(r1) / static_cast<fp4>(r3) << "\n";
-    std::cout << " fp6:  " << static_cast<fp6>(r1) << " / " << static_cast<fp6>(r3) << " = " 
-              << static_cast<fp6>(r1) / static_cast<fp6>(r3) << "\n";
-    std::cout << " fp8:  " << static_cast<fp8>(r1) << " / " << static_cast<fp8>(r3) << " = " 
-              << static_cast<fp8>(r1) / static_cast<fp8>(r3) << "\n";
+    std::cout << " fp4:  " << (float)(float)static_cast<fp4>(r1) << " / " << (float)(float)static_cast<fp4>(r3) << " = " 
+              << (float)((float)static_cast<fp4>(r1) /(float)static_cast<fp4>(r3)) << "\n";
+    std::cout << " fp6:  " << (float)(float)static_cast<fp6>(r1) << " / " << (float)static_cast<fp6>(r3) << " = " 
+              << (float)static_cast<fp6>(r1) / (float)static_cast<fp6>(r3) << "\n";
+    std::cout << " fp8:  " << (float)static_cast<fp8>(r1) << " / " << (float)static_cast<fp8>(r3) << " = " 
+              << (float)static_cast<fp8>(r1) / (float)static_cast<fp8>(r3) << "\n";
     std::cout << " fp32: " << r1 << " / " << r3 << " = " << r1 / r3 << "\n";
     }
 
     //Divide number by itself
     std::cout << "\nDivide number by itself:\n";
     for(int i = 0;i < 10; i++) {
-    std::cout << " fp4:  " << static_cast<fp4>(r1) << " / " << static_cast<fp4>(r1) << " = " 
-              << static_cast<fp4>(r1) / static_cast<fp4>(r1) << "\n";
-    std::cout << " fp6:  " << static_cast<fp6>(r1) << " / " << static_cast<fp6>(r1) << " = " 
-              << static_cast<fp6>(r1) / static_cast<fp6>(r1) << "\n";
-    std::cout << " fp8:  " << static_cast<fp8>(r1) << " / " << static_cast<fp8>(r3) << " = " 
-              << static_cast<fp8>(r1) / static_cast<fp8>(r1) << "\n";
+    std::cout << " fp4:  " << (float)static_cast<fp4>(r1) << " / " << (float)static_cast<fp4>(r1) << " = " 
+              << (float)static_cast<fp4>(r1) / (float)static_cast<fp4>(r1) << "\n";
+    std::cout << " fp6:  " << (float)static_cast<fp6>(r1) << " / " << (float)static_cast<fp6>(r1) << " = " 
+              << (float)static_cast<fp6>(r1) / (float)static_cast<fp6>(r1) << "\n";
+    std::cout << " fp8:  " << (float)static_cast<fp8>(r1) << " / " << (float)static_cast<fp8>(r3) << " = " 
+              << (float)static_cast<fp8>(r1) / (float)static_cast<fp8>(r1) << "\n";
     std::cout << " fp32: " << r1 << " / " << r1 << " = " << r1 / r1 << "\n";
     }
 
 
 
-    // Highest values
-    std::cout << "\nHighest values:\n";
-    std::cout << " Highest fp4: " << Eigen::NumTraits<fp4>::highest() << "\n";
-    std::cout << " Highest fp6: " << Eigen::NumTraits<fp6>::highest() << "\n";
-    std::cout << " Highest fp8: " << Eigen::NumTraits<fp8>::highest() << "\n";
-    std::cout << " Highest fp32: " << std::numeric_limits<float>::max() << "\n";
+
 
     std::cout << "generate fp8 numbers : \n";
 
     for(u_int8_t i = 0; i < 128;i++) {
-        std::cout << fp8::FromRep(i) << ",";
+        std::cout << (float)fp8::FromRep(i) << ",";
     }
 
 

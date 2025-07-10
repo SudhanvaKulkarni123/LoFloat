@@ -52,8 +52,6 @@
 namespace lo_float {
 
     // Concept to constrain to floating-point types
-template<typename T>
-concept Float = std::is_floating_point_v<T>;
 
 
 namespace lo_float_internal {
@@ -440,13 +438,12 @@ inline Bits Stochastic_Round_A(Bits bits, const int roundoff, const int len = 0)
   //Then we truncate the mantissa
   //auto len = 2;
   std::uniform_int_distribution<unsigned int> distribution(0, (1<< (len)) - 1);
-  unsigned int samp = distribution(mt); // Generate a random integer of length len, next get top "roundoff" bits
-  //if RTTTT != 0, add a coin flip to samp
-  Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
-  //samp += ((bottom_bits != 0) && (distribution(mt) % 2)) ? 1 : 0;
- 
-  Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len));
-  return (len == 0 || bottom_bits == 0) ? bits + (top_bits) : bits;
+  //auto len = 2;
+  int samp = distribution(mt); // Generate a random integer
+  Bits complement = (Bits{1} << (len)) - 1;
+  Bits to_add = static_cast<Bits>(samp & complement); 
+  Bits to_ret = bits + (to_add << (roundoff - len)); // Add random bits to the input bits
+  return to_ret;
 }
 
 template <typename Bits>
@@ -456,13 +453,14 @@ inline Bits Stochastic_Round_B(Bits bits, const int roundoff, const int len = 0)
   //Then we truncate the mantissa
   //auto len = 2;
   std::uniform_int_distribution<unsigned int> distribution(0, (1<< (len)) - 1);
-  unsigned int samp = distribution(mt); // Generate a random integer of length len, next get top "roundoff" bits
-  //if RTTTT != 0, add a coin flip to samp
-  Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
-  samp += ((bottom_bits != 0)) ? 1 : 0;
- 
-  Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len));
-  return (len == 0 || bottom_bits == 0) ? bits + (top_bits) : bits;
+  //auto len = 2;
+  int samp = distribution(mt); // Generate a random integer
+  Bits complement = (Bits{1} << (len)) - 1;
+  Bits to_add = static_cast<Bits>(samp & complement) + 1; 
+  const Bits lower = bits & ((Bits{1} << roundoff) - 1); // Get the lower bits to be rounded off
+  const bool sum_mask = lower > 0;
+  Bits to_ret = bits + (sum_mask ? (to_add << (roundoff - len)) : Bits{}); // Add random bits to the input bits
+  return to_ret;
 }
 
 template <typename Bits>
@@ -471,13 +469,14 @@ inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
   // corresponding to  RTT...T and adding the genned number.
   //Then we truncate the mantissa
   //auto len = 2;
-  std::uniform_int_distribution<unsigned int> distribution(0, (1<< (len - 1)) - 1);
-  unsigned int samp = distribution(mt); // Generate a random integer of length len, next get top "roundoff" bits
+  std::uniform_int_distribution<unsigned int> distribution(0, (1 << (len)) - 1);
+  int samp = distribution(mt); // Generate a random integer of length len, next get top "roundoff" bits
   //if RTTTT != 0, add a coin flip to samp
-  Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
-  samp += ((bottom_bits != 0) && (distribution(mt) % 2)) ? 1 : 0;
-  Bits top_bits = (static_cast<Bits>(samp) << (roundoff - len + 1)) ;
-  return (len == 0 || bottom_bits == 0) ? bits + (top_bits) : bits;
+  const unsigned int coin_bit = samp & 1;
+  unsigned int remaining_bits = samp >> 1; // Get the remaining bits after the coin flip
+  Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1); 
+  Bits top_bits =  static_cast<Bits>((remaining_bits + coin_bit) << (roundoff - len + 1)) ;
+  return (len == 0 || bottom_bits == 0) ? bits :  bits + (top_bits);
 }
 
 template <typename Bits>
@@ -695,9 +694,10 @@ inline Bits RoundTiesToAway(Bits bits, int roundoff) {
 
 
     public:
+
     
     using Base::Base;
-
+    
     static constexpr NaNChecker auto IsNaNFunctor = Fp.IsNaN;
 
     static constexpr InfChecker auto IsInfFunctor = Fp.IsInf;
@@ -721,7 +721,7 @@ inline Bits RoundTiesToAway(Bits bits, int roundoff) {
 
     //define FloatingPointParams for float8e4m3_fn
     struct OCP_F8E4M3_NaNChecker {
-        bool operator()(uint32_t bits) {
+        bool operator()(uint32_t bits) const {
             return bits == 0x000000FF;
         }
 
@@ -906,7 +906,7 @@ inline Bits RoundTiesToAway(Bits bits, int roundoff) {
     constexpr FloatingPointParams param_float6_p(
         6, //totoal bitwidth
         p - 1, // mantissa bits
-        (1 << (6 - p)),  //bias
+        (1 << (5 - p)),  //bias
         Inf_Behaviors::Saturating,  //No infinity
         NaN_Behaviors::QuietNaN,    //NaN behavior
         Signedness::Signed,         //It is signed
@@ -932,7 +932,7 @@ inline Bits RoundTiesToAway(Bits bits, int roundoff) {
     constexpr FloatingPointParams param_float4_p(
         4, //totoal bitwidth
         p - 1, // mantissa bits
-        (1 << (4 - p)),  //bias
+        (1 << (3 - p)),  //bias
         Inf_Behaviors::Saturating,  //No infinity
         NaN_Behaviors::QuietNaN,    //NaN behavior
         Signedness::Signed,         //It is signed
@@ -961,18 +961,18 @@ inline Bits RoundTiesToAway(Bits bits, int roundoff) {
     struct P3109_InfChecker {
         constexpr bool operator()(uint32_t bits) const {
             if constexpr (has_inf != Inf_Behaviors::Saturating) {
-                return bits == (is_signed == Signedness::Signed ? (1 << (k-1)) : (1 << k) - 2);
+                return (bits | (1 << (k-1))) == (is_signed == Signedness::Signed ? (1 << (k)) - 1 : (1 << k) - 2);
             } else {
                 return false; // No infinity for P3109
             }
         }
 
         uint32_t minNegInf() const {
-            return is_signed == Signedness::Signed ? (1 << (k-1)) : 0;
+            return ((is_signed == Signedness::Signed) ? ((1 << (k)) - 1) : 0);
         }  // -∞ => 0xFF800000
 
         uint32_t minPosInf() const {
-            return is_signed == Signedness::Signed ? (1 << (k-1)) : 0;
+            return (is_signed == Signedness::Signed) ? (1 << (k)) - 1 : (1 << (k)) - 2;
         }  // +∞ => 0x7F800000
     };
 
@@ -980,8 +980,8 @@ inline Bits RoundTiesToAway(Bits bits, int roundoff) {
     template<int k, int p, Signedness is_signed = Signedness::Signed, Inf_Behaviors has_inf = Inf_Behaviors::Saturating>
     constexpr FloatingPointParams param_float_p3109(
         k, //totoal bitwidth
-        p, // mantissa bits
-        (1 << (k - p)),  //bias
+        p - 1, // mantissa bits
+        (1 << (k - p - 1)),  //bias
         has_inf,  //No infinity
         NaN_Behaviors::QuietNaN,    //NaN behavior
         is_signed,         //It is signed
@@ -1626,6 +1626,7 @@ struct ConvertImpl<From, To,
                     bits = RoundBitsToNearestEven(bits, -kDigitShift);
             } 
            
+            //binary8p5x4 [fp8, fp8, fp8, fp8]
 
           bits >>= -kDigitShift;
         }
@@ -1933,10 +1934,25 @@ template <typename To, Rounding_Mode rm, int stoch_len>
 
 
 
+
     } //namespace lo_float_internal
 
     template<FloatingPointParams Fp>
     using Templated_Float = lo_float_internal::Templated_Float<Fp>;
+
+    template <class T>
+    struct is_lo_float {
+        static constexpr bool value = false;
+    };
+
+    template <FloatingPointParams Fp>
+    struct is_lo_float<Templated_Float<Fp>> {
+        static constexpr bool value = true;
+    };
+
+    template <typename T>
+    inline constexpr bool is_floating_point_v = is_lo_float<T>::value || std::is_floating_point_v<T>;
+
 
     template <typename in, typename out>
     constexpr inline out Project(in x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
@@ -1971,7 +1987,18 @@ template <typename To, Rounding_Mode rm, int stoch_len>
         return lo_float_internal::div<in1, in2, out>(x, y, rm, stoch_len);
     }
 
+
+
+    template<typename T>
+    concept Float = lo_float::is_floating_point_v<T>;
+
+    template<typename T>
+    concept Int = lo_float::is_integral_v<T>;
+
+  
 }   //namespace lo_float
+
+
 
 
 

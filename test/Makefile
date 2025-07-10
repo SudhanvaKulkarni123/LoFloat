@@ -13,6 +13,11 @@ INCLUDE_PATH += -I$(HOME)/Documents/LoFloat/test
 
 LLVM_FLAGS = -S -emit-llvm 
 
+ALL_EXEC = test_var_float test_lo_float test_lo_int test_expectation \
+		   test_probability test_exceptions test_unsigned test_ultra_low \
+		   test_rounding_modes test_small test_enum test_subnormal \
+		   test_compare test_compare_int test_recip
+
 
 
 VAR_FLOAT:
@@ -60,6 +65,9 @@ COMPARE_INT:
 RECIP:
 	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) recip_test.cpp -o test_recip
 
+DOT:
+	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) dot_test.cpp -o test_dot
+
 ALL: LO_FLOAT LO_INT EXPECTATION PROBABILITY EXCEPTIONS UNSIGNED ULTRA_LOW ROUNDING_MODES
 
 LO_FLOAT_LLVM:
@@ -105,5 +113,9 @@ COMPARE_FLOAT_LLVM:
 
 COMPARE_INT_LLVM:
 	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) compare_int_test.cpp -o compare_int_test.ll
+
+clean:
+	rm -rf *.ll *.dSYM 
+	rm -f $(ALL_EXEC)
 
 .PHONY: all clean

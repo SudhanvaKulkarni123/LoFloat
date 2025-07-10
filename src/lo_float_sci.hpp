@@ -18,12 +18,12 @@ namespace lo_float {
 template<Float T1, Float T2>
 struct exact_mult_type {
     using value = std::conditional< std::max((get_mantissa_bits_v<T1>, get_mantissa_bits_v<T2>)) < 8, float, double>;
-}
+};
 
 template<Float T1, Float T2>
 struct exact_add_type {
     using value = std::conditional< std::max((get_mantissa_bits_v<T1>, get_mantissa_bits_v<T2>)) < 7, float, double>;
-}
+};
 
 template <Float T1, Float T2>
 using exact_mult_type_v = typename exact_mult_type<T1, T2>::value;
@@ -45,10 +45,7 @@ inline std::istream& operator>>(std::istream& is, Templated_Float<Fp>& x)
 template <FloatingPointParams Fp>
 inline Templated_Float<Fp> ceil(Templated_Float<Fp> x) noexcept
 {
-    // If you prefer a compile-time version for small integer values,
-    // you can still call lo_float_internal::ConstexprCeil
-    // or just use std::ceil:
-    return Templated_Float<Fp>(lo_float_internal::ConstexprCeil(static_cast<double>(x)));
+    return Templated_Float<Fp>(ConstexprCeil(static_cast<double>(x)));
 }
 
 // 3) floor
@@ -57,7 +54,7 @@ inline Templated_Float<Fp> floor(Templated_Float<Fp> x) noexcept
 {
     // same trick: -ceil(-x)
     return Templated_Float<Fp>(
-        -lo_float_internal::ConstexprCeil(-static_cast<double>(x))
+        -ConstexprCeil(-static_cast<double>(x))
     );
 }
 
@@ -111,7 +108,7 @@ inline Templated_Float<Fp_out> fma(
     using y_type = Templated_Float<Fp_y>;
     using mult_type = exact_mult_type_v<x_type, y_type>;
     return static_cast<result_type>(
-        static_cast<accum_type>(static_cast<exact_mult_type>(x) * static_cast<exact_mult_type>(y)) +
+        static_cast<accum_type>(static_cast<mult_type>(x) * static_cast<mult_type>(y)) +
         static_cast<accum_type>(z)
     );
 
@@ -119,8 +116,8 @@ inline Templated_Float<Fp_out> fma(
 } 
 
 //10) FAA
-template <FloatingPointParams Fp_A, FloatingPointParams Fp_B, FloatingPointParams Fp_C, FloatingPointParams Fp_Acc>
-inline Templated_Float<Fp1> faa(
+template <FloatingPointParams Fp1, FloatingPointParams Fp2, FloatingPointParams Fp3, FloatingPointParams Fp_Acc>
+inline Templated_Float<Fp3> faa(
     Templated_Float<Fp1> x, Templated_Float<Fp2> y, Templated_Float<Fp3> z) noexcept
 {
     using accum_type = Templated_Float<Fp_Acc>;
@@ -129,6 +126,26 @@ inline Templated_Float<Fp1> faa(
         static_cast<accum_type>(x) + static_cast<accum_type>(y) + static_cast<accum_type>(z)
     );
 } 
+
+//11) FMA into fixed point
+
+
+    template<FloatingPointParams Fp>
+    inline constexpr auto func_get_mantissa_bits(Templated_Float<Fp>& x) {
+        return x.rep() & ((1 << get_mantissa_bits_v<Templated_Float<Fp>>) - 1);
+    }
+
+    template<FloatingPointParams Fp>
+    inline constexpr auto func_get_exponent_bits(Templated_Float<Fp>& x) {
+        return abs(x).rep() >> get_mantissa_bits_v<Templated_Float<Fp>>;
+    }
+
+    template<FloatingPointParams Fp>
+    inline constexpr bool func_get_sign_bit(Templated_Float<Fp>& x) {
+        return x < Templated_Float<Fp>(0.0f);
+    }
+
+
 
 } // namespace tlapack
 // namespace lo_float

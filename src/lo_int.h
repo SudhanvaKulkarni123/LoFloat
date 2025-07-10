@@ -22,9 +22,8 @@
 namespace lo_float {
 
 
-//---------------------------------------------------------------------------//
-//  Implementation‑detail helpers
-//---------------------------------------------------------------------------//
+
+
 namespace lo_float_internal {
 
 template <typename T>
@@ -297,6 +296,40 @@ struct intn_numeric_limits_base {
 
 } // namespace internal
 
+
+
+
+template<typename T>
+struct is_integral {
+  static constexpr bool val = false;
+};
+
+template<int len, Signedness sign>
+struct is_integral<lo_float_internal::i_n<len, sign>> {
+  static constexpr bool val = true;
+};
+
+template<typename T>
+inline constexpr bool is_integral_v = is_integral<T>::val || std::is_integral_v<T>;
+
+
+template<int len, Signedness sign>
+using i_n = lo_float_internal::i_n<len, sign>;
+
+
+template<typename T>
+struct get_type_len {
+  static constexpr int val = 0;
+};
+
+template<int N, Signedness sign>
+struct get_type_len<i_n<N, sign>> {
+  static constexpr int val = N;
+};
+
+template<typename T>
+inline constexpr int get_type_len_v = get_type_len<T>::val;
+
 } // namespace lo_float
 
 //---------------------------------------------------------------------------//
@@ -307,6 +340,9 @@ namespace std {
 template <int len, lo_float::Signedness Sign>
 struct numeric_limits<lo_float::lo_float_internal::i_n<len, Sign>>
     : public lo_float::lo_float_internal::intn_numeric_limits_base<len, Sign> {};
+
+
+
 
 } // namespace std
 

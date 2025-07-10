@@ -1,6 +1,7 @@
 #include "lo_float.h"
 #include "lo_int.h"
 #include <torch/torch.h>
+#include <torch/extension.h>
 #include <assert.h>
 #include <random>
 #include <tuple>
@@ -19,11 +20,12 @@ inline auto fake_quantize_tensor(const torch::Tensor& tensor, float scale, float
 
     // Create an empty tensor for the quantized output
     auto quantized_tensor = torch::empty_like(tensor, torch::kFloat32);
+    float* input_ptr = tensor.data_ptr<float>();
+    float* output_ptr = quantized_tensor.data_ptr<float>();
 
     #pragma omp parallel for
     for (int64_t i = 0; i < tensor.numel(); ++i) {
-        // Apply quantization
-        quantized_tensor[i] = static_cast<float>(static_cast<out_type>(std::round(tensor[i].item<float>() / scale) + zero_point));
+        output_ptr[i] = static_cast<float>(static_cast<out_type>(std::round(input_ptr[i] / scale + zero_point)));
     }
 
     return quantized_tensor;
@@ -94,6 +96,7 @@ inline auto dequantize_tensor(const torch::Tensor& tensor, float scale, float ze
     return dequantized_tensor;
 }
 
+
 #define BIND_QUANTIZATION_FUNCTIONS(k, p, sign, has_inf) \
     m.def("fake_quantize_tensor", \
           [](const torch::Tensor& t, float s, float zp) { \
@@ -126,7 +129,6 @@ PYBIND11_MODULE(LoFloat, m) {
     BIND_FLOAT(8, 4, Signedness::Signed, Inf_Behaviors::Saturating);
     BIND_FLOAT(8, 4, Signedness::Unsigned, Inf_Behaviors::Extended);
     BIND_FLOAT(8, 4, Signedness::Unsigned, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 5, Signedness::Signed, Inf_Behaviors::Extended);
     BIND_FLOAT(8, 5, Signedness::Signed, Inf_Behaviors::Saturating);
     BIND_FLOAT(8, 5, Signedness::Unsigned, Inf_Behaviors::Extended);
     BIND_FLOAT(8, 5, Signedness::Unsigned, Inf_Behaviors::Saturating);
@@ -134,13 +136,8 @@ PYBIND11_MODULE(LoFloat, m) {
     BIND_FLOAT(8, 6, Signedness::Signed, Inf_Behaviors::Saturating);
     BIND_FLOAT(8, 6, Signedness::Unsigned, Inf_Behaviors::Extended);
     BIND_FLOAT(8, 6, Signedness::Unsigned, Inf_Behaviors::Saturating);
-    BIND_QUANTIZATION_FUNCTIONS(8, 3, Signedness::Signed, Inf_Behaviors::Extended);
-    BIND_QUANTIZATION_FUNCTIONS(8, 3, Signedness::Signed, Inf_Behaviors::Saturating);
-    BIND_QUANTIZATION_FUNCTIONS(8, 3, Signedness::Unsigned, Inf_Behaviors::Extended);
-    BIND_QUANTIZATION_FUNCTIONS(8, 3, Signedness::Unsigned, Inf_Behaviors::Saturating);
-    BIND_QUANTIZATION_FUNCTIONS(8, 4, Signedness::Signed, Inf_Behaviors::Extended);
+
     BIND_QUANTIZATION_FUNCTIONS(8, 4, Signedness::Signed, Inf_Behaviors::Saturating);
-    BIND_QUANTIZATION_FUNCTIONS(8, 4, Signedness::Unsigned, Inf_Behaviors::Extended);
-    BIND_QUANTIZATION_FUNCTIONS(8, 4, Signedness::Unsigned, Inf_Behaviors::Saturating);
+
 }
 
