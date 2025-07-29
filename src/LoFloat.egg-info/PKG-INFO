@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: LoFloat
+Version: 0.0.1
+Summary: A module to simulate custom float and integer formats
+Author: Sudhanva Kulkarni
+Author-email: sudhanvakulkarni@berkeley.edu
+Requires-Python: >=3.7

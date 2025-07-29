@@ -51,10 +51,6 @@
 *.csv
 *~
 
-# Ignore any file in /test that has no '.' in its name
-/test/[!.]*   
-!/test/Makefile
-
 
 .DS_Store
 Thumbs.db

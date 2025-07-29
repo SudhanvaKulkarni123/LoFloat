@@ -43,7 +43,7 @@ struct IsNaN_f32 {
 // ---------------------------------------------------------------------------
 constexpr FloatingPointParams param_fp32_sr1(
     32, 23, 127,
-    Rounding_Mode::StochasticRounding,
+    Rounding_Mode::StochasticRoundingC,
     Inf_Behaviors::Extended,
     NaN_Behaviors::QuietNaN,
     Signedness::Signed,
@@ -64,7 +64,7 @@ constexpr FloatingPointParams param_fp32_rn(
 
 constexpr FloatingPointParams param_fp32_sr5(
     32, 23, 127,
-    Rounding_Mode::StochasticRounding,
+    Rounding_Mode::StochasticRoundingC,
     Inf_Behaviors::Extended,
     NaN_Behaviors::QuietNaN,
     Signedness::Signed,
@@ -75,7 +75,7 @@ constexpr FloatingPointParams param_fp32_sr5(
 
 constexpr FloatingPointParams param_fp32_sr10(
     32, 23, 127,
-    Rounding_Mode::StochasticRounding,  // a different rounding mode
+    Rounding_Mode::StochasticRoundingC,  // a different rounding mode
     Inf_Behaviors::Extended,
     NaN_Behaviors::QuietNaN,
     Signedness::Signed,

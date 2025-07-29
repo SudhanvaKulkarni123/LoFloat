@@ -1,6 +1,18 @@
+#pragma once
 #include <cstdint>
 
+using namespace lo_float;
+
 namespace Lo_Gemm { 
+
+template<typename T>
+struct range : std::pair<T, T> {
+    using std::pair<T, T>::pair; 
+};
+template<typename T>
+range(T, T) -> range<T>;
+
+
 enum Layout : uint8_t {
     ColMajor = 0,
     RowMajor = 1
@@ -10,6 +22,12 @@ enum MX_Layout : uint8_t {
     byColumn = 0,
     byRow = 1,
     byBlock = 2
+};
+
+enum Uplo : uint8_t {
+    Upper = 0,
+    Lower = 1, 
+    General = 2
 };
 
 struct MX_tuple {
