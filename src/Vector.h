@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include "lo_float.h"
+#include "layouts.h"
 #include <type_traits>
 
 
@@ -11,11 +12,10 @@ using namespace lo_float;
 
 namespace Lo_Gemm {
 
-template<Int idx>
-using range = std::pair<idx, idx>;
 
 
-template<Float T, Int idx>
+
+template<Float T, Int idx = int>
 class Vector {
     public :
     idx m;
@@ -39,7 +39,7 @@ class Vector {
 
 };
 
-template<Float T, Int idx, Float T_scal>
+template<Float T, Float T_scal, Int idx = int>
 class MX_Vector {
     public:
     idx m;  //length of data vector
@@ -114,17 +114,14 @@ void copy(const Vector<T1, idx>& a, MX_Vector<T2, idx2, T_scal>& b) {
     T1 maximum = T1{};
         for (int i = 0; i < a.m; ++i) {
            if(cnt == b.r) {
-            if(std::is_integral_v<T_scal>) b.set_exp(i, static_cast<T_scal>((maximum)));
-            else b.set_exp(i, static_cast<T_scal>(maximum));
-            cnt = 0;
+                b.set_exp(i, static_cast<T_scal>(maximum));
+                cnt = 0;
+                for(int j = 0; j < b.r; j++) {
+                    b[i+j] = static_cast<T2>((a[i+j] / b.get_exp(i)));
+                }
             }
             maximum = maximum > a[i] ? maximum : a[i];
             cnt++;
-        }
-        for(int i = 0; i < a.m; i++) {
-            if(std::is_integral_v<T_scal>) b[i] = static_cast<T2>(a[i] / b.get_exp(i));
-            else maximum = static_cast<T2>(a[i] / b.get_exp(i));
-
         }
         return;
 
@@ -134,9 +131,7 @@ template<Float T1, Int idx, Float T2, Int idx2, Float T_scal>
 void copy(const MX_Vector<T1, idx, T_scal>& a, Vector<T2, idx2>& b) {
     assert(a.m == b.m);
         for (int i = 0; i < a.m; ++i) {
-            if(std::is_integral_v<T_scal>) 
-                b[i] = static_cast<T2>(a[i] * a.get_exp(i));
-            else b[i] = static_cast<T2>(a[i] * a.get_exp(i));
+            b[i] = static_cast<T2>(a[i] * a.get_exp(i));
         }
         return;
 }
@@ -153,6 +148,30 @@ MX_Vector<T1, idx, T_scal> slice(const MX_Vector<T1, idx, T_scal>& a, range<idx>
     assert(range.first >= 0 && range.second <= a.m);
     
     return MX_Vector<T1, idx, T_scal>(a.data + range.first * a.stride, a.shared_exps + range.first * a.r, range.second - range.first, a.n - range.first * a.r, a.stride);
+}
+
+//converts normal vector<t1, idx1> to vector<T2, idx2> while simulating the effects of microscaling
+template<Float T1, Int idx1, Float T2, Int idx2, Float T_scal, Float T_buf>
+void fake_mxcopy(const Vector<T1, idx1>& a, Vector<T2, idx2>& b)
+{
+    assert(a.m == b.m);
+    int cnt = 0;
+    T_scal exp = T_scal{};
+    T1 maximum = T1{};
+        for (int i = 0; i < a.m; ++i) {
+           if(cnt == b.r) {
+            exp = static_cast<T_scal>(maximum);
+            for(int j = 0; j < b.r; j++) {
+                b[i+j] = static_cast<T2>(static_cast<T_buf>(a[i+j] / exp)) * static_cast<T2>(exp);
+            }
+            cnt = 0;
+            maximum = T1{};
+        }
+        maximum = maximum > abs(a[i]) ? maximum : abs(a[i]);
+        cnt++;
+    }
+        return;
+
 }
 
 

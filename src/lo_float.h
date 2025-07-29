@@ -29,8 +29,9 @@
 // #include "tlapack/base/scalar_type_traits.hpp"
 #include "fp_tools.hpp"     //structs and concepts to define Floating Point params
 #include "f_exceptions.hpp" //global env for exceptions
-#include "template_helpers.h"   //helper templataes
+
 #include "lo_int.h" //custom integer types
+#include "template_helpers.h"   //helper templataes
 
 #ifdef __has_include
 # if __has_include(<version>)
@@ -163,7 +164,7 @@ namespace lo_float_internal {
 
         template<int len, Signedness Sign>
         explicit lo_float_base(i_n<len, Sign> var_int)
-            : lo_float_base(ConvertFrom(var_int).rep(), ConstructFromRepTag{}) {}
+            : lo_float_base(ConvertFrom(static_cast<double>((int)var_int)).rep(), ConstructFromRepTag{}) {}
 
         // CRTP helpers
         constexpr const Derived& derived() const {
@@ -197,6 +198,15 @@ namespace lo_float_internal {
             }
             explicit operator float() const {
                 return ConvertTo<float>(derived());
+            }
+
+            explicit operator int() const {
+                return (int) (ConvertTo<double>(derived()));
+            }
+
+            template <int len, Signedness sign>
+            explicit operator i_n<len, sign>() const {
+                return (i_n<len, sign>) int(ConvertTo<double>(derived()));
             }
 
             explicit operator bool() const {
@@ -614,54 +624,7 @@ inline Bits RoundTiesToAway(Bits bits, int roundoff) {
                 }
             }
             
-            template<int len, lo_float::Signedness Sign, Rounding_Mode RMode = Rounding_Mode::RoundTowardsZero>
-            explicit operator i_n<len, Sign>() const {
-                //extract esp, mantissa and sign
-                const UType bits = this->rep();
-                const UType sign = Fp.is_signed == Signedness::Signed ?  bits & (1 << (Fp.bitwidth - 1)) : 0;
-                const UType mantissa = bits & ((1 << Fp.mantissa_bits) - 1);
-                const UType exponent = Fp.is_signed == Signedness::Signed ? 
-                        (bits >> Fp.mantissa_bits) & ((1 << (Fp.bitwidth - Fp.mantissa_bits - 1)) - 1) : (bits >> Fp.mantissa_bits) & ((1 << (Fp.bitwidth - Fp.mantissa_bits)) - 1);
-
-                const bool is_subnormal = exponent == 0;
-
-                if(!is_subnormal) {
-                    mantissa |= (1 << Fp.mantissa_bits); 
-                }
-
-                //now use the rounding functions with roundoff = Fp.mantissa_bits - exponent
-                const int roundoff = Fp.mantissa_bits - exponent - Fp.bias;
-                if (roundoff < 0) {
-                    //negative roundoff is good since it means the the number is an integer. We simply shift the mantissa left and cast the resulting bitstring to i_n
-
-                    return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, mantissa << -roundoff)) :  i_n<len, Sign>(mantissa << -roundoff);
-                } else if (roundoff > 0) {
-                    //add switch case to pick appropriate rounding function
-                    switch(RMode) {
-                        case Rounding_Mode::RoundTowardsZero:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, RoundBitsTowardsZero(mantissa, roundoff))) : i_n<len, Sign>(RoundBitsTowardsZero(mantissa, roundoff));
-                        case Rounding_Mode::RoundAwayFromZero:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, RoundBitsAwayFromZero(mantissa, roundoff))) : i_n<len, Sign>(RoundBitsAwayFromZero(mantissa, roundoff));
-                        case Rounding_Mode::RoundToNearestEven:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, RoundBitsToNearestEven(mantissa, roundoff))) : i_n<len, Sign>(RoundBitsToNearestEven(mantissa, roundoff));
-                        case Rounding_Mode::RoundToNearestOdd:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, RoundBitsToNearestOdd(mantissa, roundoff))) : i_n<len, Sign>(RoundBitsToNearestOdd(mantissa, roundoff));
-                        case Rounding_Mode::StochasticRoundingA:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, Stochastic_Round_A(mantissa, roundoff, Fp.stochastic_rounding_length))) : i_n<len, Sign>(Stochastic_Round_A(mantissa, roundoff, Fp.stochastic_rounding_length));
-                        case Rounding_Mode::StochasticRoundingB:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, Stochastic_Round_B(mantissa, roundoff, Fp.stochastic_rounding_length))) : i_n<len, Sign>(Stochastic_Round_B(mantissa, roundoff, Fp.stochastic_rounding_length));
-                        case Rounding_Mode::StochasticRoundingC:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, Stochastic_Round_C(mantissa, roundoff, Fp.stochastic_rounding_length))) : i_n<len, Sign>(Stochastic_Round_C(mantissa,
-                                                                 roundoff, Fp.stochastic_rounding_length));
-                        case Rounding_Mode::ProbabilisticRounding:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, Probabilistic_Round(mantissa, roundoff))) : i_n<len, Sign>(Probabilistic_Round(mantissa, roundoff));
-                        default:
-                            return Sign == Signedness::Signed ? i_n<len, Sign>(SignAndMagnitudeToTwosComplement(sign, RoundBitsTowardsZero(mantissa, roundoff))) : i_n<len, Sign>(RoundBitsTowardsZero(mantissa, roundoff));
-
-                }
-
-            }
-        }
+            
             
 
             
@@ -972,7 +935,7 @@ inline Bits RoundTiesToAway(Bits bits, int roundoff) {
         }  // -∞ => 0xFF800000
 
         uint32_t minPosInf() const {
-            return (is_signed == Signedness::Signed) ? (1 << (k)) - 1 : (1 << (k)) - 2;
+            return (is_signed == Signedness::Signed) ? (1 << (k-1)) - 1 : (1 << (k)) - 2;
         }  // +∞ => 0x7F800000
     };
 
@@ -1168,7 +1131,7 @@ struct numeric_limits_flexible {
               }
               static constexpr Templated_Float<Fp> epsilon() {
                 return Templated_Float<Fp>::FromRep(
-                  static_cast<Base_Type>(((-1 + kExponentBias) << kMantissaBits))
+                  static_cast<Base_Type>(1ULL << (kMantissaBits - 1))
                 );
               }
               static constexpr Templated_Float<Fp> round_error() {
@@ -1421,6 +1384,19 @@ struct TraitsBase {
   static constexpr int kExponentBias = std::numeric_limits<Float>::kExponentBias;
 };
 
+template<int len, Signedness sign>
+struct TraitsBase<i_n<len, sign>> {
+    using Int = i_n<len, sign>;
+    using BitsType = GetUnsignedInteger<sizeof(i_n<len, sign>)>;
+  static constexpr int kBits = sizeof(i_n<len, sign>) * CHAR_BIT;
+  static constexpr int kMantissaBits = sign == Signedness::Signed ? len - 1 : len;
+  static constexpr int kExponentBits = 0;
+  static constexpr BitsType kExponentMask = 0;
+  static constexpr BitsType kMantissaMask = (BitsType{1} << kMantissaBits) - 1;
+  static constexpr int kExponentBias = 0;
+
+};
+
 
 template <typename Float>
 struct Traits : public TraitsBase<Float> {};
@@ -1434,6 +1410,11 @@ struct Traits<Templated_Float<Fp>> : public TraitsBase<Templated_Float<Fp>> {
                                              ? Fp.bitwidth - Fp.mantissa_bits - 1
                                              : Fp.bitwidth - Fp.mantissa_bits;
     static constexpr int kExponentBias = Fp.bias;
+};
+
+template<int len, Signedness sign>
+struct Traits<i_n<len, sign>> : public TraitsBase<i_n<len, sign>> {
+    using Base = TraitsBase<i_n<len, sign>>;
 };
  
 template <>
@@ -1502,6 +1483,7 @@ struct ConvertImpl<From, To,
 
     const bool from_sign_bit = (get_signedness_v<From> == Signedness::Unsigned) ? false :
         std::bit_cast<FromBits>(from) >> (kFromBits - 1);
+
     
     
 
@@ -1633,6 +1615,7 @@ struct ConvertImpl<From, To,
         
         
         To to = std::bit_cast<To>(static_cast<ToBits>(bits));
+
         return from_sign_bit ? -to : to;
       }
     }
@@ -1769,7 +1752,7 @@ struct ConvertImpl<From, To,
                     break;
                 default :
                     // Round to nearest even.
-                    widened_bits = RoundBitsToNearestEven(widened_bits, exponent_shift);
+                    widened_bits =  0;
                     bits = (widened_bits >> exponent_shift);
                     break;
             }
@@ -1777,7 +1760,6 @@ struct ConvertImpl<From, To,
         // Insert sign and return.
         To to = std::bit_cast<To>(bits);
 
-    
         return from_sign_bit ? -to : to;
       }
     }
@@ -1860,7 +1842,6 @@ struct ConvertImpl<From, To,
                                  std::numeric_limits<To>::digits) <
                   std::make_pair(std::numeric_limits<From>::max_exponent,
                                  std::numeric_limits<From>::digits)) {
-
       if (rounded_from_bits > aligned_highest) {
         //entering this regione
         // Overflowed values map to highest or infinity depending on kSaturate.
@@ -1875,11 +1856,11 @@ struct ConvertImpl<From, To,
                              : std::numeric_limits<To>::max();
                              //: static_cast<To>(1.0);
         }
+        return to;
       }
     }
 
 
-    // Insert sign bit.
     return from_sign_bit ? -to : to;
   }
 };

@@ -1,7 +1,14 @@
+#pragma once
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+inline uint64_t rdtsc() {
+   uint64_t cycles;
+    asm volatile("mrs %0, cntvct_el0" : "=r" (cycles));
+    return cycles;
+}
 
 #if defined(__linux__)
 size_t get_cache_size(int level) {
@@ -41,6 +48,8 @@ size_t get_cache_line_size() {
 
 #elif defined(__APPLE__)
 #include <sys/sysctl.h>
+
+
 
 size_t get_cache_size(int level) {
     int mib[2];

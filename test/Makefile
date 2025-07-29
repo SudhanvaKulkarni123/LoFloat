@@ -3,7 +3,7 @@ CXX = g++
 
 CDBG += -w
 CXXFLAGS += $(CDBG) -v
-CXXFLAGS += -g -O0
+CXXFLAGS += -g -O3 
 
 
 INCLUDE_PATH += -I$(HOME)
@@ -47,6 +47,9 @@ ULTRA_LOW:
 ROUNDING_MODES:
 	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) test_rounding_modes.cpp -o test_rounding_modes
 
+FLOAT_INT:
+	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) test_float_to_int.cpp -o test_float_int
+
 SMALL:
 	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) small_rounding_test.cpp -o test_small
 
@@ -67,6 +70,9 @@ RECIP:
 
 DOT:
 	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) dot_test.cpp -o test_dot
+
+GEMM:
+	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) gemm_test.cpp -o test_gemm
 
 ALL: LO_FLOAT LO_INT EXPECTATION PROBABILITY EXCEPTIONS UNSIGNED ULTRA_LOW ROUNDING_MODES
 

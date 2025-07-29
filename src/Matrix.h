@@ -1,19 +1,22 @@
 /// @author Sudhanva Kulkarni
 /// Simplke implementation of Varying Layout dense matrix
-
+#include <algorithm>
 #include <concepts>
+#include <type_traits>
 #include <cassert>
+#include "lo_float.h"
 #include "layouts.h"
 
 
+
 using namespace std;
+using namespace lo_float;
 
-namespace lo_float {
+namespace Lo_Gemm {
 
-template<typename T>
-using range = std::pair<T, T>;
 
-template<typename T, typename idx, Layout L = ColMajor>
+
+template<Float T, Int idx = int, Layout L = ColMajor>
 class Matrix {
     public:
 
@@ -28,14 +31,25 @@ class Matrix {
     
     Matrix(T* data, idx m, idx n, idx ld) : data(data), m(m), n(n), ld(ld) {}
 
-    constexpr inline T& operator() const (idx row, idx col) {
-       return L == ColMajor ? data[col*ld + row] : data[row*ld + col];
+    inline T& operator()(idx row, idx col) const {
+        if constexpr (L == ColMajor)
+            return data[col * ld + row];
+        else
+            return data[row * ld + col];
+    }
+    
+    // Added for consistency and use in transpose function
+    constexpr inline idx get_idx(idx row, idx col) const {
+        if constexpr (L == ColMajor)
+            return col * ld + row;
+        else
+            return row * ld + col;
     }
 
     bool isNaN() const {
         for(int row = 0; row < m; row++) {
             for(int col = 0; col < n; col++) {
-                if(isnan((*this)(i,j))) return true;
+                if(isnan((*this)(row,col))) return true;
             }
         }
         return false;
@@ -44,7 +58,7 @@ class Matrix {
     bool isInf() const {
         for(int row = 0; row < m; row++) {
             for(int col = 0; col < n; col++) {
-                if(isinf((*this)(i,j))) return true;
+                if(isinf((*this)(row,col))) return true;
             }
         }
         return false;
@@ -60,7 +74,7 @@ class Matrix {
 
 };
 
-template<typename T, typename idx, typename T_scal , Layout L = ColMajor>
+template<Float T, Float T_scal , Int idx = int,Layout L = ColMajor>
 class MX_Matrix {
     public:
 
@@ -76,49 +90,61 @@ class MX_Matrix {
     using MX_matrix_type_tag = void;
 
     
-    MX_Matrix(T* data, T_scal* shared_exp, idx m, idx n, idx ld, idx r) : data(data), shared_exp(shared_exp), m(m), n(n), ld(ld), r(r) {}
+    MX_Matrix(T* data, T_scal* shared_exps, idx m, idx n, idx ld, idx r) : data(data), shared_exps(shared_exps), m(m), n(n), ld(ld), r(r) {}
 
     constexpr inline idx get_idx(idx row, idx col) const {
         if constexpr (L == ColMajor) return col*ld + row;
         else return row*ld + col;
     }
 
-    constexpr inline T& operator() const (idx row, idx col) {
-        return L == ColMajor ? data[col*ld + row] : data[row*ld + col];
+    inline T& operator() (idx row, idx col) const {
+        if constexpr (L == ColMajor)
+            return data[col*ld + row];
+        else
+            return data[row*ld + col];
     } 
 
-    constexpr inline T_scal get_exp(idx row, idx col) const {
+    inline const T_scal get_exp(idx row, idx col) const {
         if constexpr (L == Layout::ColMajor) {
-            return T_scal[(col*ld + row)/r];
+            return shared_exps[(col*ld + row)/r];
         } else {
-            return T_scal[(row*ld + col)/r];
+            return shared_exps[(row*ld + col)/r];
         }
     }
 
-    template<typename T>
-    constexpr inline void set_exp(idx row, idx col, T value) const {
+    // Added overload for linear indexing, used in transpose
+    inline const T_scal get_exp(idx linear_index) const {
+        return shared_exps[linear_index/r];
+    }
+
+
+    template<typename V>
+    constexpr inline void set_exp(idx row, idx col, V value) const {
 
         if constexpr (L == Layout::ColMajor) {
-            T_scal[(col*ld + row)/r] = std::is_integral_v<shared_exp_type> ? static_cast<shared_exp_type>(log2(value)) : static_cast<shared_exp_type>(value);
+            shared_exps[(col*ld + row)/r] = static_cast<shared_exp_type>(value);
         } else {
-            T_scal[(row*ld + col)/r] = std::is_integral_v<shared_exp_type> ? static_cast<shared_exp_type>(log2(value)) : static_cast<shared_exp_type>(value);
+            shared_exps[(row*ld + col)/r] = static_cast<shared_exp_type>(value);
         }
+    }
+
+    // Added overload for linear indexing, used in transpose
+    template<typename V>
+    constexpr inline void set_exp(idx linear_index, V value) const {
+        shared_exps[linear_index/r] = static_cast<shared_exp_type>(value);
     }
 
     template<typename V>
     constexpr inline V scaled_val(idx row, idx col) const {
-        return operator()(row, col) * get_exp(row, col);
+        return operator()(row, col) * static_cast<V>(get_exp(row, col));
     }
 
 
-    constexpr inline T& operator() const (idx row, idx col) {
-        return L == ColMajor ? data[col*ld + row] : data[row*ld + col];
-    }
 
     bool isNaN() const {
         for(int row = 0; row < m; row++) {
             for(int col = 0; col < n; col++) {
-                if(isnan((this)->scaled_val(i,j))) return true;
+                if(isnan((this)->template scaled_val<double>(row,col))) return true;
             }
         }
         return false;
@@ -127,7 +153,7 @@ class MX_Matrix {
     bool isInf() const {
         for(int row = 0; row < m; row++) {
             for(int col = 0; col < n; col++) {
-                if(isinf((this)->scaled_val(i,j))) return true;
+                if(isinf((this)->template scaled_val<double>(row,col))) return true;
             }
         }
         return false;
@@ -146,104 +172,7 @@ class MX_Matrix {
 
 };
 
-struct Double_MX_Matrix {
-    // public data members (unchanged)
-    idx     m;                 // rows
-    idx     n;                 // cols
-    idx     ld;                // leading dimension
-    idx     r;                 // group / tile size
-    T*      data;              // mantissas
-    T_scal* group_exp;         // per‑r group exponents
-    T_scal* panel_exp;         // per‑tile exponents
 
-    static constexpr Layout layout = L;
-    using scalar_type       = T;
-    using shared_exp_type   = T_scal;
-    using MX_matrix_type_tag = void;
-
-    // ---------------------------------------------------------------------
-    // ctor (name corrected)
-    constexpr Double_MX_Matrix(T*      data_,
-                               T_scal* group_exp_,
-                               T_scal* panel_exp_,
-                               idx     m_, idx n_, idx ld_, idx r_)
-        : m(m_), n(n_), ld(ld_), r(r_),
-          data(data_), group_exp(group_exp_), panel_exp(panel_exp_) {}
-
-    // ---------------------------------------------------------------------
-    // raw index helpers — keep row*ld + col style intact
-    constexpr inline idx linear(idx row, idx col) const {
-        return (L == Layout::ColMajor) ? col * ld + row
-                                       : row * ld + col;
-    }
-    constexpr inline idx group_idx(idx row, idx col) const {
-        return linear(row, col) / r;
-    }
-    constexpr inline idx panel_idx(idx row, idx col) const {
-        // number of panels in leading dimension (ceil division)
-        idx panels_ld = (ld + r - 1) / r;
-        return (L == Layout::ColMajor)
-                 ? (col / r) * panels_ld + (row / r)
-                 : (row / r) * panels_ld + (col / r);
-    }
-
-    // ---------------------------------------------------------------------
-    // element access
-    constexpr inline T& operator()(idx row, idx col) {
-        return data[linear(row, col)];
-    }
-    constexpr inline const T& operator()(idx row, idx col) const {
-        return data[linear(row, col)];
-    }
-
-    // exponent getters / setters (minimal logic change)
-    constexpr inline T_scal get_group_exp(idx row, idx col) const {
-        return group_exp[group_idx(row, col)];
-    }
-    constexpr inline T_scal get_panel_exp(idx row, idx col) const {
-        return panel_exp[panel_idx(row, col)];
-    }
-
-    template<typename V>
-    constexpr inline void set_group_exp(idx row, idx col, V v) {
-        group_exp[group_idx(row, col)] = static_cast<T_scal>(v);
-    }
-    template<typename V>
-    constexpr inline void set_panel_exp(idx row, idx col, V v) {
-        panel_exp[panel_idx(row, col)] = static_cast<T_scal>(v);
-    }
-
-    // ---------------------------------------------------------------------
-    // scaled value
-    template<typename Ret = float>
-    constexpr inline Ret scaled_val(idx row, idx col) const {
-        Ret base = static_cast<Ret>((*this)(row, col));
-        if constexpr (std::is_integral_v<T_scal>) {
-            int e = get_group_exp(row, col) + get_panel_exp(row, col);
-            return std::ldexp(base, e);  // base * 2^{e}
-        } else {
-            return base * static_cast<Ret>(get_group_exp(row, col))
-                       * static_cast<Ret>(get_panel_exp(row, col));
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // diagnostics: NaN / Inf checks (unchanged loops)
-    bool isNaN() const {
-        for (idx row = 0; row < m; ++row)
-            for (idx col = 0; col < n; ++col)
-                if (std::isnan(static_cast<double>(scaled_val<double>(row, col))))
-                    return true;
-        return false;
-    }
-    bool isInf() const {
-        for (idx row = 0; row < m; ++row)
-            for (idx col = 0; col < n; ++col)
-                if (std::isinf(static_cast<double>(scaled_val<double>(row, col))))
-                    return true;
-        return false;
-    }
-};
 
 // Concept: matches if T has either matrix_type_tag or MX_matrix_type_tag
 template<typename T>
@@ -267,7 +196,7 @@ using is_MX_MatrixType_t = typename is_MX_MatrixType<T>::value;
 
 // Concept: matches only if T has matrix_type_tag (Vanilla Matrix)
 template<typename T>
-struct is_Vanilla_MatrixType = requires {
+concept is_Vanilla_MatrixType = requires {
     typename T::matrix_type_tag;
 };
 
@@ -281,14 +210,26 @@ template<typename T>
 struct is_MX_format {
     static constexpr bool value = false;
 };
-template<typename T, typename idx, typename T_scal, Layout L, MX_Layout MX_L>
-struct is_MX_format<MX_Matrix<T, idx, T_scal, L, MX_L>> {
+template<typename T, typename T_scal, typename idx, Layout L>
+struct is_MX_format<MX_Matrix<T, T_scal, idx, L>> {
     static constexpr bool value = true;
 };
-template<typename T>
-struct is_MX_format<Matrix<T, idx>> {
+template<typename T, typename idx, Layout L>
+struct is_MX_format<Matrix<T, idx, L>> {
     static constexpr bool value = false;
 };
+
+template<typename T>
+concept AnyMatrixType = MatrixType<T> || MX_MatrixType<T>;
+
+template<AnyMatrixType Mat_type>
+using scalar_type = typename Mat_type::scalar_type;
+
+
+template<MX_MatrixType Mat_type>
+using shared_exp_type = typename Mat_type::shared_exp_type;
+
+
 
 
 template<MatrixType SrcMatrixType, MatrixType DstMatrixType>
@@ -362,12 +303,15 @@ void lacpy(const SrcMatrixType& A, DstMatrixType& B, Uplo uplo) {
     assert(A.rows() == B.rows() && A.cols() == B.cols());
     using B_type = typename DstMatrixType::scalar_type;
     using A_type = typename SrcMatrixType::scalar_type;
+    using B_exp_type = typename DstMatrixType::shared_exp_type;
 
     if (uplo == Uplo::Upper) {
         for(int i = 0; i < A.rows(); i++) {
             for(int j = i; j < A.cols(); j++) {
                 B(i,j) = static_cast<B_type>(A(i,j));
-                B.set_exp(i,j, A.get_exp(i,j));
+                // FIX: A is not an MX_Matrix and has no get_exp method.
+                // Set exponent to 1.0 as a neutral value.
+                B.set_exp(i,j, static_cast<B_exp_type>(1.0));
             }
         }
         
@@ -375,7 +319,7 @@ void lacpy(const SrcMatrixType& A, DstMatrixType& B, Uplo uplo) {
         for(int i = 0; i < A.rows(); i++) {
             for(int j = 0; j <= i; j++) {
                 B(i,j) = static_cast<B_type>(A(i,j));
-                B.set_exp(i,j, A.get_exp(i,j));
+                B.set_exp(i,j, static_cast<B_exp_type>(1.0));
             }
         }
     } else {
@@ -383,7 +327,7 @@ void lacpy(const SrcMatrixType& A, DstMatrixType& B, Uplo uplo) {
         for(int i = 0; i < A.rows(); i++) {
             for(int j = 0; j < A.cols(); j++) {
                 B(i,j) = static_cast<B_type>(A(i,j));
-                B.set_exp(i,j, A.get_exp(i,j));
+                B.set_exp(i,j, static_cast<B_exp_type>(1.0));
             }
         }
     }
@@ -392,8 +336,9 @@ void lacpy(const SrcMatrixType& A, DstMatrixType& B, Uplo uplo) {
     
 }
 
-template<MatrixType SrcMatrixType, MatrixType DstMatrixType>
-using copy = lacpy<SrcMatrixType, DstMatrixType>;
+
+template<AnyMatrixType SrcMatrixType, AnyMatrixType DstMatrixType>
+inline void copy(const SrcMatrixType& A, DstMatrixType& B, Uplo uplo) { return lacpy(A, B, uplo); }
 
 
 template<MatrixType MatrixA, MatrixType MatrixA_t, int n_block_size = 1, int m_block_size = 1>
@@ -401,55 +346,58 @@ void transpose(MatrixA& A, MatrixA_t& At) {
 
     At.m = A.n;
     At.n = A.m;
-    int n_blocks = (A.n + n_block_size - 1) / n_block_size;
-    int m_blocks = (A.m + m_block_size - 1) / m_block_size;
+    
     using At_type = typename MatrixA_t::scalar_type;
-    using A_type = typename MatrixA::scalar_type;
-
-    //break inrto cases - if layouts are different just copy over. If same, block the transpose
+    
+    //break into cases - if layouts are different, a simple data copy works. If same, block the transpose
     if constexpr (MatrixA::layout == MatrixA_t::layout) {
-        // blocked transpose
+        // blocked transpose for same-layout
+        int n_blocks = (At.rows() + n_block_size - 1) / n_block_size;
+        int m_blocks = (At.cols() + m_block_size - 1) / m_block_size;
+
         for(int b_row = 0; b_row < n_blocks; b_row++) {
             for(int b_col = 0; b_col < m_blocks; b_col++) {
-                for(int row = b_row*n_block_size; row < std::min(A.m, row + n_block_size); row++) {
-                    for(int col = b_col*m_block_size; col < std::min(A.n, col + m_block_size); col++) {
+                // FIX: Corrected loop bounds to iterate over blocks in the destination matrix At.
+                for(int row = b_row * n_block_size; row < std::min((b_row + 1) * n_block_size, (int)At.rows()); row++) {
+                    for(int col = b_col * m_block_size; col < std::min((b_col + 1) * m_block_size, (int)At.cols()); col++) {
+                            // At(row, col) = A(col, row)
                             At.data[At.get_idx(row, col)] = static_cast<At_type>(A.data[A.get_idx(col, row)]);
                     }
                 }
             }
         }
     } else {
-        // simnple copy
+        // If layouts are different (e.g., ColMajor to RowMajor), a direct memory copy performs the transpose.
         for(int i = 0; i < A.rows()*A.cols(); i++) {
             At.data[i] = static_cast<At_type>(A.data[i]);
         }
     }
-
-    
-    
 }
 
 
 //for the case where At.r != A.r, just cast to a full precision matrix first and then cast back to a microsaled matrix
-template<typename MX_MatrixA, typename MX_MatrixAt, int n_block_size, int m_block_size>
+template<MX_MatrixType MX_MatrixA, MX_MatrixType MX_MatrixAt, int n_block_size = 1, int m_block_size = 1>
 void transpose(MX_MatrixA& A, MX_MatrixAt& At)
 {
     At.m = A.n;
     At.n = A.m;
 
-    using A_type = MX_MatrixA::scalar_type;
-
-    int n_blocks = (A.n + n_block_size - 1) / n_block_size;
-    int m_blocks = (A.m + m_block_size - 1) / m_block_size;
+    using At_type = typename MX_MatrixAt::scalar_type;
 
     //cases - if layouts are different just copy over. If same, block the transpose
     if constexpr (MX_MatrixA::layout == MX_MatrixAt::layout) {
-        // blocked transpose
+        // blocked transpose for same-layout
+        int n_blocks = (At.rows() + n_block_size - 1) / n_block_size;
+        int m_blocks = (At.cols() + m_block_size - 1) / m_block_size;
+
         for(int b_row = 0; b_row < n_blocks; b_row++) {
             for(int b_col = 0; b_col < m_blocks; b_col++) {
-                for(int row = b_row*n_block_size; row < std::min(A.m, row + n_block_size); row++) {
-                    for(int col = b_col*m_block_size; col < std::min(A.n, col + m_block_size); col++) {
-                            At.data[At.get_idx(row, col)] = static_cast<A_type>(A.data[A.get_idx(col, row)]);
+                // FIX: Corrected loop bounds to iterate over blocks in the destination matrix At.
+                for(int row = b_row * n_block_size; row < std::min((b_row + 1) * n_block_size, (int)At.rows()); row++) {
+                    for(int col = b_col * m_block_size; col < std::min((b_col + 1) * m_block_size, (int)At.cols()); col++) {
+                            // At(row, col) = A(col, row)
+                            At.data[At.get_idx(row, col)] = static_cast<At_type>(A.data[A.get_idx(col, row)]);
+                            // Copy exponent if it's the start of a block in the source matrix. Assumes A.r == At.r
                             if(A.get_idx(col, row) % A.r == 0) {
                                 At.set_exp(row, col, A.get_exp(col, row));
                             }
@@ -458,31 +406,63 @@ void transpose(MX_MatrixA& A, MX_MatrixAt& At)
             }
         }
     } else {
-        // simple copy
-        for(int i = 0; i < A.rows()*A.cols(); i++) {
-            At.data[i] = static_cast<A_type>(A.data[i]);
+        // FIX: If layouts are different, a direct memory copy of data and exponents performs the transpose.
+        // The original implementation had incorrect function calls.
+        // This assumes A.r == At.r
+        size_t num_elements = (size_t)A.rows() * A.cols();
+        for(size_t i = 0; i < num_elements; i++) {
+            At.data[i] = static_cast<At_type>(A.data[i]);
+            // Copy the corresponding shared exponent. The linear index overloads handle the r-grouping.
             At.set_exp(i, A.get_exp(i));
         }
+    }
+}
+
+//slice to get submatrix
+template<typename T, Layout L, typename idx, typename idx2, typename idx3>
+Matrix<T, idx, L> slice(const Matrix<T, idx, L>& a, range<idx2> rows, range<idx3> cols) {
+    assert(cols.first >= 0 && cols.second <= a.n && rows.first >= 0 && rows.second <= a.m);
+    assert(cols.first <= cols.second && rows.first <= rows.second);
+
+    // FIX: Starting pointer calculation must account for memory layout.
+    idx offset;
+    if constexpr (L == ColMajor) {
+        offset = cols.first * a.ld + rows.first;
+    }
+    else { // RowMajor
+        offset = rows.first * a.ld + cols.first;
+    }
+    
+    return Matrix<T, idx, L>(a.data + offset,
+                          rows.second - rows.first,
+                          cols.second - cols.first,
+                          a.ld);
+}
+
+template<typename T, typename T_scal, Layout L, typename idx, typename idx2, typename idx3>
+MX_Matrix<T, T_scal, idx, L> slice(const MX_Matrix<T, T_scal, idx, L>& a, range<idx2> rows, range<idx3> cols) {
+    assert(cols.first >= 0 && cols.second <= a.n && rows.first >= 0 && rows.second <= a.m);
+    assert(cols.first <= cols.second && rows.first <= rows.second);
+
+    // FIX: Starting pointer calculation must account for memory layout for both data and exponents.
+    idx offset;
+    if constexpr (L == ColMajor) {
+        offset = cols.first * a.ld + rows.first;
+    }
+    else { // RowMajor
+        offset = rows.first * a.ld + cols.first;
+    }
+
+    return MX_Matrix<T, T_scal, idx, L>(a.data + offset,
+                                     a.shared_exps + offset / a.r,
+                                     rows.second - rows.first,
+                                     cols.second - cols.first,
+                                     a.ld,
+                                     a.r);
     }
 
 
 
-}
-
-//slice to get submatrix
-template<typename T, typename idx>
-Matrix<T, idx> slice(const Matrix<T, idx>& a, range<idx> range) {
-    assert(range.first >= 0 && range.second <= a.m);
-    
-    return Matrix<T, idx>(a.data + range.first * a.stride, range.second - range.first, a.n - range.first * a.stride);
-}
-
-template<typename T, typename idx, typename T_scal>
-MX_Matrix<T, idx, T_scal> slice(const MX_Matrix<T, idx, T_scal>& a, range<idx> range) {
-    assert(range.first >= 0 && range.second <= a.m);
-    
-    return MX_Matrix<T, idx, T_scal>(a.data + range.first * a.stride, a.shared_exps + range.first * a.r, range.second - range.first, a.n - range.first * a.r, a.stride);
-}
 
 
 
@@ -495,7 +475,4 @@ MX_Matrix<T, idx, T_scal> slice(const MX_Matrix<T, idx, T_scal>& a, range<idx> r
 
 
 
-
-
-
-} //namespace lo_float
+} //namespace Lo_Gemm

@@ -171,6 +171,8 @@ public:
     }
   }
 
+ 
+
   // ------------------------------------------------------------------------
   //  Compound‑assignment
   // ------------------------------------------------------------------------
@@ -329,6 +331,17 @@ struct get_type_len<i_n<N, sign>> {
 
 template<typename T>
 inline constexpr int get_type_len_v = get_type_len<T>::val;
+
+
+//signed shift function
+template<int len, Signedness sign, int offset>
+inline constexpr i_n<len, sign> signed_shift(i_n<len, sign> input)
+{
+  if constexpr (offset < 0) {
+    return input >> offset;
+  }  
+  return input << offset;
+} 
 
 } // namespace lo_float
 

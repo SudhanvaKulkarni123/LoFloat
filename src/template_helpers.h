@@ -198,6 +198,29 @@ inline constexpr auto get_IsInf_v = get_IsInf<T>::value;
 
 }   //namespace lo_float_internal
 
+
+template<typename T>
+struct get_len {
+    static constexpr int val = 0;
+};
+
+template<>
+struct get_len<int> {
+    static constexpr int val = 32;
+};
+
+template<int len, Signedness sign>
+struct get_len<i_n<len, sign>> {
+    static constexpr int val = len;
+};
+
+template<typename T>
+inline constexpr auto get_int_len_v = get_len<T>::val;
+
+
 template<typename T>
 inline constexpr auto get_mantissa_bits_v = lo_float_internal::get_mantissa_bits_v<T>;
+
+template<typename T>
+inline constexpr auto get_bias = lo_float_internal::get_bias_v<T>;
 }   //namespace lo_float
