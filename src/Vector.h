@@ -21,6 +21,7 @@ class Vector {
     idx m;
     T* data;
     idx stride;
+    using vector_type_tag = void;
 
     Vector(T* data, idx m, idx stride = static_cast<idx>(1)) : data(data), m(m), stride(stride) {}
 
@@ -48,6 +49,7 @@ class MX_Vector {
     idx r; //number of contiguos elems that share common exp
     T_scal* shared_exps;
     T* data;
+    using mx_vector_type_void = void;
 
     MX_Vector(T* data, T_scal* shared_exps, idx m, idx n, idx stride = static_cast<idx>(1), idx r = static_cast<idx>(1)) : data(data), shared_exps(shared_exps), m(m), n(n), stride(stride), r(r) {}
 
@@ -173,6 +175,46 @@ void fake_mxcopy(const Vector<T1, idx1>& a, Vector<T2, idx2>& b)
         return;
 
 }
+
+
+// Trait: true if T has MX_matrix_type_tag
+template<typename T>
+struct is_VectorType {
+    static constexpr bool value = requires { typename T::vector_type_tag; };
+};
+
+template<typename T>
+using is_VectorType_t = typename is_VectorType<T>::value;
+
+// // Concept: matches only if T has matrix_type_tag (Vanilla Matrix)
+// template<typename T>
+// concept is_Vanilla_MatrixType = requires {
+//     typename T::matrix_type_tag;
+// };
+
+// template<typename T>    
+// struct is_Vanilla_MatrixType_t {
+//     static constexpr bool value = requires { typename T::matrix_type_tag; };
+// };
+
+// //helper that returns if the format is MX by checking if the type has a shared_exps member
+// template<typename T>
+// struct is_MX_format {
+//     static constexpr bool value = false;
+// };
+
+// template<typename T, typename T_scal, typename idx, Layout L>
+// struct is_MX_format<MX_Matrix<T, T_scal, idx, L>> {
+//     static constexpr bool value = true;
+// };
+
+// template<typename T, typename idx, Layout L>
+// struct is_MX_format<Matrix<T, idx, L>> {
+//     static constexpr bool value = false;
+// };
+
+// template<typename T>
+// concept AnyMatrixType = MatrixType<T> || MX_MatrixType<T>;
 
 
 

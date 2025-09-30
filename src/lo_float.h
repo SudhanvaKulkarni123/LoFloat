@@ -23,6 +23,7 @@
 #include <limits>
 #include <ostream>
 #include <type_traits>
+#include <climits>
 // #include "tlapack/base/types.hpp"
 // #include "tlapack/base/scalar_type_traits.hpp"
 // #include "tlapack/base/types.hpp"
@@ -298,7 +299,7 @@ namespace lo_float_internal {
         template<typename T>
          __attribute__((always_inline)) inline  bool operator<=(
             const T& other) const {
-            return Compare(derived(), other) <= Ordering::kEquivalent;
+            return Compare(derived(), other) == Ordering::kEquivalent || Compare(derived(), other) == Ordering::kLess;
         }
 
         template<typename T>
@@ -362,10 +363,9 @@ namespace lo_float_internal {
 
         static  __attribute__((always_inline)) inline  Signed_type
         SignAndMagnitudeToTwosComplement(UnderlyingType sign, UnderlyingType magnitude) {
-            return magnitude ^ (static_cast<Signed_type>(sign) < 0 ? -1 : 0);
+            return magnitude ^ (static_cast<Signed_type>(sign ? -1 : 0));
         }
 
-        // Compare function. For signed floats tak eTwos complement path. For unsigned just compare represntations
         template<typename T>
          __attribute__((always_inline)) inline  friend constexpr Ordering Compare(
             const Derived& lhs, const T& rhs) {
@@ -379,6 +379,8 @@ namespace lo_float_internal {
             }
             Signed_type lhs_tc = SignAndMagnitudeToTwosComplement(lhs_sign, lhs_mag);
             Signed_type rhs_tc = SignAndMagnitudeToTwosComplement(rhs_sign, rhs_mag);
+
+
             if (lhs_tc < rhs_tc) return kLess;
             if (lhs_tc > rhs_tc) return kGreater;
             return kEquivalent;
@@ -543,7 +545,7 @@ constexpr inline Bits RoundBitsToNearestOdd(Bits bits, int roundoff) {
     // - L is 0, R is 1, and any T is one, OR
     // - L is 0, R is 1
     // This ensures the final result is odd.
-    
+
     Bits bias = roundoff == 0
                     ? 0
                     : ((~bits >> roundoff) & 1) + (Bits{1} << (roundoff - 1)) - 1;
@@ -558,7 +560,6 @@ inline Bits RoundUp(Bits bits, int roundoff, bool positive = true) {
     const Bits high_mask  = ~low_mask;                   // 111…1000…0
     Bits       truncated  = bits & high_mask;            // keep the high part
 
-   
     truncated += (positive && ((bits & low_mask) != 0)) ? Bits{1} << roundoff : 0;
 
     return truncated;
@@ -1359,6 +1360,7 @@ struct ConvertImpl;
 // of template parameters to avoid ambiguities.
 template <typename Scalar>
 struct IdentityConversion {
+    template<Rounding_Mode rm = Rounding_Mode::RoundAwayFromZero, int stoch_len = 0>
   static  inline Scalar run(const Scalar& from) {
     return from;
   }
@@ -1442,6 +1444,10 @@ struct Traits<double> : public TraitsBase<double> {
 
 
 
+
+
+
+
 template <typename From, typename To>
 struct ConvertImpl<From, To,
                    std::enable_if_t<!std::is_same_v<From, To>>> {
@@ -1478,13 +1484,14 @@ struct ConvertImpl<From, To,
 
 //set exception flags for overflow and underflow  here
 //current implementation cant deal with round ups near +zero and round downs near -0
-  static  inline To run(const From& from, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+  template<Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+  static  inline To run(const From& from) {
     // Shift bits to destination type, without sign bit.
 
     const bool from_sign_bit = (get_signedness_v<From> == Signedness::Unsigned) ? false :
         std::bit_cast<FromBits>(from) >> (kFromBits - 1);
 
-    
+
     
 
     
@@ -1569,44 +1576,33 @@ struct ConvertImpl<From, To,
            
           bits <<= kDigitShift;
         } else {
-            
-            switch(round_mode){
-                case Rounding_Mode::RoundToNearestOdd :
-                    bits = RoundBitsToNearestOdd(bits, -kDigitShift);
-                    break;
-                case Rounding_Mode::RoundTowardsZero :
-                    bits = RoundBitsTowardsZero(bits, -kDigitShift);
-                    break;
-                case Rounding_Mode::RoundAwayFromZero :
-                    bits = RoundBitsAwayFromZero(bits, -kDigitShift);
-                    break;
-                case Rounding_Mode::StochasticRoundingA :
-                    bits = Stochastic_Round_A(bits, -kDigitShift, stoch_len);
-                    break;
-                case Rounding_Mode::StochasticRoundingB :
-                    bits = Stochastic_Round_B(bits, -kDigitShift, stoch_len);
-                    break;
-                case Rounding_Mode::StochasticRoundingC :
-                    bits = Stochastic_Round_C(bits, -kDigitShift, stoch_len);
-                    break;
-                case Rounding_Mode::True_StochasticRounding :
-                    bits = True_Stochastic_Round(bits, -kDigitShift);
-                    break;
-                case Rounding_Mode::ProbabilisticRounding :
-                    bits = Probabilistic_Round(bits, -kDigitShift);
-                    break;
-                case Rounding_Mode::RoundUp :
-                    bits = RoundUp(bits, -kDigitShift, !from_sign_bit);
-                    break;
-                case Rounding_Mode::RoundDown :
-                    bits = RoundDown(bits, -kDigitShift, !from_sign_bit);
-                    break;
-                case Rounding_Mode::RoundTiesToAway :
-                    bits = RoundTiesToAway(bits, -kDigitShift);
-                    break;
-                default :
-                    bits = RoundBitsToNearestEven(bits, -kDigitShift);
-            } 
+            if constexpr (round_mode == Rounding_Mode::RoundToNearestOdd) {
+                bits = RoundBitsToNearestOdd(bits, -kDigitShift);
+            } else if constexpr (round_mode == Rounding_Mode::RoundTowardsZero) {
+                bits = RoundBitsTowardsZero(bits, -kDigitShift);
+            } else if constexpr (round_mode == Rounding_Mode::RoundAwayFromZero) {
+                bits = RoundBitsAwayFromZero(bits, -kDigitShift);
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingA) {
+                bits = Stochastic_Round_A(bits, -kDigitShift, stoch_len);
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingB) {
+                bits = Stochastic_Round_B(bits, -kDigitShift, stoch_len);
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingC) {
+                bits = Stochastic_Round_C(bits, -kDigitShift, stoch_len);
+            } else if constexpr (round_mode == Rounding_Mode::True_StochasticRounding) {
+                bits = True_Stochastic_Round(bits, -kDigitShift);
+            } else if constexpr (round_mode == Rounding_Mode::ProbabilisticRounding) {
+                bits = Probabilistic_Round(bits, -kDigitShift);
+            } else if constexpr (round_mode == Rounding_Mode::RoundUp) {
+                bits = RoundUp(bits, -kDigitShift, !from_sign_bit);
+            } else if constexpr (round_mode == Rounding_Mode::RoundDown) {
+                bits = RoundDown(bits, -kDigitShift, !from_sign_bit);
+            } else if constexpr (round_mode == Rounding_Mode::RoundTiesToAway) {
+                bits = RoundTiesToAway(bits, -kDigitShift);
+            } else {
+                bits = RoundBitsToNearestEven(bits, -kDigitShift);
+            }
+           
+             
            
             //binary8p5x4 [fp8, fp8, fp8, fp8]
 
@@ -1663,43 +1659,31 @@ struct ConvertImpl<From, To,
             // an edge-case where rounding to a normalized value would normally
             // round down, but for a subnormal, we need to round up.
 
-            switch (round_mode) {
-                case Rounding_Mode::RoundToNearestOdd:
-                  rounded_from_bits = RoundBitsToNearestOdd(rounded_from_bits, exponent_shift);
-                  break;
-                case Rounding_Mode::RoundTowardsZero:
-                  rounded_from_bits = RoundBitsTowardsZero(rounded_from_bits, exponent_shift);
-                  break;
-                case Rounding_Mode::RoundAwayFromZero:
-                  rounded_from_bits = RoundBitsAwayFromZero(rounded_from_bits, exponent_shift);
-                  break;
-                case Rounding_Mode::StochasticRoundingA:
-                  rounded_from_bits = Stochastic_Round_A(rounded_from_bits, exponent_shift, stoch_len);
-                  break;
-                case Rounding_Mode::StochasticRoundingB:
-                    rounded_from_bits = Stochastic_Round_B(rounded_from_bits, exponent_shift, stoch_len);
-                    break;
-                case Rounding_Mode::StochasticRoundingC:
-                    rounded_from_bits = Stochastic_Round_C(rounded_from_bits, exponent_shift, stoch_len);
-                    break;
-                case Rounding_Mode::True_StochasticRounding:
-                    rounded_from_bits = True_Stochastic_Round(rounded_from_bits, exponent_shift);
-                    break;
-                case Rounding_Mode::ProbabilisticRounding:
-                    rounded_from_bits = Probabilistic_Round(rounded_from_bits, exponent_shift);
-                    break;
-                case Rounding_Mode::RoundUp:
-                    rounded_from_bits = RoundUp(rounded_from_bits, exponent_shift, !from_sign_bit);
-                    break;
-                case Rounding_Mode::RoundDown:
-                    rounded_from_bits = RoundDown(rounded_from_bits, exponent_shift, !from_sign_bit);
-                    break;
-                case Rounding_Mode::RoundTiesToAway :
-                    rounded_from_bits = RoundTiesToAway(rounded_from_bits, exponent_shift);
-                    break;
-                default:
-                    rounded_from_bits = RoundBitsToNearestEven(rounded_from_bits, exponent_shift);
-              }
+            if constexpr (round_mode == Rounding_Mode::RoundToNearestOdd) {
+                rounded_from_bits = RoundBitsToNearestOdd(rounded_from_bits, exponent_shift);
+            } else if constexpr (round_mode == Rounding_Mode::RoundTowardsZero) {
+                rounded_from_bits = RoundBitsTowardsZero(rounded_from_bits, exponent_shift);
+            } else if constexpr (round_mode == Rounding_Mode::RoundAwayFromZero) {
+                rounded_from_bits = RoundBitsAwayFromZero(rounded_from_bits, exponent_shift);
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingA) {
+                rounded_from_bits = Stochastic_Round_A(rounded_from_bits, exponent_shift, stoch_len);
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingB) {
+                rounded_from_bits = Stochastic_Round_B(rounded_from_bits, exponent_shift, stoch_len);
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingC) {
+                rounded_from_bits = Stochastic_Round_C(rounded_from_bits, exponent_shift, stoch_len);
+            } else if constexpr (round_mode == Rounding_Mode::True_StochasticRounding) {
+                rounded_from_bits = True_Stochastic_Round(rounded_from_bits, exponent_shift);
+            } else if constexpr (round_mode == Rounding_Mode::ProbabilisticRounding) {
+                rounded_from_bits = Probabilistic_Round(rounded_from_bits, exponent_shift);
+            } else if constexpr (round_mode == Rounding_Mode::RoundUp) {
+                rounded_from_bits = RoundUp(rounded_from_bits, exponent_shift, !from_sign_bit);
+            } else if constexpr (round_mode == Rounding_Mode::RoundDown) {
+                rounded_from_bits = RoundDown(rounded_from_bits, exponent_shift, !from_sign_bit);
+            } else if constexpr (round_mode == Rounding_Mode::RoundTiesToAway) {
+                rounded_from_bits = RoundTiesToAway(rounded_from_bits, exponent_shift);
+            } else {
+                rounded_from_bits = RoundBitsToNearestEven(rounded_from_bits, exponent_shift);
+            }
 
 
           bits = (rounded_from_bits >> exponent_shift);
@@ -1712,55 +1696,41 @@ struct ConvertImpl<From, To,
             // << "exp_shift: " << exponent_shift << std::endl;
             unsigned long long widened_bits = (unsigned long long)(rounded_from_bits);
             //std::cout << std::hex << "widened bits: " << widened_bits << std::endl;
-            switch(round_mode) {
-                
-                case Rounding_Mode::RoundAwayFromZero :
-                    rounded_from_bits = (rounded_from_bits > 0 ? 1 : 0);
-                    bits = (rounded_from_bits);
-                    break;
-                case Rounding_Mode::RoundTowardsZero :
-                    bits = 0;
-                    break;
-                case Rounding_Mode::RoundUp :
-                    rounded_from_bits = (rounded_from_bits && !from_sign_bit > 0 ? 1 : 0);
-                    bits = (rounded_from_bits);
-                    break;
-                case Rounding_Mode::RoundDown :
-                    rounded_from_bits = ((rounded_from_bits) &&  from_sign_bit > 0 ? 1 : 0);
-                    bits = (rounded_from_bits);
-                    break;
-                case Rounding_Mode::StochasticRoundingA :
-                    widened_bits = Stochastic_Round_A(widened_bits, exponent_shift, stoch_len);
-                    bits = (widened_bits >> (exponent_shift));
-                    break;
-                case Rounding_Mode::StochasticRoundingB :
-                    widened_bits = Stochastic_Round_B(widened_bits, exponent_shift, stoch_len);
-                   // std::cout << std::hex << "widened bits: " << widened_bits << std::endl;
-                    bits = (widened_bits >> exponent_shift);
-                    break;
-                case Rounding_Mode::StochasticRoundingC :
-                    widened_bits = Stochastic_Round_C(widened_bits, exponent_shift, stoch_len);
-                    bits = (widened_bits >> exponent_shift);
-                    break;
-                case Rounding_Mode::True_StochasticRounding :
-                    widened_bits = True_Stochastic_Round(widened_bits, exponent_shift);
-                    bits = (widened_bits >> exponent_shift);
-                    break;
-                case Rounding_Mode::ProbabilisticRounding :
-                    widened_bits = Probabilistic_Round(widened_bits, exponent_shift);
-                    bits = (widened_bits >> exponent_shift);
-                    break;
-                default :
-                    // Round to nearest even.
-                    widened_bits =  0;
-                    bits = (widened_bits >> exponent_shift);
-                    break;
+            if constexpr (round_mode == Rounding_Mode::RoundAwayFromZero) {
+                rounded_from_bits = (rounded_from_bits > 0 ? 1 : 0);
+                bits = (rounded_from_bits);
+            } else if constexpr (round_mode == Rounding_Mode::RoundTowardsZero) {
+                bits = 0;
+            } else if constexpr (round_mode == Rounding_Mode::RoundUp) {
+                rounded_from_bits = (rounded_from_bits && !from_sign_bit > 0 ? 1 : 0);
+                bits = (rounded_from_bits);
+            } else if constexpr (round_mode == Rounding_Mode::RoundDown) {
+                rounded_from_bits = ((rounded_from_bits) && from_sign_bit > 0 ? 1 : 0);
+                bits = (rounded_from_bits);
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingA) {
+                widened_bits = Stochastic_Round_A(widened_bits, exponent_shift, stoch_len);
+                bits = (widened_bits >> (exponent_shift));
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingB) {
+                widened_bits = Stochastic_Round_B(widened_bits, exponent_shift, stoch_len);
+                // std::cout << std::hex << "widened bits: " << widened_bits << std::endl;
+                bits = (widened_bits >> exponent_shift);
+            } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingC) {
+                widened_bits = Stochastic_Round_C(widened_bits, exponent_shift, stoch_len);
+                bits = (widened_bits >> exponent_shift);
+            } else if constexpr (round_mode == Rounding_Mode::True_StochasticRounding) {
+                widened_bits = True_Stochastic_Round(widened_bits, exponent_shift);
+                bits = (widened_bits >> exponent_shift);
+            } else if constexpr (round_mode == Rounding_Mode::ProbabilisticRounding) {
+                widened_bits = Probabilistic_Round(widened_bits, exponent_shift);
+                bits = (widened_bits >> exponent_shift);
+            } else {
+                // Round to nearest even.
+                widened_bits = 0;
+                bits = (widened_bits >> exponent_shift);
             }
         }
         // Insert sign and return.
-        To to = std::bit_cast<To>(bits);
-
-        return from_sign_bit ? -to : to;
+        return from_sign_bit ? -std::bit_cast<To>(bits) : std::bit_cast<To>(bits);
       }
     }
 
@@ -1768,44 +1738,32 @@ struct ConvertImpl<From, To,
     WideBits rounded_from_bits = from_bits;
 
     if constexpr (kDigitShift < 0) {
-        
-        switch (round_mode) {
-            case Rounding_Mode::RoundToNearestOdd:
-              rounded_from_bits = RoundBitsToNearestOdd(from_bits, -kDigitShift);
-              break;
-            case Rounding_Mode::RoundTowardsZero:
-              rounded_from_bits = RoundBitsTowardsZero(from_bits, -kDigitShift);
-              break;
-            case Rounding_Mode::RoundAwayFromZero:
-              rounded_from_bits = RoundBitsAwayFromZero(from_bits, -kDigitShift);
-              break;
-            case Rounding_Mode::StochasticRoundingA:
-              rounded_from_bits = Stochastic_Round_A(from_bits, -kDigitShift, stoch_len);
-              break;
-            case Rounding_Mode::StochasticRoundingB:
-                rounded_from_bits = Stochastic_Round_B(from_bits, -kDigitShift, stoch_len);
-                break;
-            case Rounding_Mode::StochasticRoundingC:
-                rounded_from_bits = Stochastic_Round_C(from_bits, -kDigitShift, stoch_len);
-                break;
-            case Rounding_Mode::True_StochasticRounding:
-                rounded_from_bits = True_Stochastic_Round(from_bits, -kDigitShift);
-                break;
-            case Rounding_Mode::ProbabilisticRounding:
-                rounded_from_bits = Probabilistic_Round(from_bits, -kDigitShift);
-                break;
-            case Rounding_Mode::RoundUp:
-                rounded_from_bits = RoundUp(from_bits, -kDigitShift, !from_sign_bit);
-                break;
-            case Rounding_Mode::RoundDown:
-                rounded_from_bits = RoundDown(from_bits, -kDigitShift, !from_sign_bit);
-                break;
-            case Rounding_Mode::RoundTiesToAway :
-                rounded_from_bits = RoundTiesToAway(from_bits, -kDigitShift);
-                break;
-            default:
-                rounded_from_bits = RoundBitsToNearestEven(from_bits, -kDigitShift);
-          }
+        //need some logic to add leading 1 if normalized
+        if constexpr (round_mode == Rounding_Mode::RoundToNearestOdd) {
+            rounded_from_bits = RoundBitsToNearestOdd(from_bits, -kDigitShift);
+        } else if constexpr (round_mode == Rounding_Mode::RoundTowardsZero) {
+            rounded_from_bits = RoundBitsTowardsZero(from_bits, -kDigitShift);
+        } else if constexpr (round_mode == Rounding_Mode::RoundAwayFromZero) {
+            rounded_from_bits = RoundBitsAwayFromZero(from_bits, -kDigitShift);
+        } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingA) {
+            rounded_from_bits = Stochastic_Round_A(from_bits, -kDigitShift, stoch_len);
+        } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingB) {
+            rounded_from_bits = Stochastic_Round_B(from_bits, -kDigitShift, stoch_len);
+        } else if constexpr (round_mode == Rounding_Mode::StochasticRoundingC) {
+            rounded_from_bits = Stochastic_Round_C(from_bits, -kDigitShift, stoch_len);
+        } else if constexpr (round_mode == Rounding_Mode::True_StochasticRounding) {
+            rounded_from_bits = True_Stochastic_Round(from_bits, -kDigitShift);
+        } else if constexpr (round_mode == Rounding_Mode::ProbabilisticRounding) {
+            rounded_from_bits = Probabilistic_Round(from_bits, -kDigitShift);
+        } else if constexpr (round_mode == Rounding_Mode::RoundUp) {
+            rounded_from_bits = RoundUp(from_bits, -kDigitShift, !from_sign_bit);
+        } else if constexpr (round_mode == Rounding_Mode::RoundDown) {
+            rounded_from_bits = RoundDown(from_bits, -kDigitShift, !from_sign_bit);
+        } else if constexpr (round_mode == Rounding_Mode::RoundTiesToAway) {
+            rounded_from_bits = RoundTiesToAway(from_bits, -kDigitShift);
+        } else {
+            rounded_from_bits = RoundBitsToNearestEven(from_bits, -kDigitShift);
+        }
 
           
       
@@ -1813,7 +1771,6 @@ struct ConvertImpl<From, To,
       rounded_from_bits &= ~((WideBits{1} << (-kDigitShift)) - 1);
       
     }
-
 
     rounded_from_bits += static_cast<WideBits>(kExponentOffset)
                          << kFromMantissaBits;
@@ -1862,8 +1819,10 @@ struct ConvertImpl<From, To,
 
 
     return from_sign_bit ? -to : to;
-  }
+}
 };
+
+
 
   
 
@@ -1873,52 +1832,85 @@ struct ConvertImpl<From, To,
 template <typename Derived, typename UnderlyingType>
 template <typename From, Rounding_Mode rm, int stoch_len>
  Derived lo_float_base<Derived, UnderlyingType>::ConvertFrom(const From& from) {
-  return ConvertImpl<From, Derived>::run(from, rm, stoch_len);
+  return ConvertImpl<From, Derived>::template run<rm, stoch_len>(from);
 }
 
 template <typename Derived, typename UnderlyingType>
 template <typename To, Rounding_Mode rm, int stoch_len>
  To lo_float_base<Derived, UnderlyingType>::ConvertTo(const Derived& from) {
-  return ConvertImpl<Derived, To>::run(from, rm, stoch_len);
+  return ConvertImpl<Derived, To>::template run<rm,stoch_len>(from);
 }
 
-    template <typename in, typename out>
-    constexpr inline out Project(in x, Rounding_Mode rm, int stoch_len) noexcept{
-        return ConvertImpl<in, out>::run(x, rm, stoch_len);
+
+
+    template <typename in, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out Project(in x) noexcept{
+        return ConvertImpl<in, out>::template run<rm, stoch_len>(x);
     }
 
 
-    template <typename in1, typename in2, typename out = in1>
-    constexpr inline out add(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    template <typename in1, typename in2, typename out = in1, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out add(in1 x, in2 y) noexcept
     {
-        return ConvertImpl<float, out>::run(static_cast<float>(x) + static_cast<float>(y), rm, stoch_len);
+        return ConvertImpl<float, out>::template run<rm, stoch_len>(static_cast<float>(x) + static_cast<float>(y));
     }
 
-    template <typename in1, typename in2, typename out = in1>
-    constexpr inline out sub(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    template <typename in1, typename in2, typename out = in1, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out sub(in1 x, in2 y) noexcept
     {
-        return ConvertImpl<float, out>::run(static_cast<float>(x) - static_cast<float>(y), rm, stoch_len);
+        return ConvertImpl<float, out>::template run<rm, stoch_len>(static_cast<float>(x) - static_cast<float>(y));
     }
 
-    template <typename in1, typename in2, typename out = in1>
-    constexpr inline out mul(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    template <typename in1, typename in2, typename out = in1, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out mul(in1 x, in2 y) noexcept
     {
-        return ConvertImpl<float, out>::run(static_cast<float>(x) * static_cast<float>(y), rm, stoch_len);
+        return ConvertImpl<float, out>::template run<rm, stoch_len>(static_cast<float>(x) * static_cast<float>(y));
     }
 
-    template <typename in1, typename in2, typename out = in1>
-    constexpr inline out div(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    template <typename in1, typename in2, typename out = in1, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out div(in1 x, in2 y) noexcept
     {
-        return ConvertImpl<float, out>::run(static_cast<float>(x) / static_cast<float>(y), rm, stoch_len);
+        return ConvertImpl<float, out>::template run<rm, stoch_len>(static_cast<float>(x) / static_cast<float>(y));
     }
 
+
+template <typename Float>
+struct float2_batch {
+
+    Float a;
+    Float b;
+
+    // Constructor to initialize all elements to a specific value
+    float2_batch(Float value1 = Float{}, Float value2 = Float{}) : a(value1), b(value2) {}
+};
+
+template <typename Float>
+struct float_3batch {
+    Float a;
+    Float b;
+    Float c;
+
+    // Constructor to initialize all elements to a specific value
+    float_3batch(Float value = Float{}) : a(value), b(value), c(value) {}
+};
+
+template <typename Float>
+struct float_4batch {
+    Float a;
+    Float b;
+    Float c;
+    Float d;
+
+    // Constructor to initialize all elements to a specific value
+    float_4batch(Float value = Float{}) : a(value), b(value), c(value), d(value) {}
+};
 
 
 
 
     } //namespace lo_float_internal
 
-    template<FloatingPointParams Fp>
+    template<FloatingPointParams Fp> 
     using Templated_Float = lo_float_internal::Templated_Float<Fp>;
 
     template <class T>
@@ -1934,39 +1926,52 @@ template <typename To, Rounding_Mode rm, int stoch_len>
     template <typename T>
     inline constexpr bool is_floating_point_v = is_lo_float<T>::value || std::is_floating_point_v<T>;
 
+    template <typename T>
+    using float4_batch = lo_float_internal::float_4batch<T>;
+    
+    template <typename T>
+    using float3_batch = lo_float_internal::float_3batch<T>;
 
-    template <typename in, typename out>
-    constexpr inline out Project(in x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-        return lo_float_internal::Project<in, out>(x, rm, stoch_len);
+    template <typename T>
+    using float2_batch = lo_float_internal::float2_batch<T>;
+
+
+    template <typename in, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out Project(in x) noexcept {
+        return lo_float_internal::Project<in, out, rm, stoch_len>(x);
     }
 
-    template <typename in, typename out>
-    constexpr inline out Round(in x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-        return lo_float_internal::Project<in, out>(x, rm, stoch_len);
+    template <typename in, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out Round(in x) noexcept {
+        return lo_float_internal::Project<in, out, rm, stoch_len>(x);
     }
+
 
 
     
+    
 
-    template <typename in1, typename in2, typename out>
-    constexpr inline out add(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-        return lo_float_internal::add<in1, in2, out>(x, y, rm, stoch_len);
+    template <typename in1, typename in2, typename out,  Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out add(in1 x, in2 y) noexcept {
+        return lo_float_internal::add<in1, in2, out, rm, stoch_len>(x, y);
     }
 
-    template <typename in1, typename in2, typename out>
-    constexpr inline out sub(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-        return lo_float_internal::sub<in1, in2, out>(x, y, rm, stoch_len);
+    template <typename in1, typename in2, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out sub(in1 x, in2 y) noexcept {
+        return lo_float_internal::sub<in1, in2, out, rm, stoch_len>(x, y);
     }
 
-    template <typename in1, typename in2, typename out>
-    constexpr inline out mul(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-        return lo_float_internal::mul<in1, in2, out>(x, y, rm, stoch_len);
+    template <typename in1, typename in2, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out mul(in1 x, in2 y) noexcept {
+        return lo_float_internal::mul<in1, in2, out, rm, stoch_len>(x, y);
     }
 
-    template <typename in1, typename in2, typename out>
-    constexpr inline out div(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-        return lo_float_internal::div<in1, in2, out>(x, y, rm, stoch_len);
+    template <typename in1, typename in2, typename out,  Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
+    constexpr inline out div(in1 x, in2 y) noexcept {
+        return lo_float_internal::div<in1, in2, out, rm, stoch_len>(x, y);
     }
+
+
 
 
 

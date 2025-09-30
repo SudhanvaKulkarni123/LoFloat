@@ -25,7 +25,7 @@ enum precision_handles : uint8_t {
     F8_P4 = 1,
     F32 = 2,
     F16 = 3
-}
+};
 
 //add descriptors to this enum whenever a new type is instantiated
 enum LoPy_types {
@@ -50,7 +50,7 @@ enum LoPy_types {
     Half,
     Bfloat16,
     Tf32
-}
+};
 
 enum Mx_LoPy_types {
     mxocpe2m1_ocpe8m0,
@@ -67,7 +67,7 @@ enum Mx_LoPy_types {
     mxbinary6p2sf_binary8p1ue,
     mxbinaery6p3sf_binary8p1ue,
     mxbinary6p4sf_binary8p1ue
-}
+};
 
 
 //template<int k, int p, Signedness sign, Inf_Behaviors has_inf>

@@ -7,32 +7,6 @@ using namespace lo_float;
 namespace Lo_Gemm {
 
 
-
-template<MatrixType MatrixA, typename T>
-void pack(const MatrixA& A, T* A_pack)
-{
-    const int m = A.rows();
-    const int n = A.cols();
-    const int ld = A.ld;
-    const Layout layout = MatrixA::layout;
-
-    for(int i = 0; i < m; ++i) {
-        for (int j = 0; j < n; ++j) {
-            if constexpr (layout == Layout::ColMajor) {
-                // Column-major: A(i,j) is at A_pack[j * ld + i]
-                A_pack[j * ld + i] = static_cast<T>(A(i, j));
-            } else {
-                // Row-major: A(i,j) is at A_pack[i * ld + j
-            A_pack[i * ld + j] = static_cast<T>(A(i, j));
-            }
-        }
-    }
-}
-// -------------------------------------------------------------
-//  A simple signature for a micro-kernel that multiplies a      //
-//  (MR×KC) packed block of A with a (KC×NR) packed block of B   //
-//  and accumulates into a (MR×NR) block of C.                  //
-// -------------------------------------------------------------
 template<Float F1, Float F2, Float Fo>
 using GemmMicroKernel =
     void (*)(const F1* A, const F2* B, Fo* C,
@@ -50,11 +24,12 @@ using MX_GEMMMicroKernel =
 template<typename T_in, typename T_out, int MR, int NR, Layout layout>
 static void ref_kernel(const T_in* A, const T_in* B, T_out* C,
                        std::size_t rs_c, std::size_t cs_c,
-                       std::size_t K) noexcept
+                       std::size_t K1,
+                       std::size_t K2) noexcept
                        {
                         if constexpr (layout == Layout::ColMajor) {
                           
-                            for (std::size_t k = 0; k < K; ++k)           // kc loop
+                            for (std::size_t k = K1; k < K2; ++k)           // kc loop
                                 for (int j = 0; j < NR; ++j)              // loop over columns
                                     for (int i = 0; i < MR; ++i)          // loop over rows
                                         C[i * rs_c + j * cs_c] +=
@@ -62,7 +37,7 @@ static void ref_kernel(const T_in* A, const T_in* B, T_out* C,
                                             static_cast<T_out>(B[k * NR + j]);
                         } else if constexpr (layout == Layout::RowMajor) {
                             // RowMajor: Iterate C by rows (i), then columns (j)
-                            for (std::size_t k = 0; k < K; ++k)           // kc loop
+                            for (std::size_t k = K1; k < K2; ++k)           // kc loop
                                 for (int i = 0; i < MR; ++i)              // loop over rows
                                     for (int j = 0; j < NR; ++j)          // loop over columns
                                         C[i * rs_c + j * cs_c] +=
@@ -72,109 +47,216 @@ static void ref_kernel(const T_in* A, const T_in* B, T_out* C,
                     }
 
 //default MX GEMM micreopkernel
-template<typename T_in, typename T_out, int MR, int NR>
+template<typename T_in, typename T_out, int MR, int NR, int KR>
 static void ref_kernel_overwrite(
-    const T_in* A,      // MR x K packed A (contiguous)
+    const T_in* A,      // MR x K packed A 
     const T_in* B,      // K x NR sub-panel of B (strided)
+    std::size_t ld_a,   // Leading dimension (row stride) of the A panel
     std::size_t ld_b,   // Leading dimension (column stride) of the B panel
     T_out* C,           // MR x NR output C (contiguous)
-    std::size_t K       // Inner dimension
+    std::size_t K_max       // Inner dimension
 ) noexcept {
+
+
+    #pragma unroll
     for (int i = 0; i < MR; ++i) {
         for (int j = 0; j < NR; ++j) {
-            T_out accum = 0; // Local accumulator for this single C(i,j) element
-            for (std::size_t k = 0; k < K; ++k) {
+            T_out accum = T_out{}; // Local accumulator for this single C(i,j) element
+            for (std::size_t k = 0; k < KR; ++k) {
                 // A is MRxK, packed row-major: A[i*K + k]
                 // B is a sub-panel of a KxNC matrix, access is B[k][j] -> B[k * ld_b + j]
-                std::cout << "i = " << i << ", j = " << j << ", k = " << k << "\n";
-                std::cout << "A[" << i << "][" << k << "] = " << A[i * K + k] << ", B[" << k << "][" << j << "] = " << B[k * ld_b + j] << "\n";
-                accum += static_cast<T_out>(A[i * K + k]) * static_cast<T_out>(B[k * ld_b + j]);
+                accum += static_cast<T_out>(A[i * ld_a + k] * B[k * ld_b + j]);
+                // std::cout << "A[" << i << "][" << k << "] = " << A[i * ld_a + k] 
+                //           << ", B[" << k << "][" << j << "] = " << B[k * ld_b + j] 
+                //           << ", accum = " << accum << "\n";
+             
             }
             // Overwrite the destination C, which is a temporary micro-accumulator
+
             C[i * NR + j] = accum;
         }
     }
 }
 
+// void printVector(const std::vector<float>& vec) {
+//     for (const auto& v : vec) {
+//         std::cout << v << " ";
+//     }
+//     std::cout << "\n";
+// }
 
-template<MatrixType MatrixA, MatrixType MatrixB, MatrixType MatrixC, typename MatrixAccum1, typename MatrixAccum2, std::size_t MR = 4, std::size_t NR = 4, std::size_t KR = 2>
+template<MatrixType MatrixA, MatrixType MatrixB, MatrixType MatrixC, typename TypeAccum1, MatrixType MatrixAccum2, std::size_t MR = 4, std::size_t NR = 4, std::size_t KR = 2>
 class Gemm {
     using input_type_1 = typename MatrixA::scalar_type;
     using input_type_2 = typename MatrixB::scalar_type;
     using output_type = typename MatrixC::scalar_type;
-    using AccumType1 = MatrixAccum1;
-    using AccumType2 = MatrixAccum2;
+    using AccumType1 = TypeAccum1;
+    using AccumType2 = typename MatrixAccum2::scalar_type;
+    using MatrixAccum1 = Matrix<AccumType1,typename MatrixA::idx_type, MatrixA::layout>;
+    using FloatMatrix = Matrix<float, typename MatrixA::idx_type, MatrixA::layout>;
 
     static_assert(MatrixA::layout == MatrixB::layout, "Matrix A and B must have the same layout");
     static_assert(MatrixA::layout == MatrixC::layout, "Matrix A and C must have the same layout");
-    static_assert(std::is_same_v<output_type, AccumType2>, "MatrixC scalar type must match AccumType2");
+
+    constexpr static Layout layout_a = MatrixA::layout;
+    constexpr static Layout layout_b = MatrixB::layout;
+    constexpr static Layout layout_c = MatrixC::layout;
+    constexpr static Layout layout_accum = MatrixAccum2::layout;
+    
 
 public:
     Gemm() = default;
 
-    void run(const MatrixA& A, const MatrixB& B, MatrixC& C) {
+
+
+    void run(const MatrixA& A, const MatrixB& B, MatrixC& C, MatrixAccum2& C_accum) {
         const std::size_t m = A.rows();
         const std::size_t n = B.cols();
         const std::size_t k = A.cols();
-        std::cout << "GEMM: m = " << m << ", n = " << n << ", k = " << k << "\n";
-        std::size_t NC = 1024;
-        std::size_t KC = 256;
-        std::size_t MC = 128;
+        //checkl that matrix shapes add up
+        assert(A.cols() == B.rows() && "Matrix A columns must match Matrix B rows");
+        assert(C.rows() == m && C.cols() == n && "Matrix C must have the same dimensions as the result of A * B");
 
-        std::vector<input_type_1> A_pack(MC * KC, 0);
-        std::vector<input_type_2> B_pack(KC * NC, 0);
 
+        if constexpr (layout_b == Layout::RowMajor && layout_a == Layout::RowMajor)
+        {
+
+        std::size_t NC = (std::size_t)256;
+        std::size_t KC = (std::size_t)256;
+        std::size_t MC = (std::size_t)128;
+
+        std::vector<float> A_pack(MC * KC, (0));
+        std::vector<float> B_pack(KC * NC, (0));
+        FloatMatrix A_pack_matrix(A_pack.data(), MC, KC, KC);
+        FloatMatrix B_pack_matrix(B_pack.data(), KC, NC, NC);
+
+        #pragma omp for 
         for (std::size_t jc = 0; jc < n; jc += NC) {
             const std::size_t nc_eff = std::min(NC, n - jc);
             for (std::size_t pc = 0; pc < k; pc += KC) {
                 const std::size_t kc_eff = std::min(KC, k - pc);
-                std::cout << "in L2 loop, packing B\n";
-                std::cout << "pc = " << pc << ", kc_eff = " << kc_eff << ", nc_eff = " << nc_eff << ", jc = " << jc << "\n";
-                std::cout << "B.rows() = " << B.rows() << ", B.cols() = " << B.cols() << "\n";
-                auto B_slice = slice(B, range{pc, kc_eff}, range{(int)jc, (int)nc_eff});
-                pack(B_slice, B_pack.data());
-
+                auto B_slice = slice(B, range{pc, pc + kc_eff}, range{(int)jc, (int)jc + (int)nc_eff});
+                pack(B_slice, B_pack_matrix);
                 for (std::size_t ic = 0; ic < m; ic += MC) {
                     const std::size_t mc_eff = std::min(MC, m - ic);
-                    std::cout << "in L1 loop, packing A\n";
-                    auto A_slice = slice(A, range{ic, mc_eff}, range{(int)pc, (int)kc_eff});
-                    pack(A_slice, A_pack.data());
-
+                    auto A_slice = slice(A, range{ic, ic + mc_eff}, range{(int)pc, (int)pc + (int)kc_eff});
+                    pack(A_slice, A_pack_matrix);
                     for (std::size_t jr = 0; jr < nc_eff; jr += NR) {
-                        std::cout << "in L0 loop, computing microkernel\n";
                         const std::size_t nr_eff = std::min(NR, nc_eff - jr);
                         for (std::size_t ir = 0; ir < mc_eff; ir += MR) {
                             const std::size_t mr_eff = std::min(MR, mc_eff - ir);
-
-                            if (mr_eff <= MR && nr_eff <= NR) {
+                             
+                            
                                 // --- Stage 1: Compute into high-precision micro-accumulator ---
                                 AccumType1 C_micro_accum[MR * NR];
-                                for(int kr = KR; kr <= kc_eff; kr += KR) {
-                                        std::cout << "Calling microkernel with MR = " << MR << ", NR = " << NR << ", KR = " << KR << " , kc_eff = " << kc_eff << "\n";
-                                        ref_kernel_overwrite<input_type_1, AccumType1, MR, NR>(
-                                            &A_pack[ir * kc_eff],      // Pointer to current MRxKC block in A_pack
-                                            &B_pack[jr],              // Pointer to start of KCxNR block in B_pack
-                                            nc_eff,                    // Stride of the B_pack panel
-                                            C_micro_accum,             // Destination is the temporary micro-accumulator
-                                            kr                     // K dimension
+                                
+                                for(int kr = 0; kr < kc_eff; kr += KR) {
+                                       // std::cout << "ir = " << ir << ", jr = " << jr << ", kr = " << kr << "\n";
+                                        ref_kernel_overwrite<float, AccumType1, MR, NR, KR>(
+                                            A_pack.data() + ir * A_pack_matrix.ld + kr, 
+                                            B_pack.data() + kr * B_pack_matrix.ld + jr,
+                                            A_pack_matrix.ld, 
+                                            B_pack_matrix.ld,
+                                            C_micro_accum,
+                                            kc_eff
                                         );
+                                        //std::cout << "C_micro_accum[0] = " << C_micro_accum[0] << "\n";
                                     // --- Stage 2: Accumulate into final C matrix ---
+                                    //#pragma omp parallel for collapse(2) 
                                     for (int i_micro = 0; i_micro < MR; ++i_micro) {
                                         for (int j_micro = 0; j_micro < NR; ++j_micro) {
-                                            C(ic + ir + i_micro, jc + jr + j_micro) +=
+                                            C_accum(ic + ir + i_micro, jc + jr + j_micro) +=
                                                 static_cast<AccumType2>(C_micro_accum[i_micro * NR + j_micro]);
                                         }
                                     }
+                                    
                                 }
-                            }
-                            // Note: A production-ready implementation would need to handle
-                            // edge cases where mr_eff != MR or nr_eff != NR.
+                                if(pc + kc_eff >= k) {
+                                for (int i_micro = 0; i_micro < MR; ++i_micro) {
+                                        for (int j_micro = 0; j_micro < NR; ++j_micro) {
+                                            C(ic + ir + i_micro, jc + jr + j_micro) +=
+                                                static_cast<output_type>(C_accum(ic + ir + i_micro, jc + jr + j_micro));
+                                        }
+                                    }
+                                }
+                            
+                          
                         }
                     }
                 }
             }
         }
+
+
+    } else if constexpr(layout_b == Layout::ColMajor && layout_b == Layout::ColMajor) {
+
+        std::size_t NC = std::min((std::size_t)256, n);
+        std::size_t KC = std::min((std::size_t)256, k);
+        std::size_t MC = std::min((std::size_t)256, m);
+
+        std::vector<input_type_1> A_pack(MC * KC, 0);
+        std::vector<input_type_2> B_pack(KC * NC, 0);
+        MatrixA A_pack_matrix(A_pack.data(), MC, KC, KC);
+        MatrixB B_pack_matrix(B_pack.data(), KC, NC, NC);
+
+
+        for (std::size_t jc = 0; jc < n; jc += NC) {
+            const std::size_t nc_eff = std::min(NC, n - jc);
+            for (std::size_t pc = 0; pc < k; pc += KC) {
+                const std::size_t kc_eff = std::min(KC, k - pc);
+                auto B_slice = slice(B, range{pc, pc + kc_eff}, range{(int)jc, (int)jc + (int)nc_eff});
+                pack(B_slice, B_pack_matrix);
+
+                for (std::size_t ic = 0; ic < m; ic += MC) {
+                    const std::size_t mc_eff = std::min(MC, m - ic);
+                    auto A_slice = slice(A, range{ic, ic + mc_eff}, range{(int)pc, (int)pc + (int)kc_eff});
+                    pack(A_slice, A_pack_matrix);
+
+
+                    for (std::size_t jr = 0; jr < nc_eff; jr += NR) {
+                        const std::size_t nr_eff = std::min(NR, nc_eff - jr);
+                        for (std::size_t ir = 0; ir < mc_eff; ir += MR) {
+                            const std::size_t mr_eff = std::min(MR, mc_eff - ir);
+                             
+                            
+                                // --- Stage 1: Compute into high-precision micro-accumulator ---
+                                AccumType1 C_micro_accum[MR * NR];
+                                for(int kr = 0; kr < kc_eff; kr += KR) {
+                                       // std::cout << "ir = " << ir << ", jr = " << jr << ", kr = " << kr << "\n";
+                                        ref_kernel_overwrite<AccumType1, MR, NR, KR>(
+                                            A_pack.data() + ir * A_pack_matrix.ld + kr, 
+                                            B_pack.data() + kr * B_pack_matrix.ld + jr,
+                                            A_pack_matrix.ld, 
+                                            B_pack_matrix.ld,
+                                            C_micro_accum,
+                                            kc_eff
+                                        );
+                                        //std::cout << "C_micro_accum[0] = " << C_micro_accum[0] << "\n";
+                                    // --- Stage 2: Accumulate into final C matrix ---
+                                    for (int i_micro = 0; i_micro < MR; ++i_micro) {
+                                        for (int j_micro = 0; j_micro < NR; ++j_micro) {
+                                            C_accum(ic + ir + i_micro, jc + jr + j_micro) +=
+                                                static_cast<AccumType2>(C_micro_accum[i_micro * NR + j_micro]);
+                                        }
+                                    }
+                                }
+                                
+                            }
+                                               
+                            
+                          
+                        }
+                    }
+                }
+            }
+
+        }
+
+
+
+
     }
+
 };
 
 
@@ -324,4 +406,11 @@ public:
 
 //     }
 // };
+
+// template<MatrixType MatrixA, VectorType Vectorb, VectorType Vectorc, typename TypeAccum1, VectorType VectorAccum2, std::size_t MR = 4, std::size_t NR = 4>
+// class Gemv {
+
+ 
+
+// }
 } // namespace lo_float

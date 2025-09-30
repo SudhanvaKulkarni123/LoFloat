@@ -354,6 +354,11 @@ template <int len, lo_float::Signedness Sign>
 struct numeric_limits<lo_float::lo_float_internal::i_n<len, Sign>>
     : public lo_float::lo_float_internal::intn_numeric_limits_base<len, Sign> {};
 
+template<int len>
+struct make_signed<lo_float::i_n<len, lo_float::Signedness::Unsigned>> {
+  using type = lo_float::i_n<len-1, lo_float::Signedness::Signed>;
+};
+
 
 
 
