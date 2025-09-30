@@ -58,8 +58,9 @@ static void ref_kernel_overwrite(
 ) noexcept {
 
 
-    #pragma unroll
+    #pragma unroll(4)
     for (int i = 0; i < MR; ++i) {
+        #pragma unroll(4)
         for (int j = 0; j < NR; ++j) {
             T_out accum = T_out{}; // Local accumulator for this single C(i,j) element
             for (std::size_t k = 0; k < KR; ++k) {
@@ -121,16 +122,16 @@ public:
         if constexpr (layout_b == Layout::RowMajor && layout_a == Layout::RowMajor)
         {
 
-        std::size_t NC = (std::size_t)256;
-        std::size_t KC = (std::size_t)256;
-        std::size_t MC = (std::size_t)128;
+        std::size_t NC = (std::size_t)128;
+        std::size_t KC = (std::size_t)128;
+        std::size_t MC = (std::size_t)64;
 
         std::vector<float> A_pack(MC * KC, (0));
         std::vector<float> B_pack(KC * NC, (0));
         FloatMatrix A_pack_matrix(A_pack.data(), MC, KC, KC);
         FloatMatrix B_pack_matrix(B_pack.data(), KC, NC, NC);
 
-        #pragma omp for 
+        #pragma omp parallel for 
         for (std::size_t jc = 0; jc < n; jc += NC) {
             const std::size_t nc_eff = std::min(NC, n - jc);
             for (std::size_t pc = 0; pc < k; pc += KC) {

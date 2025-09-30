@@ -11,6 +11,7 @@
 #include <ctime>
 #include <algorithm>
 #include <cstdlib>
+#include <stdlib.h>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -24,6 +25,7 @@
 #include <ostream>
 #include <type_traits>
 #include <climits>
+
 // #include "tlapack/base/types.hpp"
 // #include "tlapack/base/scalar_type_traits.hpp"
 // #include "tlapack/base/types.hpp"
@@ -1941,15 +1943,11 @@ struct float_4batch {
         return lo_float_internal::Project<in, out, rm, stoch_len>(x);
     }
 
+
     template <typename in, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
     constexpr inline out Round(in x) noexcept {
         return lo_float_internal::Project<in, out, rm, stoch_len>(x);
     }
-
-
-
-    
-    
 
     template <typename in1, typename in2, typename out,  Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0>
     constexpr inline out add(in1 x, in2 y) noexcept {
@@ -1970,6 +1968,101 @@ struct float_4batch {
     constexpr inline out div(in1 x, in2 y) noexcept {
         return lo_float_internal::div<in1, in2, out, rm, stoch_len>(x, y);
     }
+
+    template <typename in, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0, int unroll_len = 0>
+ inline void Project(out* y, in* x, int n) noexcept {
+    if constexpr (unroll_len > 0) {
+        #pragma omp parallel for
+        for (int i = 0; i < n / unroll_len; i++) {
+            #pragma unroll(unroll_len)
+            for (int j = i * unroll_len; j < std::min((i + 1) * unroll_len, n); j++) {
+                y[j] = lo_float_internal::Project<in, out, rm, stoch_len>(x[j]);
+            }
+        }
+        return;
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) {
+        y[i] = lo_float_internal::Project<in, out, rm, stoch_len>(x[i]);
+    }
+}
+
+// Array add
+template <typename in1, typename in2, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0, int unroll_len = 0>
+ inline void add(out* z, in1* x, in2* y, int n) noexcept {
+    if constexpr (unroll_len > 0) {
+        #pragma omp parallel for
+        for (int i = 0; i < n / unroll_len; i++) {
+            #pragma unroll(unroll_len)
+            for (int j = i * unroll_len; j < std::min((i + 1) * unroll_len, n); j++) {
+                z[j] = lo_float_internal::add<in1, in2, out, rm, stoch_len>(x[j], y[j]);
+            }
+        }
+        return;
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) {
+        z[i] = lo_float_internal::add<in1, in2, out, rm, stoch_len>(x[i], y[i]);
+    }
+}
+
+// Array sub
+template <typename in1, typename in2, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0, int unroll_len = 0>
+ inline void sub(out* z, in1* x, in2* y, int n) noexcept {
+    if constexpr (unroll_len > 0) {
+        #pragma omp parallel for
+        for (int i = 0; i < n / unroll_len; i++) {
+            #pragma unroll(unroll_len)
+            for (int j = i * unroll_len; j < std::min((i + 1) * unroll_len, n); j++) {
+                z[j] = lo_float_internal::sub<in1, in2, out, rm, stoch_len>(x[j], y[j]);
+            }
+        }
+        return;
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) {
+        z[i] = lo_float_internal::sub<in1, in2, out, rm, stoch_len>(x[i], y[i]);
+    }
+}
+
+// Array mul
+template <typename in1, typename in2, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0, int unroll_len = 0>
+inline void mul(out* z, in1* x, in2* y, int n) noexcept {
+    if constexpr (unroll_len > 0) {
+        #pragma omp parallel for
+        for (int i = 0; i < n / unroll_len; i++) {
+            #pragma unroll(unroll_len)
+            for (int j = i * unroll_len; j < std::min((i + 1) * unroll_len, n); j++) {
+                z[j] = lo_float_internal::mul<in1, in2, out, rm, stoch_len>(x[j], y[j]);
+            }
+        }
+        return;
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) {
+        z[i] = lo_float_internal::mul<in1, in2, out, rm, stoch_len>(x[i], y[i]);
+    }
+}
+
+// Array div
+template <typename in1, typename in2, typename out, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0, int unroll_len = 0>
+ inline void div(out* z, in1* x, in2* y, int n) noexcept {
+    if constexpr (unroll_len > 0) {
+        #pragma omp parallel for
+        for (int i = 0; i < n / unroll_len; i++) {
+            #pragma unroll(unroll_len)
+            for (int j = i * unroll_len; j < std::min((i + 1) * unroll_len, n); j++) {
+                z[j] = lo_float_internal::div<in1, in2, out, rm, stoch_len>(x[j], y[j]);
+            }
+        }
+        return;
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) {
+        z[i] = lo_float_internal::div<in1, in2, out, rm, stoch_len>(x[i], y[i]);
+    }
+}
+
 
 
 

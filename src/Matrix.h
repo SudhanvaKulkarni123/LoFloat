@@ -467,10 +467,23 @@ MX_Matrix<T, T_scal, idx, L> slice(const MX_Matrix<T, T_scal, idx, L>& a, range<
 template<Float T, Layout L, Int idx = int, Float T2 = T>
 void pack(const Matrix<T, idx, L>& A, Matrix<T2, idx, L>& A_pack) {
 
-    //#pragma omp parallel for collapse(2)
     for(int i = 0; i < A.rows(); ++i) {
         for (int j = 0; j < A.cols(); ++j) {
             A_pack(i,j) =(T2)A(i,j);
+        }
+    }
+    return;
+}
+
+template<Float T, Float T_scal, Layout L, Int idx = int, Float T2 = T, Float T2_scal = T_scal>
+void transpose_and_pack(const Matrix<T, idx, L>& A, MX_Matrix<T2, T2_scal, idx, L>& A_pack) {
+
+    assert(A.rows() == A_pack.cols() && A.cols() == A_pack.rows());
+
+    for(int i = 0; i < A.rows(); ++i) {
+        for (int j = 0; j < A.cols(); ++j) {
+            A_pack(j,i) =(T2)A(i,j);
+            A_pack.set_exp(j,i, static_cast<T2_scal>(1.0));
         }
     }
     return;
