@@ -67,6 +67,8 @@ inline Templated_Float<Fp> log2(Templated_Float<Fp> x) noexcept
     return Templated_Float<Fp>(std::log(static_cast<double>(x)));
 }
 
+
+
 // 5) max
 template <FloatingPointParams Fp>
 inline Templated_Float<Fp> max(Templated_Float<Fp> x, Templated_Float<Fp> y) noexcept

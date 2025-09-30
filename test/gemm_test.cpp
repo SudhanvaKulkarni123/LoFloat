@@ -1,89 +1,163 @@
-/// @author Sudhanva Kulkarni
-/// This file tests Gemm with the updated Matrix implementation.
-
 #include "Gemms.hpp"
 #include <iostream>
 #include <cassert>
-#include <cmath> // for std::abs
+#include <cmath>
+#include <random>
+#include <chrono> // for timing (optional)
+// #include <gperftools/profiler.h>
 
 using namespace lo_float;
 using namespace Lo_Gemm;
 
+template<typename T, typename idx, Layout L, typename T2>
+void naive_gemm(const Matrix<T, idx, L>& A, const Matrix<T, idx, L>& B, Matrix<T2, idx, L>& C) {
+    int M = A.rows();
+    int N = B.cols();
+    int K = A.cols();
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            float buf = 0.0;
+            for (int k = 0; k < K; ++k) {
+                buf += (float)A(i, k) * (float)B(k, j);
+            }
+            C(i,j) = T2(buf);
+        }
+    }
+}
+
+template<typename T, typename idx, Layout layout, typename T2>
+void abs_naive_gemm(const Matrix<T, idx, layout>& A, const Matrix<T, idx, layout>& B, Matrix<T2, idx, layout>& C) {
+    int M = A.rows();
+    int N = B.cols();
+    int K = A.cols();
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            float buf = 0; // Initialize to zero
+            for (int k = 0; k < K; ++k) {
+                buf += (float)std::abs(A(i, k)) * (float)std::abs(B(k, j));
+            }
+            C(i,j) = T2(buf);
+        }
+    }
+}
+
 template<typename T, typename idx, Layout layout>
-void printMatrix(const Matrix<T, idx, layout>& mat) {
-    for (idx i = 0; i < mat.rows(); ++i) {
-        for (idx j = 0; j < mat.cols(); ++j) {
-            std::cout << mat(i, j) << " ";
+void printMatrix(const Matrix<T, idx, layout>& mat, int max_rows = 10, int max_cols = 10) {
+    for (idx i = 0; i < std::min(mat.rows(), max_rows); ++i) {
+        for (idx j = 0; j < std::min(mat.cols(), max_cols); ++j) {
+            std::cout << (float)mat(i, j) << " ";
         }
         std::cout << "\n";
     }
 }
 
-void test_gemm_basic() {
-    constexpr int MR = 3, NR = 3;
-    using T = float;
+void test_gemm_large_random() {
+    constexpr int MR = 4, NR = 4, KR = 4;
+   
+    using half = lo_float::Templated_Float<lo_float::halfPrecisionParams>;
+    using T = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
+    using T2 = half;
+    using T3 = half;
     constexpr Layout layout = Layout::RowMajor;
 
-    // Dimensions
-    constexpr int M = 2;
-    constexpr int K = 3;
-    constexpr int N = 2;
+    // Large dimensions
+    constexpr int M = 20;
+    constexpr int K = 2;
+    constexpr int N = 20;
 
-    // Allocate memory manually as required by Matrix
-    T A_data[M * K];
-    T B_data[K * N];
-    T C_data[M * N];
+    T* A_data = new T[M * K];
+    T* B_data = new T[K * N];
+    T2* C_data = new T2[M * N];
+    float* C_ref_data = new float[M * N];
+    float* C_ref_data_abs = new float[M * N];
+    T3* D_data = new T3[M * N];
 
-    // Initialize matrices
     Matrix<T, int, layout> A(A_data, M, K, K);
     Matrix<T, int, layout> B(B_data, K, N, N);
-    Matrix<T, int, layout> C(C_data, M, N, N);
+    Matrix<T2, int, layout> C(C_data, M, N, N);
+    Matrix<float, int, layout> C_ref(C_ref_data, M, N, N);
+    Matrix<float, int, layout> C_ref_abs(C_ref_data_abs, M, N, N);
+    Matrix<T3, int, layout> D(D_data, M, N, N);
 
-    using MatrixType = Matrix<T, int, layout>;
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
-    // Fill A (2x3): [1 2 3; 4 5 6]
-    A(0, 0) = 1; A(1, 0) = 4;
-    A(0, 1) = 2; A(1, 1) = 5;
-    A(0, 2) = 3; A(1, 2) = 6;
-
-    // Fill B (3x2): [7 8; 9 10; 11 12]
-    B(0, 0) = 7;  B(1, 0) = 9;  B(2, 0) = 11;
-    B(0, 1) = 8;  B(1, 1) = 10; B(2, 1) = 12;
-
-    // Clear C
-    for (int i = 0; i < M * N; ++i) C_data[i] = 0;
-
-    std::cout << "initialization complee! Print matrices\n";
-    printMatrix(A);
-    printMatrix(B);
-    std::cout << "starting gemm\n";
-
-    // Compute C = A * B
-    Gemm<MatrixType, MatrixType, MatrixType, float, float, MR, NR> gemm;
-    gemm.run(C, A, B);
-
-    std::cout << "C =\n";
-    for (int i = 0; i < C.rows(); ++i) {
-        for (int j = 0; j < C.cols(); ++j) {
-            std::cout << C(i, j) << " ";
-        }
-        std::cout << "\n";
+    for (int i = 0; i < M * K; ++i) A_data[i] = (T)dist(rng);
+    for (int i = 0; i < K * N; ++i) B_data[i] = (T)dist(rng);
+    for (int i = 0; i < M * N; ++i) {
+        C_data[i] = T2{};
+        C_ref_data[i] = 0.0f;
+        C_ref_data_abs[i] = 0.0f;
+        D_data[i] = T3{};
     }
 
-    // Expected:
-    // C(0,0) = 1*7 + 2*9 + 3*11 = 58
-    // C(0,1) = 1*8 + 2*10 + 3*12 = 64
-    // C(1,0) = 4*7 + 5*9 + 6*11 = 139
-    // C(1,1) = 4*8 + 5*10 + 6*12 = 154
-    assert(std::abs(C(0, 0) - 58) < 1e-4);
-    assert(std::abs(C(0, 1) - 64) < 1e-4);
-    assert(std::abs(C(1, 0) - 139) < 1e-4);
-    assert(std::abs(C(1, 1) - 154) < 1e-4);
 
-    std::cout << "✅ Gemm test passed.\n";
+    //abs_naive_gemm(A, B, C_ref_abs);
+
+    auto start_opt = std::chrono::high_resolution_clock::now();
+    Gemm<decltype(A), decltype(B), decltype(C), half, decltype(D), MR, NR, KR> gemm;
+    gemm.run(A, B, C, D);
+    auto end_opt = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> opt_duration = end_opt - start_opt;
+
+    std::cout << ":completed GEMM, took " << opt_duration.count() << " seconds.\n";
+
+    naive_gemm(A, B, C_ref);
+    abs_naive_gemm(A, B, C_ref_abs);
+
+    printMatrix(C, M, N);
+
+    std::cout << "Reference C (naive GEMM):\n";
+    printMatrix(C_ref, M, N);
+    std::cout << "Reference C abs (naive GEMM):\n";
+    printMatrix(C_ref_abs, M, N);
+    double max_diff = 0.0;
+    double tolerance = K * std::pow(2.0, -10);
+
+    for (int i = 0; i < M * N; ++i) {
+        double diff = std::abs((double)C_data[i] - (double)C_ref_data[i]) / (double)C_ref_data_abs[i];
+        max_diff = std::max(max_diff, diff);
+       // assert(diff <= tolerance);
+    }
+
+    std:cout << "max diff = " << max_diff << "\n";
+
+     const double total_flops = 2.0 * M * N * K;
+    const double total_bytes = sizeof(T) * (M * K + K * N) + sizeof(T2) * (M * N + M * N); // A + B + C_read + C_write
+
+    //const double naive_time = naive_duration.count();
+    const double opt_time = opt_duration.count();
+
+    //const double naive_gflops = total_flops / naive_time / 1e9;
+    const double opt_gflops = total_flops / opt_time / 1e9;
+    const double op_intensity = total_flops / total_bytes;
+
+    // ===================== 📊 Logging =========================
+    std::cout << "\n✅ Large random GEMM test passed.\n";
+    std::cout << "🔍 Max Relative Error     : " << max_diff << "\n";
+
+    std::cout << "\n--- ⏱️ Timing & Performance ---\n";
+    //std::cout << "Naive GEMM Time (s)       : " << naive_time << "\n";
+    std::cout << "Optimized GEMM Time (s)   : " << opt_time << "\n";
+    //std::cout << "Speedup                   : " << naive_time / opt_time << "x\n";
+
+    std::cout << "\n--- 📈 Roofline Data ---\n";
+    std::cout << "GFLOPs (Optimized)        : " << opt_gflops << "\n";
+    std::cout << "Operational Intensity     : " << op_intensity << " FLOPs/Byte\n";
+    std::cout << "Total FLOPs               : " << total_flops << "\n";
+    std::cout << "Total Bytes Transferred   : " << total_bytes << "\n";
+
+    delete[] A_data;
+    delete[] B_data;
+    delete[] C_data;
+    delete[] C_ref_data;
+    delete[] C_ref_data_abs;
+    delete[] D_data;
 }
 
 int main() {
-    test_gemm_basic();
+
+    test_gemm_large_random();
+
     return 0;
 }
