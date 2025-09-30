@@ -216,165 +216,207 @@ struct FloatingPointParams
     {}
 };
 
-// /**
-//  * @struct SingleInfChecker
-//  * @brief Detects and produces bit patterns for infinities in 32-bit float format.
-//  *
-//  * Infinity is indicated by exponent=0xFF and fraction=0.
-//  */
-// class SingleInfChecker {
-//     public:
-//     bool operator()(uint32_t bits) const {
-//         static constexpr uint32_t ExponentMask = 0x7F800000;
-//         static constexpr uint32_t FractionMask = 0x007FFFFF;
-//         // Infinity => exponent=0xFF, fraction=0
-//         bool isInf = ((bits & ExponentMask) == ExponentMask) &&
-//                      ((bits & FractionMask) == 0);
-//         return isInf;
-//     }
+/**
+ * @struct SingleInfChecker
+ * @brief Detects and produces bit patterns for infinities in 32-bit float format.
+ *
+ * Infinity is indicated by exponent=0xFF and fraction=0.
+ */
+class SingleInfChecker {
+    public:
+    bool operator()(uint32_t bits) const {
+        static constexpr uint32_t ExponentMask = 0x7F800000;
+        static constexpr uint32_t FractionMask = 0x007FFFFF;
+        // Infinity => exponent=0xFF, fraction=0
+        bool isInf = ((bits & ExponentMask) == ExponentMask) &&
+                     ((bits & FractionMask) == 0);
+        return isInf;
+    }
 
-//     uint32_t infBitPattern() const {
-//         // +∞ => 0x7F800000
-//         return 0x7F800000;
-//     }
+    uint32_t infBitPattern() const {
+        // +∞ => 0x7F800000
+        return 0x7F800000;
+    }
 
-//     uint32_t minNegInf() const {
-//         // -∞ => 0xFF800000
-//         return 0xFF800000;
-//     }
+    uint32_t minNegInf() const {
+        // -∞ => 0xFF800000
+        return 0xFF800000;
+    }
 
-//     uint32_t minPosInf() const {
-//         // +∞ => 0x7F800000
-//         return 0x7F800000;
-//     }
-// };
+    uint32_t minPosInf() const {
+        // +∞ => 0x7F800000
+        return 0x7F800000;
+    }
+};
 
-// /**
-//  * @struct SingleNaNChecker
-//  * @brief Detects and produces bit patterns for NaNs in 32-bit float format.
-//  *
-//  * NaN is indicated by exponent=0xFF and fraction!=0.
-//  */
-// class SingleNaNChecker {
-//     public:
-//     bool operator()(uint32_t bits) const {
-//         static constexpr uint32_t ExponentMask = 0x7F800000;
-//         static constexpr uint32_t FractionMask = 0x007FFFFF;
-//         // NaN => exponent=0xFF, fraction!=0
-//         bool isNaN = ((bits & ExponentMask) == ExponentMask) &&
-//                      ((bits & FractionMask) != 0);
-//         return isNaN;
-//     }
+/**
+ * @struct SingleNaNChecker
+ * @brief Detects and produces bit patterns for NaNs in 32-bit float format.
+ *
+ * NaN is indicated by exponent=0xFF and fraction!=0.
+ */
+class SingleNaNChecker {
+    public:
+    bool operator()(uint32_t bits) const {
+        static constexpr uint32_t ExponentMask = 0x7F800000;
+        static constexpr uint32_t FractionMask = 0x007FFFFF;
+        // NaN => exponent=0xFF, fraction!=0
+        bool isNaN = ((bits & ExponentMask) == ExponentMask) &&
+                     ((bits & FractionMask) != 0);
+        return isNaN;
+    }
 
-//     uint32_t qNanBitPattern() const {
-//         // quiet-NaN => 0x7FC00000
-//         return 0x7FC00000;
-//     }
+    uint32_t qNanBitPattern() const {
+        // quiet-NaN => 0x7FC00000
+        return 0x7FC00000;
+    }
 
-//     uint32_t sNanBitPattern() const {
-//         // signaling-NaN => 0x7F800001
-//         return 0x7F800001;
-//     }
-// };
-
-
-// /**
-//  * @brief Predefined parameters for a single-precision (32-bit) IEEE-like float.
-//  */
-// inline constexpr FloatingPointParams<SingleInfChecker , SingleNaNChecker> singlePrecisionParams(
-//     /* bitwidth      */ 32,
-//     /* mantissa_bits */ 23,
-//     /* bias          */ 127,
-//     /* OV_behavior   */ Extended,
-//     /* NA_behavior   */ QuietNaN,
-//     /* is_signed     */ Signed,
-//     /* IsInf         */ SingleInfChecker{},
-//     /* IsNaN         */ SingleNaNChecker{}
-// );
+    uint32_t sNanBitPattern() const {
+        // signaling-NaN => 0x7F800001
+        return 0x7F800001;
+    }
+};
 
 
-// //defintions for half precision and bfloat-
-// struct HalfInfChecker {
-//     bool operator()(uint32_t bits) const {
-//         return (((bits >> 15) & 0xFF) == 0xFF) && ((bits & 0x7FFF) == 0);
-//     }
-//     uint32_t infBitPattern() const { return 0x7C00; }
-//     uint32_t minNegInf() const { return 0xFC00; } // -∞ => 0xFC00
-//     uint32_t minPosInf() const { return 0x7C00; } // +∞ => 0x7C00
-
-// };
-
-// struct HalfNaNChecker {
-//     bool operator()(uint32_t bits) const {
-//         return (((bits >> 15) & 0xFF) == 0xFF) && ((bits & 0x7FFF) != 0);
-//     }
-//     uint32_t qNanBitPattern() const { return 0x7E00; } // typical QNaN
-//     uint32_t sNanBitPattern() const { return 0x7F00; } // some SNaN pattern
-// };
-
-// template<int stoch_len = 0>
-// inline constexpr FloatingPointParams<HalfInfChecker, HalfNaNChecker> halfPrecisionParams(
-//     /* bitwidth      */ 16,
-//     /* mantissa_bits */ 10,
-//     /* bias          */ 15,
-//     /* OV_behavior   */ Extended,
-//     /* NA_behavior   */ QuietNaN,
-//     /* is_signed     */ Signed,
-//     /* IsInf         */ HalfInfChecker{},
-//     /* IsNaN         */ HalfNaNChecker{},
-//     /* stochastic_rounding_length */ stoch_len
-// );
+/**
+ * @brief Predefined parameters for a single-precision (32-bit) IEEE-like float.
+ */
+inline constexpr FloatingPointParams<SingleInfChecker , SingleNaNChecker> singlePrecisionParams(
+    /* bitwidth      */ 32,
+    /* mantissa_bits */ 23,
+    /* bias          */ 127,
+    /* OV_behavior   */ Extended,
+    /* NA_behavior   */ QuietNaN,
+    /* is_signed     */ Signed,
+    /* IsInf         */ SingleInfChecker{},
+    /* IsNaN         */ SingleNaNChecker{}
+);
 
 
-// struct BFloatInfChecker {
-//     bool operator()(uint32_t bits) const {
-//         return (((bits >> 23) & 0xFF) == 0xFF) && ((bits & 0x7FFFFF) == 0);
-//     }
-//     uint32_t infBitPattern() const { return 0x7F800000; } // +∞ => 0x7F800000
-//     uint32_t minNegInf() const { return 0xFF800000; } // -∞ => 0xFF800000
-//     uint32_t minPosInf() const { return 0x7F800000; } // +∞ => 0x7F800000
-// };
+//defintions for half precision and bfloat-
+struct FP16InfChecker {
+    bool operator()(uint32_t bits) const {
+        uint32_t exp  = (bits >> 10) & 0x1F;  // bits 14–10
+        uint32_t mant = bits & 0x3FF;         // bits 9–0
+        return (exp == 0x1F) && (mant == 0);
+    }
+
+    uint32_t minPosInf() const { return 0x7C00; }  // sign=0, exp=31, mant=0
+    uint32_t minNegInf() const { return 0xFC00; }  // sign=1, exp=31, mant=0
+    uint32_t infBitPattern() const { return minPosInf(); }
+};
+
+struct FP16NaNChecker {
+    bool operator()(uint32_t bits) const {
+        uint32_t exp  = (bits >> 10) & 0x1F;
+        uint32_t mant = bits & 0x3FF;
+        return (exp == 0x1F) && (mant != 0);
+    }
+
+    // Canonical quiet NaN (mantissa MSB=1)
+    uint32_t qNanBitPattern() const { return 0x7E00; }
+    // Example signaling NaN (mantissa LSB=1, MSB=0)
+    uint32_t sNanBitPattern() const { return 0x7C01; }
+};
 
 
-// struct BFloatNaNChecker {
-//     bool operator()(uint32_t bits) const {
-//         return (((bits >> 23) & 0xFF) == 0xFF) && ((bits & 0x7FFFFF) != 0);
-//     }
-//     uint32_t qNanBitPattern() const { return 0x7FC00000; } // typical QNaN
-//     uint32_t sNanBitPattern() const { return 0x7FA00000; } // some SNaN pattern
-// };
 
-// template<int stoch_len = 0>
-// inline constexpr FloatingPointParams<BFloatInfChecker, BFloatNaNChecker> bfloatPrecisionParams(
-//     /* bitwidth      */ 16,
-//     /* mantissa_bits */ 7,
-//     /* bias          */ 127,
-//     /* OV_behavior   */ Extended,
-//     /* NA_behavior   */ QuietNaN,
-//     /* is_signed     */ Signed,
-//     /* IsInf         */ BFloatInfChecker{},
-//     /* IsNaN         */ BFloatNaNChecker{},
-//     /* stochastic_rounding_length */ stoch_len
-// );
+inline constexpr FloatingPointParams<FP16InfChecker, FP16NaNChecker> halfPrecisionParams(
+    /* bitwidth      */ 16,
+    /* mantissa_bits */ 10,
+    /* bias          */ 15,
+    /* OV_behavior   */ Extended,
+    /* NA_behavior   */ QuietNaN,
+    /* is_signed     */ Signed,
+    /* IsInf         */ FP16InfChecker{},
+    /* IsNaN         */ FP16NaNChecker{});
 
 
-// //definitions for tf32
-// struct TF32InfChecker {
-//     bool operator()(uint32_t bits) const {
-//         return (((bits >> 23) & 0xFF) == 0xFF) && ((bits & 0x7FFFFF) == 0);
-//     }
-//     uint32_t infBitPattern() const { return 0x7F800000; } // +∞ => 0x7F800000
-//     uint32_t minNegInf() const { return 0xFF800000; } // -∞ => 0xFF800000
-//     uint32_t minPosInf() const { return 0x7F800000; } // +∞ => 0x7F800000
-// };
+struct BF16InfChecker {
+    bool operator()(uint32_t bits) const {
+        uint32_t exp  = (bits >> 7) & 0xFF;   // bits 14–7
+        uint32_t mant = bits & 0x7F;          // bits 6–0
+        return (exp == 0xFF) && (mant == 0);
+    }
 
-// struct TF32NaNChecker {
-//     bool operator()(uint32_t bits) const {
-//         return (((bits >> 23) & 0xFF) == 0xFF) && ((bits & 0x7FFFFF) != 0);
-//     }
-//     uint32_t qNanBitPattern() const { return 0x7FC00000; } // typical QNaN
-//     uint32_t sNanBitPattern() const { return 0x7FA00000; } // some SNaN pattern
-// };
+    uint32_t minPosInf() const { return 0x7F80; }  // sign=0, exp=255, mant=0
+    uint32_t minNegInf() const { return 0xFF80; }  // sign=1, exp=255, mant=0
+    uint32_t infBitPattern() const { return minPosInf(); }
+};
+
+struct BF16NaNChecker {
+    bool operator()(uint32_t bits) const {
+        uint32_t exp  = (bits >> 7) & 0xFF;
+        uint32_t mant = bits & 0x7F;
+        return (exp == 0xFF) && (mant != 0);
+    }
+
+    // Canonical quiet NaN (mantissa MSB=1)
+    uint32_t qNanBitPattern() const { return 0x7FC0; }
+    // Example signaling NaN (mantissa LSB=1, MSB=0)
+    uint32_t sNanBitPattern() const { return 0x7F81; }
+};
+
+inline constexpr FloatingPointParams<BF16InfChecker, BF16NaNChecker> bfloatPrecisionParams(
+    /* bitwidth      */ 16,
+    /* mantissa_bits */ 7,
+    /* bias          */ 127,
+    /* OV_behavior   */ Extended,
+    /* NA_behavior   */ QuietNaN,
+    /* is_signed     */ Signed,
+    /* IsInf         */ BF16InfChecker{},
+    /* IsNaN         */ BF16NaNChecker{}
+
+);
+
+
+//definitions for tf32
+struct TF32InfChecker {
+    // Checks if packed bits are Inf
+    bool operator()(uint32_t bits) const {
+        // Extract exponent (bits 17–10) and mantissa (bits 9–0)
+        uint32_t exp = (bits >> 10) & 0xFF;
+        uint32_t mant = bits & 0x3FF;
+        return (exp == 0xFF) && (mant == 0);
+    }
+
+    // +∞ pattern (sign=0, exp=255, mant=0)
+    uint32_t minPosInf() const { return 0x0003F800; }
+
+    // −∞ pattern (sign=1, exp=255, mant=0)
+    uint32_t minNegInf() const { return 0x0007F800; }
+
+    // Canonical infBitPattern: same as PosInf
+    uint32_t infBitPattern() const { return minPosInf(); }
+};
+
+
+struct TF32NaNChecker {
+    // Checks if packed bits are NaN
+    bool operator()(uint32_t bits) const {
+        uint32_t exp = (bits >> 10) & 0xFF;
+        uint32_t mant = bits & 0x3FF;
+        return (exp == 0xFF) && (mant != 0);
+    }
+
+    // Canonical quiet NaN: mantissa MSB = 1
+    uint32_t qNanBitPattern() const { return 0x0003FE00; }
+
+    // Example signaling NaN: mantissa LSB set, MSB clear
+    uint32_t sNanBitPattern() const { return 0x0003F801; }
+};
+
+
+inline constexpr FloatingPointParams<TF32InfChecker, TF32NaNChecker> tf32PrecisionParams(
+    /* bitwidth      */ 19,
+    /* mantissa_bits */ 10,
+    /* bias          */ 127,
+    /* OV_behavior   */ Extended,
+    /* NA_behavior   */ QuietNaN,
+    /* is_signed     */ Signed,
+    /* IsInf         */ TF32InfChecker{},
+    /* IsNaN         */ TF32NaNChecker{}
+);
 
 
 

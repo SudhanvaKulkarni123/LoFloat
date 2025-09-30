@@ -26,6 +26,7 @@ class Matrix {
     T* data;
     static constexpr Layout layout = L;
     using scalar_type = T;
+    using idx_type = idx;
     using matrix_type_tag = void;
 
     
@@ -210,10 +211,12 @@ template<typename T>
 struct is_MX_format {
     static constexpr bool value = false;
 };
+
 template<typename T, typename T_scal, typename idx, Layout L>
 struct is_MX_format<MX_Matrix<T, T_scal, idx, L>> {
     static constexpr bool value = true;
 };
+
 template<typename T, typename idx, Layout L>
 struct is_MX_format<Matrix<T, idx, L>> {
     static constexpr bool value = false;
@@ -460,6 +463,18 @@ MX_Matrix<T, T_scal, idx, L> slice(const MX_Matrix<T, T_scal, idx, L>& a, range<
                                      a.ld,
                                      a.r);
     }
+
+template<Float T, Layout L, Int idx = int, Float T2 = T>
+void pack(const Matrix<T, idx, L>& A, Matrix<T2, idx, L>& A_pack) {
+
+    //#pragma omp parallel for collapse(2)
+    for(int i = 0; i < A.rows(); ++i) {
+        for (int j = 0; j < A.cols(); ++j) {
+            A_pack(i,j) =(T2)A(i,j);
+        }
+    }
+    return;
+}
 
 
 
