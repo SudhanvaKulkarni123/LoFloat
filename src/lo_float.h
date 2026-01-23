@@ -2437,6 +2437,9 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
     };
 
     int i = 0;
+    #ifdef LOFLOAT_ENABLE_OMP
+    #pragma omp parallel for
+    #endif
     for (; i <= n - step; i += step)
     {
         WideBitsSIMD from_bits_wide = load_from_widened(i);
@@ -2803,8 +2806,8 @@ void fma_vec(const In1* LOFLOAT_RESTRICT x,
         }
     };
 
-#if defined(_OPENMP)
-    #pragma omp parallel for schedule(static)
+#if defined(_LOFOPENMP)
+    #pragma omp parallel for 
     for (int i = 0; i < vec_end; i += static_cast<int>(W)) {
         microkernel(i);
     }
