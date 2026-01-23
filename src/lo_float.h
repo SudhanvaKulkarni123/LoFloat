@@ -883,6 +883,7 @@ namespace lo_float
         //     return truncated + (((bits >> (roundoff - 1)) & xs::batch<Bits, arch>(1)) << roundoff);
         // }
 
+        //#TODO: add sign to list of args for roundUp and RoundDown
         template <typename Bits>
         LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundMantissa(Bits bits, const int roundoff, const Rounding_Mode rm, const int len = 0)
         {
@@ -2465,10 +2466,10 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
             countl_zero<kFromBits, WideBitsSIMD, WideBitsSIMD>(from_bits) -
             (WideBitsSIMD(kFromBits - kFromMantissaBits) + WideBitsSIMD(1)));
         IntSIMD biased_exponent =
-            IntSIMD(kExponentOffset) - IntSIMD(normalization_factor) + IntSIMD(1);
+            IntSIMD(kExponentOffset) - xsimd::batch_cast<int>(normalization_factor) + IntSIMD(1);
         xs::batch_bool<SignedWideBits, arch> is_lezero_exp = (biased_exponent <= IntSIMD(0));
         normalization_factor = xs::select(xs::batch_bool<WideBits, arch>(!is_lezero_exp), WideBitsSIMD(0), normalization_factor);
-        IntSIMD unbiased_exp = biased_from_exponent - IntSIMD(kFromExponentBias);
+        IntSIMD unbiased_exp = IntSIMD(biased_from_exponent) - IntSIMD(kFromExponentBias);
         IntSIMD biased_to_exp = unbiased_exp + IntSIMD(kToExponentBias);
         xs::batch_bool<SignedWideBits, arch> signed_res_is_subnormal_mask_wide =
             (biased_to_exp <= IntSIMD(0)); 
