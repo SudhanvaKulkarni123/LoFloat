@@ -1,127 +1,126 @@
-CXXFLAGS = -std=c++20
-CXX = g++
-
-CDBG += -w
-CXXFLAGS += $(CDBG) -v
-CXXFLAGS += -g -O3 
+# Compiler / flags
+CXX       ?= g++
+CXXFLAGS  += -std=c++20 -g -O3 -v
+CDBG      += -w
 
 
-INCLUDE_PATH += -I$(HOME)
-INCLUDE_PATH += -I$(HOME)/Documents/LoFloat/src
+# LoFloat root: Makefile is in LoFloat/test, so root is one level up
+MAKEFILE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+LOFLOAT_ROOT ?= $(abspath $(MAKEFILE_DIR)/..)
 
-INCLUDE_PATH += -I$(HOME)/Documents/LoFloat/test
+# Include paths (relative to LOFLOAT_ROOT so it works anywhere)
+INCLUDE_PATH += -I$(LOFLOAT_ROOT)
+INCLUDE_PATH += -I$(LOFLOAT_ROOT)/src
+INCLUDE_PATH += -I$(LOFLOAT_ROOT)/test
+INCLUDE_PATH += -I$(LOFLOAT_ROOT)/third_party/xsimd/include
 
-LLVM_FLAGS = -S -emit-llvm 
+# LLVM IR flags
+LLVM_FLAGS = -S -emit-llvm
 
-ALL_EXEC = test_var_float test_lo_float test_lo_int test_expectation \
-		   test_probability test_exceptions test_unsigned test_ultra_low \
-		   test_rounding_modes test_small test_enum test_subnormal \
-		   test_compare test_compare_int test_recip
+# Executables
+ALL_EXEC = test_lo_float test_lo_int test_expectation \
+           test_probability test_exceptions test_unsigned test_ultra_low \
+           test_rounding_modes test_small test_enum test_subnormal \
+           test_compare test_compare_int test_recip test_float_int \
+           test_dot test_gemm
 
+# Default / "all" option
+all: $(ALL_EXEC)
 
+# Build rules
+test_lo_float: lo_float_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-VAR_FLOAT:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) var_float_test.cpp -o test_var_float
+test_lo_int: lo_int_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-LO_FLOAT:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) lo_float_test.cpp -o test_lo_float
+test_expectation: stoch_expect_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-LO_INT:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) lo_int_test.cpp -o test_lo_int
+test_probability: stoch_prob_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-EXPECTATION:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) stoch_expect_test.cpp -o test_expectation 
+test_exceptions: exceptions_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-PROBABILITY:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) stoch_prob_test.cpp -o test_probability
+test_unsigned: test_unsigned.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-EXCEPTIONS:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) exceptions_test.cpp -o test_exceptions
+test_ultra_low: ultra_low_tests.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-UNSIGNED:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) test_unsigned.cpp -o test_unsigned
+test_rounding_modes: test_rounding_modes.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-ULTRA_LOW:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) ultra_low_tests.cpp -o test_ultra_low
+test_float_int: test_float_to_int.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-ROUNDING_MODES:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) test_rounding_modes.cpp -o test_rounding_modes
+test_small: small_rounding_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-FLOAT_INT:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) test_float_to_int.cpp -o test_float_int
+test_enum: fp8_enum_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-SMALL:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) small_rounding_test.cpp -o test_small
+test_subnormal: subnormal_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-ENUM:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) fp8_enum_test.cpp -o test_enum
+test_compare: compare_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-SUBNORMAL:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) subnormal_test.cpp -o test_subnormal
+test_compare_int: compare_int_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-COMPARE_FLOAT:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) compare_test.cpp -o test_compare
+test_recip: recip_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-COMPARE_INT:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) compare_int_test.cpp -o test_compare_int
+test_dot: dot_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-RECIP:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) recip_test.cpp -o test_recip
+test_gemm: gemm_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
-DOT:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) dot_test.cpp -o test_dot
+# LLVM IR targets (optional)
+lo_float_test.ll: lo_float_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-GEMM:
-	$(CXX) $(CXXFLAGS)  $(INCLUDE_PATH) gemm_test.cpp -o test_gemm
+lo_int_test.ll: lo_int_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-ALL: LO_FLOAT LO_INT EXPECTATION PROBABILITY EXCEPTIONS UNSIGNED ULTRA_LOW ROUNDING_MODES
+stoch_expect_test.ll: stoch_expect_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-LO_FLOAT_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) lo_float_test.cpp -o lo_float_test.ll
+stoch_prob_test.ll: stoch_prob_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-VAR_FLOAT_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) var_float_test.cpp -o var_float_test.ll
+exceptions_test.ll: exceptions_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-# Add more as needed
-LO_INT_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) lo_int_test.cpp -o lo_int_test.ll
+test_unsigned.ll: test_unsigned.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-EXPECTATION_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) stoch_expect_test.cpp -o stoch_expect_test.ll
+ultra_low_tests.ll: ultra_low_tests.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-PROBABILITY_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) stoch_prob_test.cpp -o stoch_prob_test.ll
+test_rounding_modes.ll: test_rounding_modes.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-EXCEPTIONS_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) exceptions_test.cpp -o exceptions_test.ll
+small_rounding_test.ll: small_rounding_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-UNSIGNED_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) test_unsigned.cpp -o test_unsigned.ll
+fp8_enum_test.ll: fp8_enum_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-ULTRA_LOW_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) ultra_low_tests.cpp -o ultra_low_tests.ll
+subnormal_test.ll: subnormal_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-ROUNDING_MODES_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) test_rounding_modes.cpp -o test_rounding_modes.ll
+compare_test.ll: compare_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
-SMALL_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) small_rounding_test.cpp -o small_rounding_test.ll
-
-ENUM_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) fp8_enum_test.cpp -o fp8_enum_test.ll
-
-
-SUBNORMAL_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) subnormal_test.cpp -o subnormal_test.ll
-
-COMPARE_FLOAT_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) compare_test.cpp -o compare_test.ll
-
-COMPARE_INT_LLVM:
-	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) compare_int_test.cpp -o compare_int_test.ll
+compare_int_test.ll: compare_int_test.cpp
+	$(CXX) $(CXXFLAGS) $(LLVM_FLAGS) $(INCLUDE_PATH) $< -o $@
 
 clean:
-	rm -rf *.ll *.dSYM 
+	rm -rf *.ll *.dSYM
 	rm -f $(ALL_EXEC)
 
 .PHONY: all clean
