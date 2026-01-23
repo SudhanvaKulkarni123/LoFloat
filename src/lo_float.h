@@ -2405,8 +2405,6 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
                 using IntSIMD      = SignedWideBitsSIMD;
                 using SignedFromBitsSIMD = xs::batch<SignedFromBits, arch>;
                 
-
-
                 constexpr int from_lanes = FromBitsSIMD::size;
                 constexpr int to_lanes   = ToBitsSIMD::size;
                 constexpr int step       = (from_lanes < to_lanes) ? from_lanes : to_lanes;
@@ -2626,6 +2624,7 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
         
         store_to_full(i, finite_out);
     }
+}
 }
 
          };
