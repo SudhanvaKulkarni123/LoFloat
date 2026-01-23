@@ -2089,7 +2089,7 @@ namespace lo_float
             using FromBits = typename FromTraits::BitsType;
             using SignedFromBits = std::make_signed_t<FromBits>;
             static constexpr int kFromBits = FromTraits::kBits;
-            static constexpr unsigned int kFromMantissaBits = FromTraits::kMantissaBits;
+            static constexpr int kFromMantissaBits = FromTraits::kMantissaBits;
             static constexpr int kFromExponentBits = FromTraits::kExponentBits;
             static constexpr int kFromExponentBias = FromTraits::kExponentBias;
             static constexpr FromBits kFromExponentMask = FromTraits::kExponentMask;
@@ -2098,7 +2098,7 @@ namespace lo_float
             using ToTraits = Traits<To>;
             using ToBits = typename ToTraits::BitsType;
             static constexpr int kToBits = ToTraits::kBits;
-            static constexpr unsigned int kToMantissaBits = ToTraits::kMantissaBits;
+            static constexpr int kToMantissaBits = ToTraits::kMantissaBits;
             static constexpr int kToExponentBits = ToTraits::kExponentBits;
             static constexpr int kToExponentBias = ToTraits::kExponentBias;
             static constexpr ToBits kToExponentMask = ToTraits::kExponentMask;
