@@ -91,7 +91,11 @@ BenchResult<OutFloat> bench_project(
 
         // Warmup
         for (int i = 0; i < warmup_iters; i++) {
-            lo_float::Project(in.data(), out.data(), n, mode);
+            //lo_float::Project(in.data(), out.data(), n, mode);
+            #pragma omp parallel for
+            for (int i = 0; i < n; i++) {
+                out[i] = lo_float::Project<OutFloat>(in[i], mode);
+            }
             g_sink += static_cast<float>(out[i % n]);
         }
 
@@ -106,7 +110,11 @@ BenchResult<OutFloat> bench_project(
 
         for (int i = 0; i < iters_used; i++) {
             auto t0 = std::chrono::steady_clock::now();
-            lo_float::Project(in.data(), out.data(), n, mode);
+            // lo_float::Project(in.data(), out.data(), n, mode);
+            #pragma omp parallel for
+            for (int i = 0; i < n; i++) {
+                out[i] = lo_float::Project<OutFloat>(in[i], mode);
+            }
             auto t1 = std::chrono::steady_clock::now();
 
             g_sink += static_cast<float>(out[(i * 17) % n]);
@@ -161,6 +169,7 @@ int main() {
     const int n = 1 << 20;        // ~1,048,576 elements (change as desired)
     const int warmup = 5;
     const int iters  = 50;
+
 
     // Benchmark binary8p4
     bench_project<p3109_s_sat<8,4>>("binary8p4 (P3109<8,4>)", n, iters, warmup);
