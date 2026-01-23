@@ -1,31 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import sys
-import os
-
-current_script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Construct the path to the 'src' directory relative to the current script
-# Assuming 'your_script.py' is in 'some_dir' and 'src' is one level up and into 'src'
-# So, from 'some_dir', we go '..' then into 'src'
-quant_layer_dir = os.path.join(current_script_dir, '..','..', 'src', 'Pytorch_ext')
-
-
-
-quant_layer_dir = os.path.abspath(quant_layer_dir)
-
-sys.path.append(quant_layer_dir)
-
-try:
-    # If Wuant_Layer.py defines LoFloatFakeQuant, you would import it like this:
-    from Quant_Layer import LoFloatFakeQuant
-    print("Successfully imported LoFloatFakeQuant from Wuant_Layer.py!")
-except ImportError as e:
-    print(f"Error importing Wuant_Layer: {e}")
-    print(f"Current sys.path: {sys.path}")
-    print(f"Attempted to add: {quant_layer_dir}")
+import collect_metadata
+from collect_metadata import extract_graph
+from collect_metadata import print_graph
+from collect_metadata import print_per_layer_flops
 
 
 class DepthwiseSeparableConv(nn.Module):
@@ -59,13 +38,11 @@ class MobileNetV1(nn.Module):
             conv_bn(3, 32, 2),  # Input: 224x224x3 → Output: 112x112x32
 
             DepthwiseSeparableConv(32, 64, 1),
-            LoFloatFakeQuant(0.5, 0.0),
             DepthwiseSeparableConv(64, 128, 2),
             DepthwiseSeparableConv(128, 128, 1),
             DepthwiseSeparableConv(128, 256, 2),
             DepthwiseSeparableConv(256, 256, 1),
             DepthwiseSeparableConv(256, 512, 2),
-            LoFloatFakeQuant(0.5, 0.0),
             *[DepthwiseSeparableConv(512, 512, 1) for _ in range(5)],
 
             DepthwiseSeparableConv(512, 1024, 2),
@@ -82,4 +59,11 @@ class MobileNetV1(nn.Module):
         x = self.fc(x)
         return x
 
+
+model = MobileNetV1()
+x = torch.randn(1, 3, 224, 224)
+
+g = extract_graph(model, (x,), prefer="export")  # or prefer="fx"
+print("kind:", g.kind)
+print_per_layer_flops(model, (x,))
 

@@ -1,4 +1,4 @@
-#include "Gemms.hpp"
+#include "gemms.hpp"
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -52,18 +52,18 @@ void printMatrix(const Matrix<T, idx, layout>& mat, int max_rows = 10, int max_c
 }
 
 void test_gemm_large_random() {
-    constexpr int MR = 4, NR = 4, KR = 4;
+    constexpr int MR = 8, NR = 8, KR = 8;
    
     using half = lo_float::Templated_Float<lo_float::halfPrecisionParams>;
     using T = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
-    using T2 = half;
-    using T3 = half;
+    using T2 = float;
+    using T3 = float;
     constexpr Layout layout = Layout::RowMajor;
 
     // Large dimensions
-    constexpr int M = 20;
-    constexpr int K = 2;
-    constexpr int N = 20;
+    constexpr int M = 2048;
+    constexpr int K = 2048;
+    constexpr int N = 2048;
 
     T* A_data = new T[M * K];
     T* B_data = new T[K * N];
@@ -105,12 +105,6 @@ void test_gemm_large_random() {
     naive_gemm(A, B, C_ref);
     abs_naive_gemm(A, B, C_ref_abs);
 
-    printMatrix(C, M, N);
-
-    std::cout << "Reference C (naive GEMM):\n";
-    printMatrix(C_ref, M, N);
-    std::cout << "Reference C abs (naive GEMM):\n";
-    printMatrix(C_ref_abs, M, N);
     double max_diff = 0.0;
     double tolerance = K * std::pow(2.0, -10);
 

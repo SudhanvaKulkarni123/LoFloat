@@ -1,5 +1,9 @@
+#include <xsimd/xsimd.hpp>   // xsimd::batch, xsimd::is_batch, load_unaligned, broadcast
+#include <type_traits>      // std::conditional_t, std::is_same_v, remove_cv_t
 
 
+
+using namespace xsimd;
 namespace lo_float {
     namespace lo_float_internal {
 
@@ -192,7 +196,64 @@ struct get_IsInf<T, std::void_t<decltype(T::IsInfFunctor)>> {
 template <class T>
 inline constexpr auto get_IsInf_v = get_IsInf<T>::value;
 
+// xsimd helpers
+template <typename T>
+struct get_pod_type {
+    using type = std::remove_cv_t<std::remove_reference_t<T>>;
+};
 
+template <typename U, typename Arch>
+struct get_pod_type<xsimd::batch<U, Arch>> {
+    using type = U;
+};
+
+template <typename T>
+using pod_type_t = typename get_pod_type<T>::type;
+
+template <typename T>
+struct num_lanes {
+    static constexpr std::size_t value = 1;
+};
+template <typename U, typename Arch>
+struct num_lanes<xsimd::batch<U, Arch>> {
+    static constexpr std::size_t value = xsimd::batch<U, Arch>::size;
+};
+
+template <typename T>
+inline constexpr std::size_t num_lanes_v = num_lanes<T>::value;
+
+
+
+template <typename T>
+struct get_InfChecker {
+    using type = typename T::IsInf_Functor;
+};
+
+// template <>
+// struct get_InfChecker<float> {
+//     using type = native_InfChecker<float>;
+// };
+
+// template <>
+// struct get_InfChecker<double> {
+//     using type = native_InfChecker<double>;
+// };
+
+
+template <typename T>
+struct get_NanChecker {
+    using type = typename T::IsNaN_Functor;
+};
+
+// template <>
+// struct get_NanChecker<float> {
+//     using type = native_NaNChecker<float>;
+// };
+
+// template <>
+// struct get_NanChecker<double> {
+//     using type = native_NaNChecker<double>;
+// };
 
 
 

@@ -54,13 +54,13 @@ int test_n2sn_3109() {
 
         double UNT = (double)std::numeric_limits<P3109_type>::denorm_min();
 
-        P3109_type fd   = Round<float,P3109_type, Rounding_Mode::RoundDown>(d);
-        P3109_type fu   = Round<float,P3109_type, Rounding_Mode::RoundUp>(d);
-        P3109_type frne = Round<float,P3109_type, Rounding_Mode::RoundToNearestEven>(d);
-        P3109_type frno = Round<float,P3109_type, Rounding_Mode::RoundToNearestOdd>(d);
-        P3109_type frta = Round<float,P3109_type, Rounding_Mode::RoundTiesToAway>(d);
-        P3109_type frtz = Round<float,P3109_type, Rounding_Mode::RoundTowardsZero>(d);
-        P3109_type fraw = Round<float,P3109_type, Rounding_Mode::RoundAwayFromZero>(d);
+        P3109_type fd   = Round<P3109_type>(d, Rounding_Mode::RoundDown);
+        P3109_type fu   = Round<P3109_type>(d, Rounding_Mode::RoundUp);
+        P3109_type frne = Round<P3109_type>(d, Rounding_Mode::RoundToNearestEven);
+        P3109_type frno = Round<P3109_type>(d, Rounding_Mode::RoundToNearestOdd);
+        P3109_type frta = Round<P3109_type>(d, Rounding_Mode::RoundTiesToAway);
+        P3109_type frtz = Round<P3109_type>(d, Rounding_Mode::RoundTowardsZero);
+        P3109_type fraw = Round<P3109_type>(d, Rounding_Mode::RoundAwayFromZero);
 
         double denom = get_denom(d);
 
@@ -191,9 +191,9 @@ int test_n2sn_3109() {
             double b_d = (double)P3109_type::FromRep(rep+1);
             double tie = (a_d + b_d) / 2.0;
 
-            P3109_type rne = Round<double,P3109_type, Rounding_Mode::RoundToNearestEven>(tie);
-            P3109_type rno = Round<double,P3109_type, Rounding_Mode::RoundToNearestOdd>(tie);
-            P3109_type rta = Round<double,P3109_type, Rounding_Mode::RoundTiesToAway>(tie);
+            P3109_type rne = Round<P3109_type>(tie, Rounding_Mode::RoundToNearestEven);
+            P3109_type rno = Round<P3109_type>(tie, Rounding_Mode::RoundToNearestOdd);
+            P3109_type rta = Round<P3109_type>(tie, Rounding_Mode::RoundTiesToAway);
 
             if(isnan(tie)) continue;
             if (!is_even(rne.rep())) {
@@ -228,130 +228,130 @@ std::cout << "P3109<" << l << "," << p << "> : "
 //add test cases for fp16. bf16 and tf32
 int test_n2n_old()
 {
-     auto is_even = [](uint32_t bits){ return (bits & 1u) == 0; };
+    auto is_even = [](uint32_t bits){ return (bits & 1u) == 0; };
     auto is_odd  = [](uint32_t bits){ return (bits & 1u) == 1; };
     int num_errors = 0;
 
     for(int i = 0; i < 10000; i++) {
     float d = static_cast<float>(std::rand()) / RAND_MAX * 1000.0f;
 
-    using bf16 = Templated_Float<bfloatPrecisionParams>;
-    using tf32 = Templated_Float<tf32PrecisionParams>;
-    using binary16 = Templated_Float<halfPrecisionParams>;
+        using bf16 = Templated_Float<bfloatPrecisionParams>;
+        using tf32 = Templated_Float<tf32PrecisionParams>;
+        using binary16 = Templated_Float<halfPrecisionParams>;
 
-    double denom = get_denom(d);
+        double denom = get_denom(d);
 
-    // bf16 rounding and error calculations
-    bf16 fb_d   = Round<float, bf16, Rounding_Mode::RoundDown>(d);
-    bf16 fb_u   = Round<float, bf16, Rounding_Mode::RoundUp>(d);
-    bf16 fb_rne = Round<float, bf16, Rounding_Mode::RoundToNearestEven>(d);
-    bf16 fb_rno = Round<float, bf16, Rounding_Mode::RoundToNearestOdd>(d);
-    bf16 fb_rta = Round<float, bf16, Rounding_Mode::RoundTiesToAway>(d);
-    bf16 fb_rtz = Round<float, bf16, Rounding_Mode::RoundTowardsZero>(d);
-    bf16 fb_raw = Round<float, bf16, Rounding_Mode::RoundAwayFromZero>(d);
+        // bf16 rounding and error calculations
+        bf16 fb_d   = Round<bf16>(d, Rounding_Mode::RoundDown);
+        bf16 fb_u   = Round<bf16>(d, Rounding_Mode::RoundUp);
+        bf16 fb_rne = Round<bf16>(d, Rounding_Mode::RoundToNearestEven);
+        bf16 fb_rno = Round<bf16>(d, Rounding_Mode::RoundToNearestOdd);
+        bf16 fb_rta = Round<bf16>(d, Rounding_Mode::RoundTiesToAway);
+        bf16 fb_rtz = Round<bf16>(d, Rounding_Mode::RoundTowardsZero);
+        bf16 fb_raw = Round<bf16>(d, Rounding_Mode::RoundAwayFromZero);
 
-    double abs_b_d = std::fabs(static_cast<double>(fb_d) - d);
-    double abs_b_u = std::fabs(static_cast<double>(fb_u) - d);
-    double abs_b_rne = std::fabs(static_cast<double>(fb_rne) - d);
-    double abs_b_rno = std::fabs(static_cast<double>(fb_rno) - d);
-    double abs_b_rta = std::fabs(static_cast<double>(fb_rta) - d);
-    double abs_b_rtz = std::fabs(static_cast<double>(fb_rtz) - d);
-    double abs_b_raw = std::fabs(static_cast<double>(fb_raw) - d);
+        double abs_b_d = std::fabs(static_cast<double>(fb_d) - d);
+        double abs_b_u = std::fabs(static_cast<double>(fb_u) - d);
+        double abs_b_rne = std::fabs(static_cast<double>(fb_rne) - d);
+        double abs_b_rno = std::fabs(static_cast<double>(fb_rno) - d);
+        double abs_b_rta = std::fabs(static_cast<double>(fb_rta) - d);
+        double abs_b_rtz = std::fabs(static_cast<double>(fb_rtz) - d);
+        double abs_b_raw = std::fabs(static_cast<double>(fb_raw) - d);
 
-    double rel_b_d = abs_b_d / denom;
-    double rel_b_u = abs_b_u / denom;
-    double rel_b_rne = abs_b_rne / denom;
-    double rel_b_rno = abs_b_rno / denom;
-    double rel_b_rta = abs_b_rta / denom;
-    double rel_b_rtz = abs_b_rtz / denom;
-    double rel_b_raw = abs_b_raw / denom;
+        double rel_b_d = abs_b_d / denom;
+        double rel_b_u = abs_b_u / denom;
+        double rel_b_rne = abs_b_rne / denom;
+        double rel_b_rno = abs_b_rno / denom;
+        double rel_b_rta = abs_b_rta / denom;
+        double rel_b_rtz = abs_b_rtz / denom;
+        double rel_b_raw = abs_b_raw / denom;
 
-    // tf32 rounding and error calculations
-    tf32 ft_d   = Round<float, tf32, Rounding_Mode::RoundDown>(d);
-    tf32 ft_u   = Round<float, tf32, Rounding_Mode::RoundUp>(d);
-    tf32 ft_rne = Round<float, tf32, Rounding_Mode::RoundToNearestEven>(d);
-    tf32 ft_rno = Round<float, tf32, Rounding_Mode::RoundToNearestOdd>(d);
-    tf32 ft_rta = Round<float, tf32, Rounding_Mode::RoundTiesToAway>(d);
-    tf32 ft_rtz = Round<float, tf32, Rounding_Mode::RoundTowardsZero>(d);
-    tf32 ft_raw = Round<float, tf32, Rounding_Mode::RoundAwayFromZero>(d);
+        // tf32 rounding and error calculations
+        tf32 ft_d   = Round<tf32>(d, Rounding_Mode::RoundDown);
+        tf32 ft_u   = Round<tf32>(d, Rounding_Mode::RoundUp);
+        tf32 ft_rne = Round<tf32>(d, Rounding_Mode::RoundToNearestEven);
+        tf32 ft_rno = Round<tf32>(d, Rounding_Mode::RoundToNearestOdd);
+        tf32 ft_rta = Round<tf32>(d, Rounding_Mode::RoundTiesToAway);
+        tf32 ft_rtz = Round<tf32>(d, Rounding_Mode::RoundTowardsZero);
+        tf32 ft_raw = Round<tf32>(d, Rounding_Mode::RoundAwayFromZero);
 
-    double abs_t_d = std::fabs(static_cast<double>(ft_d) - d);
-    double abs_t_u = std::fabs(static_cast<double>(ft_u) - d);
-    double abs_t_rne = std::fabs(static_cast<double>(ft_rne) - d);
-    double abs_t_rno = std::fabs(static_cast<double>(ft_rno) - d);
-    double abs_t_rta = std::fabs(static_cast<double>(ft_rta) - d);
-    double abs_t_rtz = std::fabs(static_cast<double>(ft_rtz) - d);
-    double abs_t_raw = std::fabs(static_cast<double>(ft_raw) - d);
+        double abs_t_d = std::fabs(static_cast<double>(ft_d) - d);
+        double abs_t_u = std::fabs(static_cast<double>(ft_u) - d);
+        double abs_t_rne = std::fabs(static_cast<double>(ft_rne) - d);
+        double abs_t_rno = std::fabs(static_cast<double>(ft_rno) - d);
+        double abs_t_rta = std::fabs(static_cast<double>(ft_rta) - d);
+        double abs_t_rtz = std::fabs(static_cast<double>(ft_rtz) - d);
+        double abs_t_raw = std::fabs(static_cast<double>(ft_raw) - d);
 
-    double rel_t_d = abs_t_d / denom;
-    double rel_t_u = abs_t_u / denom;
-    double rel_t_rne = abs_t_rne / denom;
-    double rel_t_rno = abs_t_rno / denom;
-    double rel_t_rta = abs_t_rta / denom;
-    double rel_t_rtz = abs_t_rtz / denom;
-    double rel_t_raw = abs_t_raw / denom;
+        double rel_t_d = abs_t_d / denom;
+        double rel_t_u = abs_t_u / denom;
+        double rel_t_rne = abs_t_rne / denom;
+        double rel_t_rno = abs_t_rno / denom;
+        double rel_t_rta = abs_t_rta / denom;
+        double rel_t_rtz = abs_t_rtz / denom;
+        double rel_t_raw = abs_t_raw / denom;
 
-    // binary16 rounding and error calculations
-    binary16 fh_d   = Round<float, binary16, Rounding_Mode::RoundDown>(d);
-    binary16 fh_u   = Round<float, binary16, Rounding_Mode::RoundUp>(d);
-    binary16 fh_rne = Round<float, binary16, Rounding_Mode::RoundToNearestEven>(d);
-    binary16 fh_rno = Round<float, binary16, Rounding_Mode::RoundToNearestOdd>(d);
-    binary16 fh_rta = Round<float, binary16, Rounding_Mode::RoundTiesToAway>(d);
-    binary16 fh_rtz = Round<float, binary16, Rounding_Mode::RoundTowardsZero>(d);
-    binary16 fh_raw = Round<float, binary16, Rounding_Mode::RoundAwayFromZero>(d);
+        // binary16 rounding and error calculations
+        binary16 fh_d   = Round<binary16>(d, Rounding_Mode::RoundDown);
+        binary16 fh_u   = Round<binary16>(d, Rounding_Mode::RoundUp);
+        binary16 fh_rne = Round<binary16>(d, Rounding_Mode::RoundToNearestEven);
+        binary16 fh_rno = Round<binary16>(d, Rounding_Mode::RoundToNearestOdd);
+        binary16 fh_rta = Round<binary16>(d, Rounding_Mode::RoundTiesToAway);
+        binary16 fh_rtz = Round<binary16>(d, Rounding_Mode::RoundTowardsZero);
+        binary16 fh_raw = Round<binary16>(d, Rounding_Mode::RoundAwayFromZero);
 
-    double abs_h_d = std::fabs(static_cast<double>(fh_d) - d);
-    double abs_h_u = std::fabs(static_cast<double>(fh_u) - d);
-    double abs_h_rne = std::fabs(static_cast<double>(fh_rne) - d);
-    double abs_h_rno = std::fabs(static_cast<double>(fh_rno) - d);
-    double abs_h_rta = std::fabs(static_cast<double>(fh_rta) - d);
-    double abs_h_rtz = std::fabs(static_cast<double>(fh_rtz) - d);
-    double abs_h_raw = std::fabs(static_cast<double>(fh_raw) - d);
+        double abs_h_d = std::fabs(static_cast<double>(fh_d) - d);
+        double abs_h_u = std::fabs(static_cast<double>(fh_u) - d);
+        double abs_h_rne = std::fabs(static_cast<double>(fh_rne) - d);
+        double abs_h_rno = std::fabs(static_cast<double>(fh_rno) - d);
+        double abs_h_rta = std::fabs(static_cast<double>(fh_rta) - d);
+        double abs_h_rtz = std::fabs(static_cast<double>(fh_rtz) - d);
+        double abs_h_raw = std::fabs(static_cast<double>(fh_raw) - d);
 
-    double rel_h_d = abs_h_d / denom;
-    double rel_h_u = abs_h_u / denom;
-    double rel_h_rne = abs_h_rne / denom;
-    double rel_h_rno = abs_h_rno / denom;
-    double rel_h_rta = abs_h_rta / denom;
-    double rel_h_rtz = abs_h_rtz / denom;
-    double rel_h_raw = abs_h_raw / denom;
+        double rel_h_d = abs_h_d / denom;
+        double rel_h_u = abs_h_u / denom;
+        double rel_h_rne = abs_h_rne / denom;
+        double rel_h_rno = abs_h_rno / denom;
+        double rel_h_rta = abs_h_rta / denom;
+        double rel_h_rtz = abs_h_rtz / denom;
+        double rel_h_raw = abs_h_raw / denom;
 
-    if (!isnan(d)) {
-        double mach_eps_b = std::pow(2.0, -7); //bf16 epsilon
-        double mach_eps_t = std::pow(2.0, -10); //tf32 epsilon
-        double mach_eps_h = std::pow(2.0, -10); //half precision epsilon
+        if (!isnan(d)) {
+            double mach_eps_b = std::pow(2.0, -7); //bf16 epsilon
+            double mach_eps_t = std::pow(2.0, -10); //tf32 epsilon
+            double mach_eps_h = std::pow(2.0, -10); //half precision epsilon
 
-        double UNT_b = (double)std::numeric_limits<bf16>::denorm_min();
-        double UNT_t = (double)std::numeric_limits<tf32>::denorm_min();
-        double UNT_h = (double)std::numeric_limits<binary16>::denorm_min();
+            double UNT_b = (double)std::numeric_limits<bf16>::denorm_min();
+            double UNT_t = (double)std::numeric_limits<tf32>::denorm_min();
+            double UNT_h = (double)std::numeric_limits<binary16>::denorm_min();
 
-        // --- bf16 Tests ---
-        if (is_normal(fb_d)) { if ((double)fb_d > d || rel_b_d > mach_eps_b) { std::cout << "bf16 RoundDown failed (x=" << d << " res=" << (double)fb_d << " rel_err=" << rel_b_d << ")\n"; num_errors++; } } else { if ((double)fb_d > d || abs_b_d > UNT_b) { std::cout << "bf16 RoundDown failed (x=" << d << " res=" << (double)fb_d << " abs_err=" << abs_b_d << ")\n"; num_errors++; } }
-        if (is_normal(fb_u)) { if ((double)fb_u < d || rel_b_u > mach_eps_b) { std::cout << "bf16 RoundUp failed (x=" << d << " res=" << (double)fb_u << " rel_err=" << rel_b_u << ")\n"; num_errors++; } } else { if ((double)fb_u < d || abs_b_u > UNT_b) { std::cout << "bf16 RoundUp failed (x=" << d << " res=" << (double)fb_u << " abs_err=" << abs_b_u << ")\n"; num_errors++; } }
-        if (is_normal(fb_rtz)) { if (std::fabs((double)fb_rtz) > std::fabs(d) || rel_b_rtz > mach_eps_b) { std::cout << "bf16 RoundTowardsZero failed (x=" << d << " res=" << (double)fb_rtz << " rel_err=" << rel_b_rtz << ")\n"; num_errors++; } } else { if (std::fabs((double)fb_rtz) > std::fabs(d) || abs_b_rtz > UNT_b) { std::cout << "bf16 RoundTowardsZero failed (x=" << d << " res=" << (double)fb_rtz << " abs_err=" << abs_b_rtz << ")\n"; num_errors++; } }
-        if (is_normal(fb_raw)) { if (std::fabs((double)fb_raw) < std::fabs(d) || rel_b_raw > mach_eps_b) { std::cout << "bf16 RoundAwayFromZero failed (x=" << d << " res=" << (double)fb_raw << " rel_err=" << rel_b_raw << ")\n"; num_errors++; } } else { if (std::fabs((double)fb_raw) < std::fabs(d) || abs_b_raw > UNT_b) { std::cout << "bf16 RoundAwayFromZero failed (x=" << d << " res=" << (double)fb_raw << " abs_err=" << abs_b_raw << ")\n"; num_errors++; } }
-        if (is_normal(fb_rne)) { if (rel_b_rne > mach_eps_b) { std::cout << "bf16 RoundTiesToEven failed (x=" << d << " res=" << (double)fb_rne << " rel_err=" << rel_b_rne << ")\n"; num_errors++; } } else { if (abs_b_rne > UNT_b) { std::cout << "bf16 RoundTiesToEven failed (x=" << d << " res=" << (double)fb_rne << " abs_err=" << abs_b_rne << ")\n"; num_errors++; } }
-        if (is_normal(fb_rno)) { if (rel_b_rno > mach_eps_b) { std::cout << "bf16 RoundTiesToOdd failed (x=" << d << " res=" << (double)fb_rno << " rel_err=" << rel_b_rno << ")\n"; num_errors++; } } else { if (abs_b_rno > UNT_b) { std::cout << "bf16 RoundTiesToOdd failed (x=" << d << " res=" << (double)fb_rno << " abs_err=" << abs_b_rno << ")\n"; num_errors++; } }
-        if (is_normal(fb_rta)) { if (rel_b_rta > mach_eps_b) { std::cout << "bf16 RoundTiesToAway failed (x=" << d << " res=" << (double)fb_rta << " rel_err=" << rel_b_rta << ")\n"; num_errors++; } } else { if (abs_b_rta > UNT_b) { std::cout << "bf16 RoundTiesToAway failed (x=" << d << " res=" << (double)fb_rta << " abs_err=" << abs_b_rta << ")\n"; num_errors++; } }
+            // --- bf16 Tests ---
+            if (is_normal(fb_d)) { if ((double)fb_d > d || rel_b_d > mach_eps_b) { std::cout << "bf16 RoundDown failed (x=" << d << " res=" << (double)fb_d << " rel_err=" << rel_b_d << ")\n"; num_errors++; } } else { if ((double)fb_d > d || abs_b_d > UNT_b) { std::cout << "bf16 RoundDown failed (x=" << d << " res=" << (double)fb_d << " abs_err=" << abs_b_d << ")\n"; num_errors++; } }
+            if (is_normal(fb_u)) { if ((double)fb_u < d || rel_b_u > mach_eps_b) { std::cout << "bf16 RoundUp failed (x=" << d << " res=" << (double)fb_u << " rel_err=" << rel_b_u << ")\n"; num_errors++; } } else { if ((double)fb_u < d || abs_b_u > UNT_b) { std::cout << "bf16 RoundUp failed (x=" << d << " res=" << (double)fb_u << " abs_err=" << abs_b_u << ")\n"; num_errors++; } }
+            if (is_normal(fb_rtz)) { if (std::fabs((double)fb_rtz) > std::fabs(d) || rel_b_rtz > mach_eps_b) { std::cout << "bf16 RoundTowardsZero failed (x=" << d << " res=" << (double)fb_rtz << " rel_err=" << rel_b_rtz << ")\n"; num_errors++; } } else { if (std::fabs((double)fb_rtz) > std::fabs(d) || abs_b_rtz > UNT_b) { std::cout << "bf16 RoundTowardsZero failed (x=" << d << " res=" << (double)fb_rtz << " abs_err=" << abs_b_rtz << ")\n"; num_errors++; } }
+            if (is_normal(fb_raw)) { if (std::fabs((double)fb_raw) < std::fabs(d) || rel_b_raw > mach_eps_b) { std::cout << "bf16 RoundAwayFromZero failed (x=" << d << " res=" << (double)fb_raw << " rel_err=" << rel_b_raw << ")\n"; num_errors++; } } else { if (std::fabs((double)fb_raw) < std::fabs(d) || abs_b_raw > UNT_b) { std::cout << "bf16 RoundAwayFromZero failed (x=" << d << " res=" << (double)fb_raw << " abs_err=" << abs_b_raw << ")\n"; num_errors++; } }
+            if (is_normal(fb_rne)) { if (rel_b_rne > mach_eps_b) { std::cout << "bf16 RoundTiesToEven failed (x=" << d << " res=" << (double)fb_rne << " rel_err=" << rel_b_rne << ")\n"; num_errors++; } } else { if (abs_b_rne > UNT_b) { std::cout << "bf16 RoundTiesToEven failed (x=" << d << " res=" << (double)fb_rne << " abs_err=" << abs_b_rne << ")\n"; num_errors++; } }
+            if (is_normal(fb_rno)) { if (rel_b_rno > mach_eps_b) { std::cout << "bf16 RoundTiesToOdd failed (x=" << d << " res=" << (double)fb_rno << " rel_err=" << rel_b_rno << ")\n"; num_errors++; } } else { if (abs_b_rno > UNT_b) { std::cout << "bf16 RoundTiesToOdd failed (x=" << d << " res=" << (double)fb_rno << " abs_err=" << abs_b_rno << ")\n"; num_errors++; } }
+            if (is_normal(fb_rta)) { if (rel_b_rta > mach_eps_b) { std::cout << "bf16 RoundTiesToAway failed (x=" << d << " res=" << (double)fb_rta << " rel_err=" << rel_b_rta << ")\n"; num_errors++; } } else { if (abs_b_rta > UNT_b) { std::cout << "bf16 RoundTiesToAway failed (x=" << d << " res=" << (double)fb_rta << " abs_err=" << abs_b_rta << ")\n"; num_errors++; } }
 
-        // --- tf32 Tests ---
-        if (is_normal(ft_d)) { if ((double)ft_d > d || rel_t_d > mach_eps_t) { std::cout << "tf32 RoundDown failed (x=" << d << " res=" << (double)ft_d << " rel_err=" << rel_t_d << ")\n"; num_errors++; } } else { if ((double)ft_d > d || abs_t_d > UNT_t) { std::cout << "tf32 RoundDown failed (x=" << d << " res=" << (double)ft_d << " abs_err=" << abs_t_d << ")\n"; num_errors++; } }
-        if (is_normal(ft_u)) { if ((double)ft_u < d || rel_t_u > mach_eps_t) { std::cout << "tf32 RoundUp failed (x=" << d << " res=" << (double)ft_u << " rel_err=" << rel_t_u << ")\n"; num_errors++; } } else { if ((double)ft_u < d || abs_t_u > UNT_t) { std::cout << "tf32 RoundUp failed (x=" << d << " res=" << (double)ft_u << " abs_err=" << abs_t_u << ")\n"; num_errors++; } }
-        if (is_normal(ft_rtz)) { if (std::fabs((double)ft_rtz) > std::fabs(d) || rel_t_rtz > mach_eps_t) { std::cout << "tf32 RoundTowardsZero failed (x=" << d << " res=" << (double)ft_rtz << " rel_err=" << rel_t_rtz << ")\n"; num_errors++; } } else { if (std::fabs((double)ft_rtz) > std::fabs(d) || abs_t_rtz > UNT_t) { std::cout << "tf32 RoundTowardsZero failed (x=" << d << " res=" << (double)ft_rtz << " abs_err=" << abs_t_rtz << ")\n"; num_errors++; } }
-        if (is_normal(ft_raw)) { if (std::fabs((double)ft_raw) < std::fabs(d) || rel_t_raw > mach_eps_t) { std::cout << "tf32 RoundAwayFromZero failed (x=" << d << " res=" << (double)ft_raw << " rel_err=" << rel_t_raw << ")\n"; num_errors++; } } else { if (std::fabs((double)ft_raw) < std::fabs(d) || abs_t_raw > UNT_t) { std::cout << "tf32 RoundAwayFromZero failed (x=" << d << " res=" << (double)ft_raw << " abs_err=" << abs_t_raw << ")\n"; num_errors++; } }
-        if (is_normal(ft_rne)) { if (rel_t_rne > mach_eps_t) { std::cout << "tf32 RoundTiesToEven failed (x=" << d << " res=" << (double)ft_rne << " rel_err=" << rel_t_rne << ")\n"; num_errors++; } } else { if (abs_t_rne > UNT_t) { std::cout << "tf32 RoundTiesToEven failed (x=" << d << " res=" << (double)ft_rne << " abs_err=" << abs_t_rne << ")\n"; num_errors++; } }
-        if (is_normal(ft_rno)) { if (rel_t_rno > mach_eps_t) { std::cout << "tf32 RoundTiesToOdd failed (x=" << d << " res=" << (double)ft_rno << " rel_err=" << rel_t_rno << ")\n"; num_errors++; } } else { if (abs_t_rno > UNT_t) { std::cout << "tf32 RoundTiesToOdd failed (x=" << d << " res=" << (double)ft_rno << " abs_err=" << abs_t_rno << ")\n"; num_errors++; } }
-        if (is_normal(ft_rta)) { if (rel_t_rta > mach_eps_t) { std::cout << "tf32 RoundTiesToAway failed (x=" << d << " res=" << (double)ft_rta << " rel_err=" << rel_t_rta << ")\n"; num_errors++; } } else { if (abs_t_rta > UNT_t) { std::cout << "tf32 RoundTiesToAway failed (x=" << d << " res=" << (double)ft_rta << " abs_err=" << abs_t_rta << ")\n"; num_errors++; } }
+            // --- tf32 Tests ---
+            if (is_normal(ft_d)) { if ((double)ft_d > d || rel_t_d > mach_eps_t) { std::cout << "tf32 RoundDown failed (x=" << d << " res=" << (double)ft_d << " rel_err=" << rel_t_d << ")\n"; num_errors++; } } else { if ((double)ft_d > d || abs_t_d > UNT_t) { std::cout << "tf32 RoundDown failed (x=" << d << " res=" << (double)ft_d << " abs_err=" << abs_t_d << ")\n"; num_errors++; } }
+            if (is_normal(ft_u)) { if ((double)ft_u < d || rel_t_u > mach_eps_t) { std::cout << "tf32 RoundUp failed (x=" << d << " res=" << (double)ft_u << " rel_err=" << rel_t_u << ")\n"; num_errors++; } } else { if ((double)ft_u < d || abs_t_u > UNT_t) { std::cout << "tf32 RoundUp failed (x=" << d << " res=" << (double)ft_u << " abs_err=" << abs_t_u << ")\n"; num_errors++; } }
+            if (is_normal(ft_rtz)) { if (std::fabs((double)ft_rtz) > std::fabs(d) || rel_t_rtz > mach_eps_t) { std::cout << "tf32 RoundTowardsZero failed (x=" << d << " res=" << (double)ft_rtz << " rel_err=" << rel_t_rtz << ")\n"; num_errors++; } } else { if (std::fabs((double)ft_rtz) > std::fabs(d) || abs_t_rtz > UNT_t) { std::cout << "tf32 RoundTowardsZero failed (x=" << d << " res=" << (double)ft_rtz << " abs_err=" << abs_t_rtz << ")\n"; num_errors++; } }
+            if (is_normal(ft_raw)) { if (std::fabs((double)ft_raw) < std::fabs(d) || rel_t_raw > mach_eps_t) { std::cout << "tf32 RoundAwayFromZero failed (x=" << d << " res=" << (double)ft_raw << " rel_err=" << rel_t_raw << ")\n"; num_errors++; } } else { if (std::fabs((double)ft_raw) < std::fabs(d) || abs_t_raw > UNT_t) { std::cout << "tf32 RoundAwayFromZero failed (x=" << d << " res=" << (double)ft_raw << " abs_err=" << abs_t_raw << ")\n"; num_errors++; } }
+            if (is_normal(ft_rne)) { if (rel_t_rne > mach_eps_t) { std::cout << "tf32 RoundTiesToEven failed (x=" << d << " res=" << (double)ft_rne << " rel_err=" << rel_t_rne << ")\n"; num_errors++; } } else { if (abs_t_rne > UNT_t) { std::cout << "tf32 RoundTiesToEven failed (x=" << d << " res=" << (double)ft_rne << " abs_err=" << abs_t_rne << ")\n"; num_errors++; } }
+            if (is_normal(ft_rno)) { if (rel_t_rno > mach_eps_t) { std::cout << "tf32 RoundTiesToOdd failed (x=" << d << " res=" << (double)ft_rno << " rel_err=" << rel_t_rno << ")\n"; num_errors++; } } else { if (abs_t_rno > UNT_t) { std::cout << "tf32 RoundTiesToOdd failed (x=" << d << " res=" << (double)ft_rno << " abs_err=" << abs_t_rno << ")\n"; num_errors++; } }
+            if (is_normal(ft_rta)) { if (rel_t_rta > mach_eps_t) { std::cout << "tf32 RoundTiesToAway failed (x=" << d << " res=" << (double)ft_rta << " rel_err=" << rel_t_rta << ")\n"; num_errors++; } } else { if (abs_t_rta > UNT_t) { std::cout << "tf32 RoundTiesToAway failed (x=" << d << " res=" << (double)ft_rta << " abs_err=" << abs_t_rta << ")\n"; num_errors++; } }
 
-        // --- binary16 Tests ---
-        if (is_normal(fh_d)) { if ((double)fh_d > d || rel_h_d > mach_eps_h) { std::cout << "binary16 RoundDown failed (x=" << d << " res=" << (double)fh_d << " rel_err=" << rel_h_d << ")\n"; num_errors++; } } else { if ((double)fh_d > d || abs_h_d > UNT_h) { std::cout << "binary16 RoundDown failed (x=" << d << " res=" << (double)fh_d << " abs_err=" << abs_h_d << ")\n"; num_errors++; } }
-        if (is_normal(fh_u)) { if ((double)fh_u < d || rel_h_u > mach_eps_h) { std::cout << "binary16 RoundUp failed (x=" << d << " res=" << (double)fh_u << " rel_err=" << rel_h_u << ")\n"; num_errors++; } } else { if ((double)fh_u < d || abs_h_u > UNT_h) { std::cout << "binary16 RoundUp failed (x=" << d << " res=" << (double)fh_u << " abs_err=" << abs_h_u << ")\n"; num_errors++; } }
-        if (is_normal(fh_rtz)) { if (std::fabs((double)fh_rtz) > std::fabs(d) || rel_h_rtz > mach_eps_h) { std::cout << "binary16 RoundTowardsZero failed (x=" << d << " res=" << (double)fh_rtz << " rel_err=" << rel_h_rtz << ")\n"; num_errors++; } } else { if (std::fabs((double)fh_rtz) > std::fabs(d) || abs_h_rtz > UNT_h) { std::cout << "binary16 RoundTowardsZero failed (x=" << d << " res=" << (double)fh_rtz << " abs_err=" << abs_h_rtz << ")\n"; num_errors++; } }
-        if (is_normal(fh_raw)) { if (std::fabs((double)fh_raw) < std::fabs(d) || rel_h_raw > mach_eps_h) { std::cout << "binary16 RoundAwayFromZero failed (x=" << d << " res=" << (double)fh_raw << " rel_err=" << rel_h_raw << ")\n"; num_errors++; } } else { if (std::fabs((double)fh_raw) < std::fabs(d) || abs_h_raw > UNT_h) { std::cout << "binary16 RoundAwayFromZero failed (x=" << d << " res=" << (double)fh_raw << " abs_err=" << abs_h_raw << ")\n"; num_errors++; } }
-        if (is_normal(fh_rne)) { if (rel_h_rne > mach_eps_h) { std::cout << "binary16 RoundTiesToEven failed (x=" << d << " res=" << (double)fh_rne << " rel_err=" << rel_h_rne << ")\n"; num_errors++; } } else { if (abs_h_rne > UNT_h) { std::cout << "binary16 RoundTiesToEven failed (x=" << d << " res=" << (double)fh_rne << " abs_err=" << abs_h_rne << ")\n"; num_errors++; } }
-        if (is_normal(fh_rno)) { if (rel_h_rno > mach_eps_h) { std::cout << "binary16 RoundTiesToOdd failed (x=" << d << " res=" << (double)fh_rno << " rel_err=" << rel_h_rno << ")\n"; num_errors++; } } else { if (abs_h_rno > UNT_h) { std::cout << "binary16 RoundTiesToOdd failed (x=" << d << " res=" << (double)fh_rno << " abs_err=" << abs_h_rno << ")\n"; num_errors++; } }
-        if (is_normal(fh_rta)) { if (rel_h_rta > mach_eps_h) { std::cout << "binary16 RoundTiesToAway failed (x=" << d << " res=" << (double)fh_rta << " rel_err=" << rel_h_rta << ")\n"; num_errors++; } } else { if (abs_h_rta > UNT_h) { std::cout << "binary16 RoundTiesToAway failed (x=" << d << " res=" << (double)fh_rta << " abs_err=" << abs_h_rta << ")\n"; num_errors++; } }
-    }
+            // --- binary16 Tests ---
+            if (is_normal(fh_d)) { if ((double)fh_d > d || rel_h_d > mach_eps_h) { std::cout << "binary16 RoundDown failed (x=" << d << " res=" << (double)fh_d << " rel_err=" << rel_h_d << ")\n"; num_errors++; } } else { if ((double)fh_d > d || abs_h_d > UNT_h) { std::cout << "binary16 RoundDown failed (x=" << d << " res=" << (double)fh_d << " abs_err=" << abs_h_d << ")\n"; num_errors++; } }
+            if (is_normal(fh_u)) { if ((double)fh_u < d || rel_h_u > mach_eps_h) { std::cout << "binary16 RoundUp failed (x=" << d << " res=" << (double)fh_u << " rel_err=" << rel_h_u << ")\n"; num_errors++; } } else { if ((double)fh_u < d || abs_h_u > UNT_h) { std::cout << "binary16 RoundUp failed (x=" << d << " res=" << (double)fh_u << " abs_err=" << abs_h_u << ")\n"; num_errors++; } }
+            if (is_normal(fh_rtz)) { if (std::fabs((double)fh_rtz) > std::fabs(d) || rel_h_rtz > mach_eps_h) { std::cout << "binary16 RoundTowardsZero failed (x=" << d << " res=" << (double)fh_rtz << " rel_err=" << rel_h_rtz << ")\n"; num_errors++; } } else { if (std::fabs((double)fh_rtz) > std::fabs(d) || abs_h_rtz > UNT_h) { std::cout << "binary16 RoundTowardsZero failed (x=" << d << " res=" << (double)fh_rtz << " abs_err=" << abs_h_rtz << ")\n"; num_errors++; } }
+            if (is_normal(fh_raw)) { if (std::fabs((double)fh_raw) < std::fabs(d) || rel_h_raw > mach_eps_h) { std::cout << "binary16 RoundAwayFromZero failed (x=" << d << " res=" << (double)fh_raw << " rel_err=" << rel_h_raw << ")\n"; num_errors++; } } else { if (std::fabs((double)fh_raw) < std::fabs(d) || abs_h_raw > UNT_h) { std::cout << "binary16 RoundAwayFromZero failed (x=" << d << " res=" << (double)fh_raw << " abs_err=" << abs_h_raw << ")\n"; num_errors++; } }
+            if (is_normal(fh_rne)) { if (rel_h_rne > mach_eps_h) { std::cout << "binary16 RoundTiesToEven failed (x=" << d << " res=" << (double)fh_rne << " rel_err=" << rel_h_rne << ")\n"; num_errors++; } } else { if (abs_h_rne > UNT_h) { std::cout << "binary16 RoundTiesToEven failed (x=" << d << " res=" << (double)fh_rne << " abs_err=" << abs_h_rne << ")\n"; num_errors++; } }
+            if (is_normal(fh_rno)) { if (rel_h_rno > mach_eps_h) { std::cout << "binary16 RoundTiesToOdd failed (x=" << d << " res=" << (double)fh_rno << " rel_err=" << rel_h_rno << ")\n"; num_errors++; } } else { if (abs_h_rno > UNT_h) { std::cout << "binary16 RoundTiesToOdd failed (x=" << d << " res=" << (double)fh_rno << " abs_err=" << abs_h_rno << ")\n"; num_errors++; } }
+            if (is_normal(fh_rta)) { if (rel_h_rta > mach_eps_h) { std::cout << "binary16 RoundTiesToAway failed (x=" << d << " res=" << (double)fh_rta << " rel_err=" << rel_h_rta << ")\n"; num_errors++; } } else { if (abs_h_rta > UNT_h) { std::cout << "binary16 RoundTiesToAway failed (x=" << d << " res=" << (double)fh_rta << " abs_err=" << abs_h_rta << ")\n"; num_errors++; } }
+        }
 
     
 }
@@ -382,23 +382,87 @@ void instantiate_all() {
     instantiate_all_l(offset_sequence<2>(std::make_integer_sequence<int, 7>{}));
 }
 
+template<int l, int p>
+int test_array_round() {
+    
+    int n = 400;
+    float* float_arr = (float*) malloc(n*sizeof(float));
+    P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>* arr = (P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>*) malloc(sizeof(P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>)*n);
+    for (int i = 0; i < n; i++) {
+        float_arr[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+    }
+
+    lo_float::Project(float_arr, arr, n, Rounding_Mode::RoundToNearestEven);
+
+    int num_errors = 0;
+    for (int i = 0; i < n; i++) {
+        P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating> single_val = arr[i];
+        float UNT = (float)std::numeric_limits<P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>>::denorm_min();
+        float x  = float_arr[i];
+        float xr = static_cast<float>(arr[i]);           // [x] as float
+        float diff = std::fabs(xr - x);
+        float eps = std::ldexp(1.0f, -(p - 1));          // machine eps = 2^-(p-1)
+        int e = (x == 0.0f) ? 0 : std::ilogb(x);         // exponent of x
+        float tol = is_normal(single_val) ? 0.5f * eps * std::ldexp(1.0f, e) : UNT ;    // (eps/2) * 2^e
+        
+        if (!(diff < tol)) {
+            if constexpr ( l == 8 && (p == 7 || p == 6)) std::cout << "x = " << x << " xr = " << xr << " tol = " << tol; 
+            num_errors++;
+        }
+    }
+
+    if (num_errors == 0) {
+        std::cout << "Array rounding test passed for P3109<" << l << "," << p << ">\n";
+    } else {
+        std::cout << "Array rounding test failed for P3109<" << l << "," << p << "> with " << num_errors << " errors\n";
+    }
+
+    free(float_arr);
+    free(arr);
+
+    return num_errors;
+}
+
+template<int l, int... Ps>
+void test_array_for_l(std::integer_sequence<int, Ps...>) {
+    (test_array_round<l, Ps+1>(), ...);
+}
+
+template<int... Ls>
+void instantiate_array_test_all_l(std::integer_sequence<int, Ls...>) {
+    (test_array_for_l<Ls>(std::make_integer_sequence<int, Ls-1 >{}), ...);
+}
+
+void instantiate_array_all() {
+    // For l from 2 to 8
+    instantiate_array_test_all_l(offset_sequence<2>(std::make_integer_sequence<int, 7>{}));
+}
 
 
-// template<int l, int p>
-// int test_s2n_P3109() {
-
-// }
 
 
 
 // ------------------------------------------------------------------
 int main() {
-    instantiate_all();
-    test_n2n_old();
+   instantiate_all();
+   test_n2n_old();
+   instantiate_array_all();
 
-    using fp8 = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
-    double a = 0.99;
-    fp8 a_fp8 = fp8(a);
-    std::cout << "a_fp8: " << (double)a_fp8 << "\n";
+//    float float_arr[4];
+//    for (int i = 0; i < 4; i++) {
+//     float_arr[i] = 0.0067845568992197514f;
+//    }
+
+//    P3109_float<8, 7, Signedness::Signed, Inf_Behaviors::Saturating> arr[4];
+//    lo_float::Project(float_arr, arr, 4, Rounding_Mode::RoundToNearestEven);
+
+//    std::cout << (float)arr[0] << "\n";
+//    std::cout << (float)P3109_float<8, 7, Signedness::Signed, Inf_Behaviors::Saturating>(float_arr[0]) << "\n";
+
+   
+
+
+
+
         return 0;
 }

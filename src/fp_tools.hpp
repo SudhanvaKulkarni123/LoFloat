@@ -153,29 +153,29 @@ template<InfChecker IsInfFunctor, NaNChecker IsNaNFunctor>
 struct FloatingPointParams
 {
     /// @brief Total bit width of the floating-point number (including sign, exponent, mantissa).
-    int bitwidth;
+    int bitwidth; // - decides storage type - 4 total
 
     /// @brief Number of bits in the mantissa (fraction).  
     /// Exponent bits = bitwidth - mantissa_bits (minus sign bit if signed).
-    int mantissa_bits;
+    int mantissa_bits; // - decides compute type - 2/3 total
 
     /// @brief The exponent bias used by the format.
-    int bias;
+    int bias; // - runtime varibale - no instantiation needed
 
     /// @brief Describes how infinities are handled (see @ref Inf_Behaviors).
-    Inf_Behaviors OV_behavior;
+    Inf_Behaviors OV_behavior; // - runtime - 
 
     /// @brief Describes how NaNs are handled (see @ref NaN_Behaviors).
-    NaN_Behaviors NA_behavior;
+    NaN_Behaviors NA_behavior; // - compile time
 
     /// @brief Indicates whether this format is signed or unsigned (see @ref Signedness).
-    Signedness is_signed;
+    Signedness is_signed; // - runtime
 
     /// @brief A functor for checking and generating infinite values (must satisfy @ref InfChecker).
-    IsInfFunctor IsInf;
+    IsInfFunctor IsInf; // - fixed
 
     /// @brief A functor for checking and generating NaN values (must satisfy @ref NaNChecker).
-    IsNaNFunctor IsNaN;
+    IsNaNFunctor IsNaN; // -fixed
 
     ///  @brief enum to deal with how to deak with negatives for unsigned
     Unsigned_behavior unsigned_behavior;
@@ -215,6 +215,12 @@ struct FloatingPointParams
       , unsigned_behavior(ub)
     {}
 };
+
+struct LoPy_Template_Params {
+
+};
+
+
 
 /**
  * @struct SingleInfChecker

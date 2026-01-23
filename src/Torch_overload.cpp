@@ -12,12 +12,10 @@ using namespace lo_float;
 using namespace Lo_Gemm;
 
 #define LOOP_CAST(out_type) \
-    #pragma omp parallel for    \
         for (int64_t i = 0; i < tensor.numel(); ++i) {  \
             output_ptr[i] = static_cast<float>(static_cast<out_type>(std::round(input_ptr[i] / scale + zero_point)));   \
         }   
 #define MX_LOOP_CAST(out_type, scale_type) \
-    #pragma omp parallel for    \
         for (int64_t i = 0; i < tensor)
 
 enum precision_handles : uint8_t {
@@ -28,7 +26,7 @@ enum precision_handles : uint8_t {
 };
 
 //add descriptors to this enum whenever a new type is instantiated
-enum LoPy_types {
+enum LoPyTypes {
     binary8p3se,
     binary8p4se,
     binary8p5se,
@@ -52,7 +50,7 @@ enum LoPy_types {
     Tf32
 };
 
-enum Mx_LoPy_types {
+enum Mx_LoPyTypes {
     mxocpe2m1_ocpe8m0,
     mxocpe3m2_ocpe8m0,
     mxocpe4m3_ocpe8m0,
@@ -71,7 +69,7 @@ enum Mx_LoPy_types {
 
 
 //template<int k, int p, Signedness sign, Inf_Behaviors has_inf>
-auto fake_quantize_tensor(const torch::Tensor& tensor, float scale, float zero_point, LoPy_types type) {
+auto fake_quantize_tensor(const torch::Tensor& tensor, float scale, float zero_point, LoPyTypes type) {
     // Check if the tensor is contiguous
 
     // Create an empty tensor for the quantized output
@@ -80,40 +78,49 @@ auto fake_quantize_tensor(const torch::Tensor& tensor, float scale, float zero_p
     float* output_ptr = quantized_tensor.data_ptr<float>();
 
     switch(type) {
-        case LoPy_types::binary8p3se: {
-            LOOP_CAST(P3109_float<8, 3, Signedness::Signed, Inf_Behaviors::Extended>);
+        case LoPyTypes::binary8p3se: {
+            using out_type = P3109_float<8, 3, Signedness::Signed, Inf_Behaviors::Extended>;
+            LOOP_CAST(out_type);
             break;
         }
-        case LoPy_types::binary8p4se: {
-            LOOP_CAST(P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>);
+        case LoPyTypes::binary8p4se: {
+            using out_type = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
+            LOOP_CAST(out_type);
             break;
         }
-        case LoPy_types::binary8p5se: {
-            LOOP_CAST(P3109_float<8, 5, Signedness::Signed, Inf_Behaviors::Extended>);
+        case LoPyTypes::binary8p5se: {
+            using out_type = P3109_float<8, 5, Signedness::Signed, Inf_Behaviors::Extended>;
+            LOOP_CAST(out_type);
             break;
         }
-        case LoPy_types::binary6p1ue: {
-            LOOP_CAST(P3109_float<6, 1, Signedness::Unsigned, Inf_Behaviors::Extended>);
+        case LoPyTypes::binary6p1ue: {
+            using out_type = P3109_float<6, 1, Signedness::Unsigned, Inf_Behaviors::Extended>;
+            LOOP_CAST(out_type);
             break;
         }
-        case LoPy_types::binary6p2sf: {
-            LOOP_CAST(P3109_float<6, 2, Signedness::Signed, Inf_Behaviors::Saturating>);
+        case LoPyTypes::binary6p2sf: {
+            using out_type = P3109_float<6, 2, Signedness::Signed, Inf_Behaviors::Saturating>;
+            LOOP_CAST(out_type);
             break;
         }
-        case LoPy_types::binary6p3sf: {
-            LOOP_CAST(P3109_float<6, 3, Signedness::Signed, Inf_Behaviors::Saturating>);
+        case LoPyTypes::binary6p3sf: {
+            using out_type = P3109_float<6, 3, Signedness::Signed, Inf_Behaviors::Saturating>;
+            LOOP_CAST(out_type);
             break;
         }
-        case LoPy_types::binary6p4sf: {
-            LOOP_CAST(P3109_float<6, 4, Signedness::Signed, Inf_Behaviors::Saturating>);
+        case LoPyTypes::binary6p4sf: {
+            using out_type = P3109_float<6, 4, Signedness::Signed, Inf_Behaviors::Saturating>;
+            LOOP_CAST(out_type);
             break;
         }
-        case LoPy_types::binary4p1ue: {
-            LOOP_CAST(P3109_float<4, 1, Signedness::Unsigned, Inf_Behaviors::Extended>);
+        case LoPyTypes::binary4p1ue: {
+            using out_type = P3109_float<4, 1, Signedness::Unsigned, Inf_Behaviors::Extended>;
+            LOOP_CAST(out_type);
             break;
         }
-        case LoPy_types::binary4p2sf: {
-            LOOP_CAST(P3109_float<4, 2, Signedness::Signed, Inf_Behaviors::Saturating>);
+        case LoPyTypes::binary4p2sf: {
+            using out_type = P3109_float<4, 2, Signedness::Signed, Inf_Behaviors::Saturating>;
+            LOOP_CAST(out_type);
             break;
         }
 
@@ -125,7 +132,7 @@ auto fake_quantize_tensor(const torch::Tensor& tensor, float scale, float zero_p
     return quantized_tensor;
 }
 
-auto mx_fake_quantize_tensor(const torch::Tensor& tensor, float scale, float zero_point, Mx_LoPy_types type, int block_size) {
+auto mx_fake_quantize_tensor(const torch::Tensor& tensor, float scale, float zero_point, Mx_LoPyTypes type, int block_size) {
 
     auto quantized_tensor = torch::empty_like(tensor, torch::kFloat32);
 
@@ -135,7 +142,7 @@ auto mx_fake_quantize_tensor(const torch::Tensor& tensor, float scale, float zer
 
     switch(type) {
 
-        case Mx_LoPy_types::mxocpe2m1_ocpe8m0: {
+        case Mx_LoPyTypes::mxocpe2m1_ocpe8m0: {
             OCP_e2m1* tmp = (OCP_e2m1*) malloc(tensor.numel());
             OCP_e8m0* tmp_scal = (OCP_e8m0*) malloc(tensor.numel()/block_size);
             #pragma omp parallel for    
@@ -252,42 +259,123 @@ torch::Tensor quantized_linear_forward(
           [](const torch::Tensor& t, float s, float zp) { \
               return fake_quantize_tensor<k, p, sign, has_inf>(t, s, zp); \
           }, \
-          "Fake quantization function for tensors"); \
-    m.def("real_quantize_tensor", \
-          [](const torch::Tensor& t, float s, float zp) { \
-              return real_quantize_tensor<k, p, sign, has_inf>(t, s, zp); \
-          }, \
-          "Real quantization function for tensors"); \
-    m.def("dequantize_tensor", \
-          [](const torch::Tensor& t, float s, float zp) { \
-              return dequantize_tensor<k, p, sign, has_inf, float>(t, s, zp); \
-          }, \
-          "Dequantization function for tensors");
+          "Fake quantization function for tensors");
 
 
 PYBIND11_MODULE(LoFloat, m) {
-    // Bind the quantization functions for various configurations
-    BIND_FLOAT(8, 2, Signedness::Signed, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 2, Signedness::Signed, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 2, Signedness::Unsigned, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 2, Signedness::Unsigned, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 3, Signedness::Signed, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 3, Signedness::Signed, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 3, Signedness::Unsigned, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 3, Signedness::Unsigned, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 4, Signedness::Signed, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 4, Signedness::Signed, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 4, Signedness::Unsigned, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 4, Signedness::Unsigned, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 5, Signedness::Signed, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 5, Signedness::Unsigned, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 5, Signedness::Unsigned, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 6, Signedness::Signed, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 6, Signedness::Signed, Inf_Behaviors::Saturating);
-    BIND_FLOAT(8, 6, Signedness::Unsigned, Inf_Behaviors::Extended);
-    BIND_FLOAT(8, 6, Signedness::Unsigned, Inf_Behaviors::Saturating);
 
+     py::enum_<LoPyTypes>(m, "LoPyTypes")
+        .value("binary8p3se", LoPyTypes::binary8p3se)
+        .value("binary8p4se", LoPyTypes::binary8p4se)
+        .value("binary8p5se", LoPyTypes::binary8p5se)
+        .value("binary8p3sf", LoPyTypes::binary8p3sf)
+        .value("binary8p4sf", LoPyTypes::binary8p4sf)
+        .value("binary8p5sf", LoPyTypes::binary8p5sf)
+        .value("binary6p1ue", LoPyTypes::binary6p1ue)
+        .value("binary6p2sf", LoPyTypes::binary6p2sf)
+        .value("binary6p3sf", LoPyTypes::binary6p3sf)
+        .value("binary6p4sf", LoPyTypes::binary6p4sf)
+        .value("binary4p1ue", LoPyTypes::binary4p1ue)
+        .value("binary4p2sf", LoPyTypes::binary4p2sf)
+        .value("binary4p3sf", LoPyTypes::binary4p3sf)
+        .value("ocpe4m3",     LoPyTypes::ocpe4m3)
+        .value("ocpe5m2",     LoPyTypes::ocpe5m2)
+        .value("ocpe3m2",     LoPyTypes::ocpe3m2)
+        .value("ocpe2m1",     LoPyTypes::ocpe2m1)
+        .value("ocpe8m0",     LoPyTypes::ocpe8m0)
+        .value("Half",       LoPyTypes::Half)
+        .value("Bfloat16",   LoPyTypes::Bfloat16)
+        .value("Tf32",       LoPyTypes::Tf32)
+    
+    m.def("fake_quant", [](const torch::Tensor& t, float s, float zp, LoPyTypes type) { return fake_quantize_tensor(t, s, zp, type); });
+    BIND_QUANTIZATION_FUNCTIONS(8, 7, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 6, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 5, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 4, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 3, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 2, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 1, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 0, Signedness::Signed, Inf_Behaviors::Extended);
+
+    BIND_QUANTIZATION_FUNCTIONS(8, 7, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 6, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 5, Signedness::Signed, Inf_Behaviors::Saturating);
     BIND_QUANTIZATION_FUNCTIONS(8, 4, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 3, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 2, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 1, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 0, Signedness::Signed, Inf_Behaviors::Saturating);
+
+    BIND_QUANTIZATION_FUNCTIONS(8, 7, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 6, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 5, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 4, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 3, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 2, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 1, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(8, 0, Signedness::Unsigned, Inf_Behaviors::Extended);
+
+    BIND_QUANTIZATION_FUNCTIONS(8, 7, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 6, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 5, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 4, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 3, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 2, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 1, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(8, 0, Signedness::Unsigned, Inf_Behaviors::Saturating);
+
+
+    BIND_QUANTIZATION_FUNCTIONS(6, 5, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 4, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 3, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 2, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 1, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 0, Signedness::Signed, Inf_Behaviors::Extended);
+
+    BIND_QUANTIZATION_FUNCTIONS(6, 5, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 4, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 3, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 2, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 1, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 0, Signedness::Signed, Inf_Behaviors::Saturating);
+
+    BIND_QUANTIZATION_FUNCTIONS(6, 5, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 4, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 3, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 2, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 1, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(6, 0, Signedness::Unsigned, Inf_Behaviors::Extended);
+
+    BIND_QUANTIZATION_FUNCTIONS(6, 5, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 4, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 3, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 2, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 1, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(6, 0, Signedness::Unsigned, Inf_Behaviors::Saturating);
+
+
+    BIND_QUANTIZATION_FUNCTIONS(4, 3, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(4, 2, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(4, 1, Signedness::Signed, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(4, 0, Signedness::Signed, Inf_Behaviors::Extended);
+
+    BIND_QUANTIZATION_FUNCTIONS(4, 3, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(4, 2, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(4, 1, Signedness::Signed, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(4, 0, Signedness::Signed, Inf_Behaviors::Saturating);
+
+
+    BIND_QUANTIZATION_FUNCTIONS(4, 3, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(4, 2, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(4, 1, Signedness::Unsigned, Inf_Behaviors::Extended);
+    BIND_QUANTIZATION_FUNCTIONS(4, 0, Signedness::Unsigned, Inf_Behaviors::Extended);
+
+    BIND_QUANTIZATION_FUNCTIONS(4, 3, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(4, 2, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(4, 1, Signedness::Unsigned, Inf_Behaviors::Saturating);
+    BIND_QUANTIZATION_FUNCTIONS(4, 0, Signedness::Unsigned, Inf_Behaviors::Saturating);
+
+
 
 }
 
