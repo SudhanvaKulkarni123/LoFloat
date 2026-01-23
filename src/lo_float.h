@@ -2471,7 +2471,7 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
     batch_bool<WideBits, arch> res_is_zero = batch_bool<WideBits, arch>(false);
 
     // SCOPE 3A: Branch A - expanding conversion (To has smaller min_exponent)
-    if constexpr (std::numeric_limits<To>::min_exponent 
+    if constexpr (std::numeric_limits<To>::min_exponent <
                   std::numeric_limits<From>::min_exponent)
     {
         // All Branch A specific variables scoped here
