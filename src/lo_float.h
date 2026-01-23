@@ -2434,11 +2434,11 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
         }
     };
 
-    int i = 0;
+    int i;
     #ifdef _LOFOPENMP
     #pragma omp parallel for
     #endif
-    for (; i <= n - step; i += step)
+    for (i = 0; i <= n - step; i += step)
 {
     // SCOPE 1: Load and extract sign - variables die quickly
     WideBitsSIMD from_bits;
