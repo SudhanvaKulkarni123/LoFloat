@@ -3,6 +3,15 @@ CXX       ?= g++
 CXXFLAGS  += -std=c++20 -g -O3 -v
 CDBG      += -w
 
+OPENMP_FLAG := -fopenmp
+
+OPENMP_AVAILABLE := $(shell \
+  echo "int main(){return 0;}" | \
+  $(CC) $(OPENMP_FLAG) -x c - -o /dev/null 2>/dev/null && echo yes)
+
+ifeq ($(OPENMP_AVAILABLE),yes)
+  CXXFLAGS += $(OPENMP_FLAG) -D_LOFOPENMP
+endif
 
 # LoFloat root: Makefile is in LoFloat/test, so root is one level up
 MAKEFILE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
