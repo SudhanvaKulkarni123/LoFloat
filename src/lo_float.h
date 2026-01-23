@@ -2437,7 +2437,7 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
     };
 
     int i = 0;
-    #ifdef (_LOFOPENMP)
+    #ifdef _LOFOPENMP
     #pragma omp parallel for
     #endif
     for (; i <= n - step; i += step)
