@@ -2469,7 +2469,7 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
             IntSIMD(kExponentOffset) - xsimd::batch_cast<int>(normalization_factor) + IntSIMD(1);
         xs::batch_bool<SignedWideBits, arch> is_lezero_exp = (biased_exponent <= IntSIMD(0));
         normalization_factor = xs::select(xs::batch_bool<WideBits, arch>(!is_lezero_exp), WideBitsSIMD(0), normalization_factor);
-        IntSIMD unbiased_exp = IntSIMD(biased_from_exponent) - IntSIMD(kFromExponentBias);
+        IntSIMD unbiased_exp = xs::batch_cast<int>(biased_from_exponent) - IntSIMD(kFromExponentBias);
         IntSIMD biased_to_exp = unbiased_exp + IntSIMD(kToExponentBias);
         xs::batch_bool<SignedWideBits, arch> signed_res_is_subnormal_mask_wide =
             (biased_to_exp <= IntSIMD(0)); 
@@ -2523,7 +2523,7 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
                                                          batch_cast<SignedWideBits>(biased_to_exp) +
                                                          batch_cast<SignedWideBits>(from_has_leading_one);
             WideBitsSIMD exponent_shift = xs::select(batch_bool<WideBits, arch>(batch_bool<SignedWideBits, arch>(res_is_subnormal_mask_wide) && s_exponent_shift <= SignedWideBitsSIMD(kFromMantissaBits + 1)),
-                                                     WideBitsSIMD(s_exponent_shift),
+                                                     xs::batch_cast<WideBits>(s_exponent_shift),
                                                      WideBitsSIMD(0));
             res_is_zero =  batch_bool<WideBits, arch>(batch_bool<SignedWideBits, arch>(res_is_subnormal_mask_wide) && s_exponent_shift > SignedWideBitsSIMD(kFromMantissaBits + 1));
 
