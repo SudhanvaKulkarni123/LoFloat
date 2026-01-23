@@ -2458,8 +2458,7 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
     // from_bits_wide can die here, but we keep signed_mask_wide for later use
     
     // SCOPE 2: Minimal shared exponent analysis - ✅ do in signed int domain
-    SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits, arch>(from_bits >> kFromMantissaBits);
-    xs::batch_bool<SignedWideBits, arch> is_zero_from_exp_signed = (biased_from_exponent == SignedWideBitsSIMD(0));
+SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBitsSIMD(from_bits >> kFromMantissaBits));    xs::batch_bool<SignedWideBits, arch> is_zero_from_exp_signed = (biased_from_exponent == SignedWideBitsSIMD(0));
     xs::batch_bool<WideBits, arch> is_zero_from_exp = xs::batch_bool<WideBits, arch>(is_zero_from_exp_signed);
     
     // Output variables from branch processing
