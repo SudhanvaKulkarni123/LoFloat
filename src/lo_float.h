@@ -2439,14 +2439,16 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
         }
     };
 
-    int i;
+   
+  
+ int i;
     #ifdef _LOFOPENMP
     #pragma omp parallel for
     #endif
-    for (i = 0; i <= n - step; i += step)
+for (i = 0; i <= n - step; i += step)
 {
-    // SCOPE 1: Load ONCE and extract sign - variables die quickly
-    WideBitsSIMD from_bits_wide = load_from_widened(i);  // ✅ SINGLE LOAD
+    // SCOPE 1: Load ONCE and extract sign
+    WideBitsSIMD from_bits_wide = load_from_widened(i);
     WideBitsSIMD from_bits;
     
     xs::batch_bool<WideBits, arch> signed_mask_wide =
@@ -2455,10 +2457,10 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
             : xs::batch_bool<WideBits, arch>(false);
     
     from_bits = from_bits_wide & ~WideBitsSIMD(kFromSignBit);
-    // from_bits_wide can die here, but we keep signed_mask_wide for later use
     
-    // SCOPE 2: Minimal shared exponent analysis - ✅ do in signed int domain
-SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBitsSIMD(from_bits >> kFromMantissaBits));    xs::batch_bool<SignedWideBits, arch> is_zero_from_exp_signed = (biased_from_exponent == SignedWideBitsSIMD(0));
+    // SCOPE 2: Minimal shared exponent analysis
+    SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
+    xs::batch_bool<SignedWideBits, arch> is_zero_from_exp_signed = (biased_from_exponent == SignedWideBitsSIMD(0));
     xs::batch_bool<WideBits, arch> is_zero_from_exp = xs::batch_bool<WideBits, arch>(is_zero_from_exp_signed);
     
     // Output variables from branch processing
@@ -2467,26 +2469,25 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
     batch_bool<WideBits, arch> completed_elems;
     batch_bool<WideBits, arch> res_is_zero = batch_bool<WideBits, arch>(false);
 
-    // SCOPE 3A: Branch A - expanding conversion (To has smaller min_exponent)
+    // SCOPE 3A: Branch A
     if constexpr (std::numeric_limits<To>::min_exponent <
                   std::numeric_limits<From>::min_exponent)
     {
-        // All Branch A specific variables scoped here
-        WideBitsSIMD normalization_factor = xs::select(
-            is_zero_from_exp,
-            WideBitsSIMD(0),
+        // ✅ Compute normalization unconditionally to reduce dependency chain
+        WideBitsSIMD normalization_factor_raw = 
             countl_zero<kFromBits, WideBitsSIMD, WideBitsSIMD>(from_bits) -
-            (WideBitsSIMD(kFromBits - kFromMantissaBits) + WideBitsSIMD(1)));
+            (WideBitsSIMD(kFromBits - kFromMantissaBits) + WideBitsSIMD(1));
         
-        // ✅ Stay in signed int domain
         SignedWideBitsSIMD biased_exponent =
-            SignedWideBitsSIMD(kExponentOffset) - SignedWideBitsSIMD(normalization_factor) + SignedWideBitsSIMD(1);
+            SignedWideBitsSIMD(kExponentOffset) - xs::batch_cast<SignedWideBits>(normalization_factor_raw) + SignedWideBitsSIMD(1);
         
         xs::batch_bool<SignedWideBits, arch> is_lezero_exp = (biased_exponent <= SignedWideBitsSIMD(0));
-        normalization_factor = xs::select(
-            xs::batch_bool<WideBits, arch>(!is_lezero_exp), 
-            WideBitsSIMD(0), 
-            normalization_factor);
+        
+        // ✅ Combined condition (was 2 selects, now 1)
+        xs::batch_bool<WideBits, arch> use_normalization = 
+            (!is_zero_from_exp) && xs::batch_bool<WideBits, arch>(is_lezero_exp);
+        WideBitsSIMD normalization_factor = xs::select(
+            use_normalization, normalization_factor_raw, WideBitsSIMD(0));
         
         bits = from_bits;
         
@@ -2501,10 +2502,8 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
         {
             auto aux_bits = bits << normalization_factor;
             aux_bits = aux_bits & ~(WideBitsSIMD(WideBits{1}) << kFromMantissaBits);
-            // ✅ Convert signed to WideBits once for bit operations
             aux_bits = aux_bits | (batch_cast<WideBits>(biased_exponent) << WideBits(kFromMantissaBits));
             bits = xs::select(batch_bool<WideBits, arch>(is_lezero_exp), bits, aux_bits);
-            // aux_bits dies here
         }
         
         if constexpr (kDigitShift > 0)
@@ -2517,15 +2516,13 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
         
         completed_elems = is_zero_from_exp;
         underflow_bits = bits;
-        // All Branch A variables die here
     }
     
-    // SCOPE 3B: Branch B - shrinking conversion (To has larger min_exponent)
+    // SCOPE 3B: Branch B
     if constexpr (std::numeric_limits<To>::min_exponent >
                   std::numeric_limits<From>::min_exponent)
     {
-        // All Branch B specific variables scoped here
-        // ✅ Stay in signed int domain for all exponent arithmetic - no conversions!
+        // ✅ Stay in signed int domain to reduce conversions
         SignedWideBitsSIMD unbiased_exp = biased_from_exponent - SignedWideBitsSIMD(kFromExponentBias);
         SignedWideBitsSIMD biased_to_exp = unbiased_exp + SignedWideBitsSIMD(kToExponentBias);
         
@@ -2539,7 +2536,6 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
             SignedWideBitsSIMD(0),
             SignedWideBitsSIMD(1));
         
-        // ✅ All in signed int domain - no conversions!
         SignedWideBitsSIMD s_exponent_shift = SignedWideBitsSIMD(-kDigitShift) -
                                                      biased_to_exp +
                                                      from_has_leading_one;
@@ -2551,7 +2547,6 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
             (signed_res_is_subnormal_mask_wide) && 
             (s_exponent_shift > SignedWideBitsSIMD(kFromMantissaBits + 1)));
         
-        // ✅ Single conversion from signed to unsigned at the end
         WideBitsSIMD exponent_shift = xs::select(
             batch_bool<WideBits, arch>(needs_shift),
             xs::batch_cast<WideBits>(s_exponent_shift),
@@ -2566,7 +2561,6 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
         
         completed_elems = res_is_subnormal_mask_wide;
         underflow_bits = bits;
-        // All Branch B variables die here
     }
     
     // SCOPE 4: Final rounding and overflow check
@@ -2574,8 +2568,10 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
     {
         WideBitsSIMD rounded_from_bits = from_bits;
         
+        // ✅ Compute mod_digitshift once, reuse (eliminates 1 duplicate select)
+        WideBitsSIMD mod_digitshift = WideBitsSIMD(0);
         if constexpr (kDigitShift < 0) {
-            WideBitsSIMD mod_digitshift = xs::select(
+            mod_digitshift = xs::select(
                 completed_elems,
                 WideBitsSIMD(0),
                 WideBitsSIMD(-kDigitShift));
@@ -2597,10 +2593,7 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
         if constexpr (kDigitShift < 0)
         {
             aligned_highest = aligned_highest << WideBitsSIMD(-kDigitShift);
-            WideBitsSIMD mod_digitshift = xs::select(
-                completed_elems,
-                WideBitsSIMD(0),
-                WideBitsSIMD(-kDigitShift));
+            // ✅ Reuse mod_digitshift (no duplicate select)
             bits = rounded_from_bits >> mod_digitshift;
         } else {
             bits = rounded_from_bits << WideBitsSIMD(kDigitShift);
@@ -2608,18 +2601,16 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
         
         finite_out = xs::select(completed_elems, underflow_bits, bits);
         finite_out = xs::select(res_is_zero, WideBitsSIMD(0), finite_out);
-        // rounded_from_bits, aligned_highest, mod_digitshift die here
     }
     
-    // SCOPE 5: Apply sign bit using cached mask - ✅ NO RELOAD!
+    // SCOPE 5: Apply sign bit using cached mask
     finite_out = xs::select(
-        signed_mask_wide,  // ✅ Use cached mask from Scope 1
+        signed_mask_wide,
         finite_out | WideBitsSIMD(kToSignBit),
         finite_out & ~WideBitsSIMD(kToSignBit));
     
     store_to_full(i, finite_out);
-}
-}
+}}
 
          };
 
