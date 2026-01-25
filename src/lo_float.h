@@ -2472,21 +2472,14 @@ SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBit
                   std::numeric_limits<From>::min_exponent)
     {
         // All Branch A specific variables scoped here
-        WideBitsSIMD normalization_factor = xs::select(
-            is_zero_from_exp,
-            WideBitsSIMD(0),
-            countl_zero<kFromBits, WideBitsSIMD, WideBitsSIMD>(from_bits) -
-            (WideBitsSIMD(kFromBits - kFromMantissaBits) + WideBitsSIMD(1)));
+        WideBitsSIMD normalization_factor = WideBitsSIMD(5);
         
         // ✅ Stay in signed int domain
         SignedWideBitsSIMD biased_exponent =
             SignedWideBitsSIMD(kExponentOffset) - SignedWideBitsSIMD(normalization_factor) + SignedWideBitsSIMD(1);
         
         xs::batch_bool<SignedWideBits, arch> is_lezero_exp = (biased_exponent <= SignedWideBitsSIMD(0));
-        normalization_factor = xs::select(
-            xs::batch_bool<WideBits, arch>(!is_lezero_exp), 
-            WideBitsSIMD(0), 
-            normalization_factor);
+        normalization_factor = WideBitsSIMD(5);
         
         bits = from_bits;
         
@@ -2865,3 +2858,4 @@ void fma_vec(const In1* LOFLOAT_RESTRICT x,
 } // namespace lo_float
 
 #endif // FLOAT_6_4
+
