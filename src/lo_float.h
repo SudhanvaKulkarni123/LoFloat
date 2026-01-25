@@ -2446,19 +2446,19 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
 for (i = 0; i <= n - step; i += step)
 {
     // SCOPE 1: Load ONCE and extract sign - variables die quickly
-    WideBitsSIMD from_bits_wide = load_from_widened(i);  // ✅ SINGLE LOAD
-    WideBitsSIMD from_bits;
+    WideBitsSIMD from_bits = load_from_widened(i);  
     
     xs::batch_bool<WideBits, arch> signed_mask_wide =
         is_signed_type
-            ? ((from_bits_wide & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+            ? ((from_bits & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
             : xs::batch_bool<WideBits, arch>(false);
     
-    from_bits = from_bits_wide & ~WideBitsSIMD(kFromSignBit);
+    from_bits = from_bits & ~WideBitsSIMD(kFromSignBit);
     // from_bits_wide can die here, but we keep signed_mask_wide for later use
     
     // SCOPE 2: Minimal shared exponent analysis - ✅ do in signed int domain
-SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBitsSIMD(from_bits >> kFromMantissaBits));    xs::batch_bool<SignedWideBits, arch> is_zero_from_exp_signed = (biased_from_exponent == SignedWideBitsSIMD(0));
+SignedWideBitsSIMD biased_from_exponent = xs::batch_cast<SignedWideBits>(WideBitsSIMD(from_bits >> kFromMantissaBits));    
+xs::batch_bool<SignedWideBits, arch> is_zero_from_exp_signed = (biased_from_exponent == SignedWideBitsSIMD(0));
     xs::batch_bool<WideBits, arch> is_zero_from_exp = xs::batch_bool<WideBits, arch>(is_zero_from_exp_signed);
     
     // Output variables from branch processing
