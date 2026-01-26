@@ -2479,7 +2479,6 @@ for (i = 0; i <= n - step; i += step)
     
     // Extract exponent - DON'T keep biased_from_exponent alive
     auto input_exp = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
-    auto is_zero_from_exp = (input_exp == SignedWideBitsSIMD(0));
     
     // Output variables
     WideBitsSIMD bits;
@@ -2512,7 +2511,7 @@ for (i = 0; i <= n - step; i += step)
         
         bits = xs::select(
             xs::batch_bool<WideBits, arch>(is_lezero_exp) & 
-            xs::batch_bool<WideBits, arch>(is_zero_from_exp), 
+            xs::batch_bool<WideBits, arch>(input_exp == SignedWideBitsSIMD(0)), 
             bits_path1, 
             bits_path2);
         
@@ -2523,10 +2522,10 @@ for (i = 0; i <= n - step; i += step)
             bits = bits >> WideBitsSIMD(-kDigitShift);
         }
         
-        bits = xs::select(xs::batch_bool<WideBits, arch>(is_zero_from_exp), 
+        bits = xs::select(xs::batch_bool<WideBits, arch>(input_exp == SignedWideBitsSIMD(0)), 
                          WideBitsSIMD(0), bits);
         
-        completed_elems = xs::batch_bool<WideBits, arch>(is_zero_from_exp);
+        completed_elems = xs::batch_bool<WideBits, arch>(input_exp == SignedWideBitsSIMD(0));
         underflow_bits = bits;
     }
     
