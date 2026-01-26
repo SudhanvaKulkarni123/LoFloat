@@ -2446,6 +2446,9 @@ v31 store sthe mask
 
 
 */
+
+
+
 template <typename FromTraits, typename WideBitsSIMD, 
           typename SignedWideBitsSIMD, typename WideBits, typename SignedWideBits, typename arch>
 __attribute__((noinline))
@@ -2454,13 +2457,18 @@ static WideBitsSIMD handle_shrinking_conversion(
     Rounding_Mode round_mode,
     int stoch_len)
 {
-   // Extract exponent in unsigned (no cast needed)
-auto input_exp = (from_bits >> kFromMantissaBits);
 
-// Cast ONCE to signed for arithmetic
-auto input_exp_signed = xs::bitwise_cast<SignedWideBitsSIMD>(input_exp);
 
-// Do all signed arithmetic
+// Now use it:
+auto input_exp = (from_bits >> kFromMantissaBits); 
+
+// Zero-cost reinterpret (no function call, no spill)
+auto input_exp_signed = [&]() {
+    SignedWideBitsSIMD result;
+    result.data = reinterpret_cast<decltype(result.data)>(input_exp.data);
+    return result;
+}();
+
 auto biased_to_exp = input_exp_signed - SignedWideBitsSIMD(kFromExponentBias) + 
                      SignedWideBitsSIMD(kToExponentBias);
 
@@ -2474,24 +2482,32 @@ auto s_exponent_shift = SignedWideBitsSIMD(-kDigitShift) - biased_to_exp +
 auto needs_shift = is_subnormal && (s_exponent_shift <= threshold);
 auto becomes_zero = is_subnormal && (s_exponent_shift > threshold);
 
-// Key insight: use bitwise operations instead of cast
-// Reinterpret the bits without cast - just use the shift in unsigned domain
-auto exponent_shift_unsigned = xs::bitwise_cast<WideBits>(s_exponent_shift); // or direct bit manipulation
+// Zero-cost reinterpret back to unsigned
+auto exponent_shift_unsigned = [&]() {
+    WideBitsSIMD result;
+    result.data = reinterpret_cast<decltype(result.data)>(s_exponent_shift.data);
+    return result;
+}();
 
-// For the select, work with the mask directly
-auto leading_one_mask = xs::bitwise_cast<WideBitsSIMD>(is_zero_signed); // all 1s or all 0s
-auto leading_one = ~leading_one_mask & (WideBitsSIMD(1) << WideBits(kFromMantissaBits));
+
+// Use batch_bool CONSTRUCTOR (not bitwise_cast) to convert mask types
+auto is_zero_unsigned = xs::batch_bool<WideBits, arch>(is_zero_signed);
+
+auto leading_one = xs::select(is_zero_unsigned,
+                              WideBitsSIMD(0), 
+                              WideBitsSIMD(1) << WideBits(kFromMantissaBits));
 
 auto mantissa = (from_bits & WideBitsSIMD(static_cast<WideBits>(FromTraits::kMantissaMask))) | leading_one;
 
 mantissa = RoundMantissa(mantissa, exponent_shift_unsigned, round_mode, stoch_len);
 
-// Use bitwise_cast for batch_bool conversions
-auto subnormal_result = xs::select(xs::bitwise_cast<xs::batch_bool<WideBits, arch>>(needs_shift),
+// Use batch_bool CONSTRUCTOR for mask conversion
+auto needs_shift_unsigned = xs::batch_bool<WideBits, arch>(needs_shift);
+auto subnormal_result = xs::select(needs_shift_unsigned,
                                    mantissa >> exponent_shift_unsigned,
                                    WideBitsSIMD(0));
 
-// Normal path - no casts needed, already in unsigned
+// Normal path
 WideBitsSIMD normal_result;
 if constexpr (kDigitShift < 0) {
     auto mod_digitshift = WideBitsSIMD(-kDigitShift);
@@ -2506,14 +2522,16 @@ if constexpr (kDigitShift < 0) {
                     << WideBitsSIMD(kDigitShift);
 }
 
-auto result = xs::select(xs::bitwise_cast<xs::batch_bool<WideBits, arch>>(is_subnormal), 
+auto is_subnormal_unsigned = xs::batch_bool<WideBits, arch>(is_subnormal);
+auto result = xs::select(is_subnormal_unsigned, 
                         subnormal_result, 
                         normal_result);
 
-return xs::select(xs::bitwise_cast<xs::batch_bool<WideBits, arch>>(becomes_zero), 
+auto becomes_zero_unsigned = xs::batch_bool<WideBits, arch>(becomes_zero);
+return xs::select(becomes_zero_unsigned, 
                  WideBitsSIMD(0), 
                  result);
-}
+                }
 
 // Main run function
 template <class arch = xs::default_arch>
