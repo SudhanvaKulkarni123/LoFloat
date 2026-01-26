@@ -2458,7 +2458,7 @@ static WideBitsSIMD handle_shrinking_conversion(
 auto input_exp = (from_bits >> kFromMantissaBits);
 
 // Cast ONCE to signed for arithmetic
-auto input_exp_signed = xs::batch_cast<SignedWideBits>(input_exp);
+auto input_exp_signed = xs::bitwise_cast<SignedWideBitsSIMD>(input_exp);
 
 // Do all signed arithmetic
 auto biased_to_exp = input_exp_signed - SignedWideBitsSIMD(kFromExponentBias) + 
