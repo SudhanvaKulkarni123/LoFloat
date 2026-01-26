@@ -2390,6 +2390,122 @@ namespace lo_float
 
             // SIMD round for fast - round array of length n
  // SIMD round for fast - round array of length n
+// Branch A helper function
+template <typename WideBitsSIMD, typename SignedWideBitsSIMD, 
+          typename WideBits, typename SignedWideBits, typename arch>
+__attribute__((noinline))
+static WideBitsSIMD handle_expanding_conversion(
+    WideBitsSIMD from_bits,
+    Rounding_Mode round_mode,
+    int stoch_len)
+{
+    auto input_exp = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
+    auto is_zero = (input_exp == SignedWideBitsSIMD(0));
+    
+    auto normalization_factor = 
+        countl_zero<kFromBits, WideBitsSIMD, WideBitsSIMD>(from_bits) -
+        (WideBitsSIMD(kFromBits - kFromMantissaBits) + WideBitsSIMD(1));
+    
+    auto biased_exponent =
+        SignedWideBitsSIMD(kExponentOffset) - SignedWideBitsSIMD(normalization_factor) + SignedWideBitsSIMD(1);
+    
+    auto is_lezero_exp = (biased_exponent <= SignedWideBitsSIMD(0));
+    
+    auto bits_path1 = from_bits;
+    if constexpr (kExponentOffset < sizeof(WideBits) * 8) {
+        bits_path1 = bits_path1 << xs::batch_cast<WideBits>(kExponentOffset);
+    }
+    
+    auto bits_path2 = (from_bits << normalization_factor) & 
+                     ~(WideBitsSIMD(WideBits{1}) << kFromMantissaBits) |
+                     (xs::batch_cast<WideBits>(biased_exponent) << WideBits(kFromMantissaBits));
+    
+    auto result = xs::select(
+        xs::batch_bool<WideBits, arch>(is_lezero_exp) & 
+        xs::batch_bool<WideBits, arch>(is_zero), 
+        bits_path1, 
+        bits_path2);
+    
+    if constexpr (kDigitShift > 0) {
+        result = result << WideBitsSIMD(kDigitShift);
+    } else if constexpr (kDigitShift < 0) {
+        result = RoundMantissa(result, WideBitsSIMD(-kDigitShift), round_mode, stoch_len);
+        result = result >> WideBitsSIMD(-kDigitShift);
+    }
+    
+    return xs::select(xs::batch_bool<WideBits, arch>(is_zero), 
+                     WideBitsSIMD(0), 
+                     result);
+}
+
+// Branch B helper function
+template <typename FromTraits, typename WideBitsSIMD, 
+          typename SignedWideBitsSIMD, typename WideBits, typename SignedWideBits, typename arch>
+__attribute__((noinline))
+static WideBitsSIMD handle_shrinking_conversion(
+    WideBitsSIMD from_bits,
+    Rounding_Mode round_mode,
+    int stoch_len)
+{
+    auto input_exp_local = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
+    auto biased_to_exp = input_exp_local - SignedWideBitsSIMD(kFromExponentBias) + 
+                        SignedWideBitsSIMD(kToExponentBias);
+    
+    auto is_subnormal = (biased_to_exp <= SignedWideBitsSIMD(0));
+    auto is_zero_local = (input_exp_local == SignedWideBitsSIMD(0));
+    
+    auto s_exponent_shift = SignedWideBitsSIMD(-kDigitShift) - biased_to_exp +
+                           xs::select(is_zero_local, 
+                                    SignedWideBitsSIMD(0), 
+                                    SignedWideBitsSIMD(1));
+    
+    auto exponent_shift = xs::bit_cast<WideBitsSIMD>(s_exponent_shift);
+    
+    auto is_zero_unsigned = xs::batch_bool<WideBits, arch>(is_zero_local);
+    auto leading_one = xs::select(is_zero_unsigned, 
+                                  WideBitsSIMD(0), 
+                                  WideBitsSIMD(1));
+    
+    auto mantissa = (from_bits & WideBitsSIMD(static_cast<WideBits>(FromTraits::kMantissaMask))) |
+                   (leading_one << WideBits(kFromMantissaBits));
+    
+    mantissa = RoundMantissa(mantissa, exponent_shift, round_mode, stoch_len);
+    
+    auto needs_shift = is_subnormal && 
+                      (s_exponent_shift <= SignedWideBitsSIMD(kFromMantissaBits + 1));
+    auto becomes_zero = is_subnormal && 
+                       (s_exponent_shift > SignedWideBitsSIMD(kFromMantissaBits + 1));
+    
+    auto subnormal_result = xs::select(
+        xs::batch_bool<WideBits, arch>(needs_shift),
+        mantissa >> exponent_shift,
+        WideBitsSIMD(0)
+    );
+    
+    WideBitsSIMD normal_result;
+    if constexpr (kDigitShift < 0) {
+        auto mod_digitshift = WideBitsSIMD(-kDigitShift);
+        normal_result = RoundMantissa(from_bits, mod_digitshift, round_mode, stoch_len);
+        normal_result = normal_result & ~((WideBits{1} << mod_digitshift) - 1);
+        normal_result = normal_result + 
+            WideBitsSIMD((xs::batch_cast<WideBits>(kExponentOffset) << kFromMantissaBits));
+        normal_result = normal_result >> mod_digitshift;
+    } else {
+        normal_result = (from_bits + 
+            WideBitsSIMD((xs::batch_cast<WideBits>(kExponentOffset) << kFromMantissaBits))) 
+            << WideBitsSIMD(kDigitShift);
+    }
+    
+    auto result = xs::select(xs::batch_bool<WideBits, arch>(is_subnormal), 
+                            subnormal_result, 
+                            normal_result);
+    
+    return xs::select(xs::batch_bool<WideBits, arch>(becomes_zero), 
+                     WideBitsSIMD(0), 
+                     result);
+}
+
+// Main run function
 template <class arch = xs::default_arch>
 static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
                                                 To* to,
@@ -2397,214 +2513,95 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
                                                 Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven,
                                                 int stoch_len = 0)
 {
-                using FromBitsSIMD = xs::batch<FromBits, arch>;
-                using ToBitsSIMD   = xs::batch<ToBits,   arch>;
-                using WideBitsSIMD = xs::batch<WideBits, arch>;
-                using SignedWideBits = std::make_signed_t<WideBits>;
-                using SignedWideBitsSIMD = xs::batch<std::make_signed_t<WideBits>, arch>;
-                using IntSIMD      = SignedWideBitsSIMD;
-                using SignedFromBitsSIMD = xs::batch<SignedFromBits, arch>;
-                constexpr bool is_signed_type = (get_signedness_v<From> == Signedness::Signed);
-                
-                constexpr int from_lanes = FromBitsSIMD::size;
-                constexpr int to_lanes   = ToBitsSIMD::size;
-                constexpr int step       = (from_lanes < to_lanes) ? from_lanes : to_lanes;
-                static constexpr WideBits kFromSignBit = (WideBits(1) << (kFromBits - 1));
+    using FromBitsSIMD = xs::batch<FromBits, arch>;
+    using ToBitsSIMD   = xs::batch<ToBits,   arch>;
+    using WideBitsSIMD = xs::batch<WideBits, arch>;
+    using SignedWideBits = std::make_signed_t<WideBits>;
+    using SignedWideBitsSIMD = xs::batch<std::make_signed_t<WideBits>, arch>;
+    constexpr bool is_signed_type = (get_signedness_v<From> == Signedness::Signed);
+    
+    constexpr int from_lanes = FromBitsSIMD::size;
+    constexpr int to_lanes   = ToBitsSIMD::size;
+    constexpr int step       = (from_lanes < to_lanes) ? from_lanes : to_lanes;
+    static constexpr WideBits kFromSignBit = (WideBits(1) << (kFromBits - 1));
     static constexpr WideBits kToSignBit = (WideBits(1) << (kToBits - 1));
-  
 
-
-                // Correct pointer casts (do NOT take &from / &to)
     const FromBits* from_bits_ptr = reinterpret_cast<const FromBits*>(from);
     ToBits* to_bits_ptr           = reinterpret_cast<ToBits*>(to);
 
-auto load_from_widened = [&](int i) -> WideBitsSIMD {
-    using FromBitsSIMD = xs::batch<FromBits, arch>;
-    
-    if constexpr (sizeof(FromBits) == sizeof(WideBits)) {
-        // Same size - direct load and reinterpret
-        return xs::bit_cast<WideBitsSIMD>(
-            FromBitsSIMD::load_unaligned(&from_bits_ptr[i])
-        );
-    } else {
-        // FromBits < WideBits - need widening with fold expression
-        WideBits tmp[step];
-        
-        // Fold expression for guaranteed unrolling
-        [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            ((tmp[Is] = static_cast<WideBits>(from_bits_ptr[i + Is])), ...);
-        }(std::make_index_sequence<step>{});
-        
-        return WideBitsSIMD::load_unaligned(tmp);
-    }
-};
+    auto load_from_widened = [&](int i) -> WideBitsSIMD {
+        if constexpr (sizeof(FromBits) == sizeof(WideBits)) {
+            return xs::bit_cast<WideBitsSIMD>(
+                FromBitsSIMD::load_unaligned(&from_bits_ptr[i])
+            );
+        } else {
+            WideBits tmp[step];
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                ((tmp[Is] = static_cast<WideBits>(from_bits_ptr[i + Is])), ...);
+            }(std::make_index_sequence<step>{});
+            return WideBitsSIMD::load_unaligned(tmp);
+        }
+    };
 
-auto store_to_full = [&](int i, const WideBitsSIMD& v) {
-    using ToBitsSIMD = xs::batch<ToBits, arch>;
-    
-    if constexpr (sizeof(ToBits) == sizeof(WideBits)) {
-        xs::bit_cast<ToBitsSIMD>(v).store_unaligned(&to_bits_ptr[i]);
-    } else {
-        alignas(64) WideBits tmp[step];  // Works for all SIMD (AVX512/AVX2/SSE/NEON)
-        v.store_aligned(tmp);
-        
-        [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            ((to_bits_ptr[i + Is] = static_cast<ToBits>(tmp[Is])), ...);
-        }(std::make_index_sequence<step>{});
-    }
-};
+    auto store_to_full = [&](int i, const WideBitsSIMD& v) {
+        if constexpr (sizeof(ToBits) == sizeof(WideBits)) {
+            xs::bit_cast<ToBitsSIMD>(v).store_unaligned(&to_bits_ptr[i]);
+        } else {
+            alignas(64) WideBits tmp[step];
+            v.store_aligned(tmp);
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                ((to_bits_ptr[i + Is] = static_cast<ToBits>(tmp[Is])), ...);
+            }(std::make_index_sequence<step>{});
+        }
+    };
 
- int i;
+    int i;
     #ifdef _LOFOPENMP
     #pragma omp parallel for
     #endif
-for (i = 0; i <= n - step; i += step)
-{
-    constexpr int kPrefetchDistance = 8 * step;
-    if (i + kPrefetchDistance < n) {
-        __builtin_prefetch(&from_bits_ptr[i + kPrefetchDistance], 0, 3);
-        __builtin_prefetch(&to_bits_ptr[i + kPrefetchDistance], 1, 3);
-    }
-    
-    // Load and extract sign
-    WideBitsSIMD from_bits_wide = load_from_widened(i);
-    
-    xs::batch_bool<WideBits, arch> signed_mask_wide =
-        is_signed_type
-            ? ((from_bits_wide & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
-            : xs::batch_bool<WideBits, arch>(false);
-    
-    WideBitsSIMD from_bits = from_bits_wide & ~WideBitsSIMD(kFromSignBit);
-    
-    // Declare final output here
-    WideBitsSIMD finite_out;
-    
-    // Branch A - expanding conversion
-    if constexpr (std::numeric_limits<To>::min_exponent <
-                  std::numeric_limits<From>::min_exponent)
+    for (i = 0; i <= n - step; i += step)
     {
-        auto input_exp = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
-        auto is_zero = (input_exp == SignedWideBitsSIMD(0));
-        
-        auto normalization_factor = 
-            countl_zero<kFromBits, WideBitsSIMD, WideBitsSIMD>(from_bits) -
-            (WideBitsSIMD(kFromBits - kFromMantissaBits) + WideBitsSIMD(1));
-        
-        auto biased_exponent =
-            SignedWideBitsSIMD(kExponentOffset) - SignedWideBitsSIMD(normalization_factor) + SignedWideBitsSIMD(1);
-        
-        auto is_lezero_exp = (biased_exponent <= SignedWideBitsSIMD(0));
-        
-        // Compute both paths inline
-        auto bits_path1 = from_bits;
-        if constexpr (kExponentOffset < kWideBits) {
-            bits_path1 = bits_path1 << xs::batch_cast<WideBits>(kExponentOffset);
+        constexpr int kPrefetchDistance = 8 * step;
+        if (i + kPrefetchDistance < n) {
+            __builtin_prefetch(&from_bits_ptr[i + kPrefetchDistance], 0, 3);
+            __builtin_prefetch(&to_bits_ptr[i + kPrefetchDistance], 1, 3);
         }
         
-        auto bits_path2 = (from_bits << normalization_factor) & 
-                         ~(WideBitsSIMD(WideBits{1}) << kFromMantissaBits) |
-                         (xs::batch_cast<WideBits>(biased_exponent) << WideBits(kFromMantissaBits));
+        WideBitsSIMD from_bits_wide = load_from_widened(i);
         
-        auto result = xs::select(
-            xs::batch_bool<WideBits, arch>(is_lezero_exp) & 
-            xs::batch_bool<WideBits, arch>(is_zero), 
-            bits_path1, 
-            bits_path2);
+        xs::batch_bool<WideBits, arch> signed_mask_wide =
+            is_signed_type
+                ? ((from_bits_wide & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                : xs::batch_bool<WideBits, arch>(false);
         
-        if constexpr (kDigitShift > 0) {
-            result = result << WideBitsSIMD(kDigitShift);
-        } else {
-            result = RoundMantissa(result, WideBitsSIMD(-kDigitShift), round_mode, stoch_len);
-            result = result >> WideBitsSIMD(-kDigitShift);
+        WideBitsSIMD from_bits = from_bits_wide & ~WideBitsSIMD(kFromSignBit);
+        
+        WideBitsSIMD finite_out;
+        
+        if constexpr (std::numeric_limits<To>::min_exponent <
+                      std::numeric_limits<From>::min_exponent)
+        {
+            finite_out = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                     WideBits, SignedWideBits, arch>(
+                from_bits, round_mode, stoch_len);
+        }
+        else if constexpr (std::numeric_limits<To>::min_exponent >
+                           std::numeric_limits<From>::min_exponent)
+        {
+            finite_out = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                     SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                from_bits, round_mode, stoch_len);
         }
         
-        finite_out = xs::select(xs::batch_bool<WideBits, arch>(is_zero), 
-                               WideBitsSIMD(0), 
-                               result);
-    }
-    
-    // Branch B - shrinking conversion
-    else if constexpr (std::numeric_limits<To>::min_exponent >
-                       std::numeric_limits<From>::min_exponent)
-    {
-        auto input_exp_local = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
-        auto biased_to_exp = input_exp_local - SignedWideBitsSIMD(kFromExponentBias) + 
-                            SignedWideBitsSIMD(kToExponentBias);
-        
-        auto is_subnormal = (biased_to_exp <= SignedWideBitsSIMD(0));
-        auto is_zero_local = (input_exp_local == SignedWideBitsSIMD(0));
-        
-        auto s_exponent_shift = SignedWideBitsSIMD(-kDigitShift) - biased_to_exp +
-                               xs::select(is_zero_local, 
-                                        SignedWideBitsSIMD(0), 
-                                        SignedWideBitsSIMD(1));
-        
-        auto exponent_shift = xs::bit_cast<WideBitsSIMD>(s_exponent_shift);
-        
-        // Build mantissa with leading bit - cast mask, not result
-        auto is_zero_unsigned = xs::batch_bool<WideBits, arch>(is_zero_local);
-        auto leading_one = xs::select(is_zero_unsigned, 
-                                      WideBitsSIMD(0), 
-                                      WideBitsSIMD(1));
-        
-        auto mantissa = (from_bits & WideBitsSIMD(FromTraits::kMantissaMask)) |
-                       (leading_one << WideBits(kFromMantissaBits));
-        
-        mantissa = RoundMantissa(mantissa, exponent_shift, round_mode, stoch_len);
-        
-        auto needs_shift = is_subnormal && 
-                          (s_exponent_shift <= SignedWideBitsSIMD(kFromMantissaBits + 1));
-        auto becomes_zero = is_subnormal && 
-                           (s_exponent_shift > SignedWideBitsSIMD(kFromMantissaBits + 1));
-        
-        // Compute subnormal result
-        auto subnormal_result = xs::select(
-            xs::batch_bool<WideBits, arch>(needs_shift),
-            mantissa >> exponent_shift,
-            WideBitsSIMD(0)
-        );
-        
-        // Compute normal range result
-        WideBitsSIMD normal_result;
-        if constexpr (kDigitShift < 0) {
-            auto mod_digitshift = WideBitsSIMD(-kDigitShift);
-            normal_result = RoundMantissa(from_bits, mod_digitshift, round_mode, stoch_len);
-            normal_result = normal_result & ~((WideBits{1} << mod_digitshift) - 1);
-            normal_result = normal_result + 
-                WideBitsSIMD((xs::batch_cast<WideBits>(kExponentOffset) << kFromMantissaBits));
-            normal_result = normal_result >> mod_digitshift;
-        } else {
-            normal_result = (from_bits + 
-                WideBitsSIMD((xs::batch_cast<WideBits>(kExponentOffset) << kFromMantissaBits))) 
-                << WideBitsSIMD(kDigitShift);
-        }
-        
-        // Select between subnormal and normal
         finite_out = xs::select(
-            xs::batch_bool<WideBits, arch>(is_subnormal),
-            subnormal_result,
-            normal_result
+            signed_mask_wide,
+            finite_out | WideBitsSIMD(kToSignBit),
+            finite_out & ~WideBitsSIMD(kToSignBit)
         );
         
-        // Zero out if needed
-        finite_out = xs::select(
-            xs::batch_bool<WideBits, arch>(becomes_zero),
-            WideBitsSIMD(0),
-            finite_out
-        );
+        store_to_full(i, finite_out);
     }
-    
-    // Apply sign bit
-    finite_out = xs::select(
-        signed_mask_wide,
-        finite_out | WideBitsSIMD(kToSignBit),
-        finite_out & ~WideBitsSIMD(kToSignBit)
-    );
-    
-    store_to_full(i, finite_out);
-}
-                 }
-                         };
+}                         };
 
         template <typename Derived, typename UnderlyingType>
         template <typename From>
