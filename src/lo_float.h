@@ -2586,18 +2586,8 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
         }
     };
 
-    int i;
-    #ifdef _LOFOPENMP
-    #pragma omp parallel for
-    #endif
-    for (i = 0; i <= n - step; i += step)
-    {
-        constexpr int kPrefetchDistance = 8 * step;
-        if (i + kPrefetchDistance < n) {
-            __builtin_prefetch(&from_bits_ptr[i + kPrefetchDistance], 0, 3);
-            __builtin_prefetch(&to_bits_ptr[i + kPrefetchDistance], 1, 3);
-        }
-        
+    // Process loop body for a single iteration
+    auto process_iteration = [&](int i) -> WideBitsSIMD {
         WideBitsSIMD from_bits_wide = load_from_widened(i);
         
         xs::batch_bool<WideBits, arch> signed_mask_wide =
@@ -2623,6 +2613,11 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
                                                      SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
                 from_bits, round_mode, stoch_len);
         }
+        else
+        {
+            // Same exponent range - just copy
+            finite_out = from_bits;
+        }
         
         finite_out = xs::select(
             signed_mask_wide,
@@ -2630,8 +2625,255 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
             finite_out & ~WideBitsSIMD(kToSignBit)
         );
         
-        store_to_full(i, finite_out);
+        return finite_out;
+    };
+
+    int i = 0;
+    
+    #ifdef _LOFOPENMP
+    #pragma omp parallel
+    {
+        #pragma omp for schedule(static) nowait
+        for (int idx = 0; idx <= n - step*4; idx += step*4)
+        {
+            // Increased prefetch distance
+            constexpr int kPrefetchDistance = 64 * step;
+            if (idx + kPrefetchDistance < n) {
+                __builtin_prefetch(&from_bits_ptr[idx + kPrefetchDistance], 0, 3);
+                __builtin_prefetch(&to_bits_ptr[idx + kPrefetchDistance], 1, 3);
+            }
+            
+            // Unroll 4x manually - load all first to start memory fetches early
+            WideBitsSIMD from_bits_wide_0 = load_from_widened(idx);
+            WideBitsSIMD from_bits_wide_1 = load_from_widened(idx + step);
+            WideBitsSIMD from_bits_wide_2 = load_from_widened(idx + step*2);
+            WideBitsSIMD from_bits_wide_3 = load_from_widened(idx + step*3);
+            
+            // Process iteration 0
+            xs::batch_bool<WideBits, arch> signed_mask_wide_0 =
+                is_signed_type
+                    ? ((from_bits_wide_0 & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                    : xs::batch_bool<WideBits, arch>(false);
+            WideBitsSIMD from_bits_0 = from_bits_wide_0 & ~WideBitsSIMD(kFromSignBit);
+            
+            // Process iteration 1
+            xs::batch_bool<WideBits, arch> signed_mask_wide_1 =
+                is_signed_type
+                    ? ((from_bits_wide_1 & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                    : xs::batch_bool<WideBits, arch>(false);
+            WideBitsSIMD from_bits_1 = from_bits_wide_1 & ~WideBitsSIMD(kFromSignBit);
+            
+            // Process iteration 2
+            xs::batch_bool<WideBits, arch> signed_mask_wide_2 =
+                is_signed_type
+                    ? ((from_bits_wide_2 & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                    : xs::batch_bool<WideBits, arch>(false);
+            WideBitsSIMD from_bits_2 = from_bits_wide_2 & ~WideBitsSIMD(kFromSignBit);
+            
+            // Process iteration 3
+            xs::batch_bool<WideBits, arch> signed_mask_wide_3 =
+                is_signed_type
+                    ? ((from_bits_wide_3 & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                    : xs::batch_bool<WideBits, arch>(false);
+            WideBitsSIMD from_bits_3 = from_bits_wide_3 & ~WideBitsSIMD(kFromSignBit);
+            
+            // Handle conversions for all 4 iterations
+            WideBitsSIMD finite_out_0, finite_out_1, finite_out_2, finite_out_3;
+            
+            if constexpr (std::numeric_limits<To>::min_exponent 
+                          std::numeric_limits<From>::min_exponent)
+            {
+                finite_out_0 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                         WideBits, SignedWideBits, arch>(
+                    from_bits_0, round_mode, stoch_len);
+                finite_out_1 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                         WideBits, SignedWideBits, arch>(
+                    from_bits_1, round_mode, stoch_len);
+                finite_out_2 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                         WideBits, SignedWideBits, arch>(
+                    from_bits_2, round_mode, stoch_len);
+                finite_out_3 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                         WideBits, SignedWideBits, arch>(
+                    from_bits_3, round_mode, stoch_len);
+            }
+            else if constexpr (std::numeric_limits<To>::min_exponent >
+                               std::numeric_limits<From>::min_exponent)
+            {
+                finite_out_0 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                         SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                    from_bits_0, round_mode, stoch_len);
+                finite_out_1 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                         SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                    from_bits_1, round_mode, stoch_len);
+                finite_out_2 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                         SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                    from_bits_2, round_mode, stoch_len);
+                finite_out_3 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                         SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                    from_bits_3, round_mode, stoch_len);
+            }
+            else
+            {
+                finite_out_0 = from_bits_0;
+                finite_out_1 = from_bits_1;
+                finite_out_2 = from_bits_2;
+                finite_out_3 = from_bits_3;
+            }
+            
+            // Apply sign bits
+            finite_out_0 = xs::select(
+                signed_mask_wide_0,
+                finite_out_0 | WideBitsSIMD(kToSignBit),
+                finite_out_0 & ~WideBitsSIMD(kToSignBit)
+            );
+            finite_out_1 = xs::select(
+                signed_mask_wide_1,
+                finite_out_1 | WideBitsSIMD(kToSignBit),
+                finite_out_1 & ~WideBitsSIMD(kToSignBit)
+            );
+            finite_out_2 = xs::select(
+                signed_mask_wide_2,
+                finite_out_2 | WideBitsSIMD(kToSignBit),
+                finite_out_2 & ~WideBitsSIMD(kToSignBit)
+            );
+            finite_out_3 = xs::select(
+                signed_mask_wide_3,
+                finite_out_3 | WideBitsSIMD(kToSignBit),
+                finite_out_3 & ~WideBitsSIMD(kToSignBit)
+            );
+            
+            // Store all results
+            store_to_full(idx, finite_out_0);
+            store_to_full(idx + step, finite_out_1);
+            store_to_full(idx + step*2, finite_out_2);
+            store_to_full(idx + step*3, finite_out_3);
+        }
+        
+        // Remaining iterations (0-3 iterations)
+        #pragma omp for schedule(static)
+        for (int idx = (n / (step*4)) * (step*4); idx <= n - step; idx += step)
+        {
+            WideBitsSIMD result = process_iteration(idx);
+            store_to_full(idx, result);
+        }
     }
+    #else
+    // Single-threaded version with unrolling
+    for (i = 0; i <= n - step*4; i += step*4)
+    {
+        constexpr int kPrefetchDistance = 64 * step;
+        if (i + kPrefetchDistance < n) {
+            __builtin_prefetch(&from_bits_ptr[i + kPrefetchDistance], 0, 3);
+            __builtin_prefetch(&to_bits_ptr[i + kPrefetchDistance], 1, 3);
+        }
+        
+        // Load all 4 iterations early
+        WideBitsSIMD from_bits_wide_0 = load_from_widened(i);
+        WideBitsSIMD from_bits_wide_1 = load_from_widened(i + step);
+        WideBitsSIMD from_bits_wide_2 = load_from_widened(i + step*2);
+        WideBitsSIMD from_bits_wide_3 = load_from_widened(i + step*3);
+        
+        // Process all 4 (same as OpenMP version above)
+        xs::batch_bool<WideBits, arch> signed_mask_wide_0 =
+            is_signed_type
+                ? ((from_bits_wide_0 & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                : xs::batch_bool<WideBits, arch>(false);
+        WideBitsSIMD from_bits_0 = from_bits_wide_0 & ~WideBitsSIMD(kFromSignBit);
+        
+        xs::batch_bool<WideBits, arch> signed_mask_wide_1 =
+            is_signed_type
+                ? ((from_bits_wide_1 & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                : xs::batch_bool<WideBits, arch>(false);
+        WideBitsSIMD from_bits_1 = from_bits_wide_1 & ~WideBitsSIMD(kFromSignBit);
+        
+        xs::batch_bool<WideBits, arch> signed_mask_wide_2 =
+            is_signed_type
+                ? ((from_bits_wide_2 & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                : xs::batch_bool<WideBits, arch>(false);
+        WideBitsSIMD from_bits_2 = from_bits_wide_2 & ~WideBitsSIMD(kFromSignBit);
+        
+        xs::batch_bool<WideBits, arch> signed_mask_wide_3 =
+            is_signed_type
+                ? ((from_bits_wide_3 & WideBitsSIMD(kFromSignBit)) != WideBitsSIMD(0))
+                : xs::batch_bool<WideBits, arch>(false);
+        WideBitsSIMD from_bits_3 = from_bits_wide_3 & ~WideBitsSIMD(kFromSignBit);
+        
+        WideBitsSIMD finite_out_0, finite_out_1, finite_out_2, finite_out_3;
+        
+        if constexpr (std::numeric_limits<To>::min_exponent <
+                      std::numeric_limits<From>::min_exponent)
+        {
+            finite_out_0 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                     WideBits, SignedWideBits, arch>(
+                from_bits_0, round_mode, stoch_len);
+            finite_out_1 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                     WideBits, SignedWideBits, arch>(
+                from_bits_1, round_mode, stoch_len);
+            finite_out_2 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                     WideBits, SignedWideBits, arch>(
+                from_bits_2, round_mode, stoch_len);
+            finite_out_3 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
+                                                     WideBits, SignedWideBits, arch>(
+                from_bits_3, round_mode, stoch_len);
+        }
+        else if constexpr (std::numeric_limits<To>::min_exponent >
+                           std::numeric_limits<From>::min_exponent)
+        {
+            finite_out_0 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                     SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                from_bits_0, round_mode, stoch_len);
+            finite_out_1 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                     SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                from_bits_1, round_mode, stoch_len);
+            finite_out_2 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                     SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                from_bits_2, round_mode, stoch_len);
+            finite_out_3 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
+                                                     SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
+                from_bits_3, round_mode, stoch_len);
+        }
+        else
+        {
+            finite_out_0 = from_bits_0;
+            finite_out_1 = from_bits_1;
+            finite_out_2 = from_bits_2;
+            finite_out_3 = from_bits_3;
+        }
+        
+        finite_out_0 = xs::select(
+            signed_mask_wide_0,
+            finite_out_0 | WideBitsSIMD(kToSignBit),
+            finite_out_0 & ~WideBitsSIMD(kToSignBit)
+        );
+        finite_out_1 = xs::select(
+            signed_mask_wide_1,
+            finite_out_1 | WideBitsSIMD(kToSignBit),
+            finite_out_1 & ~WideBitsSIMD(kToSignBit)
+        );
+        finite_out_2 = xs::select(
+            signed_mask_wide_2,
+            finite_out_2 | WideBitsSIMD(kToSignBit),
+            finite_out_2 & ~WideBitsSIMD(kToSignBit)
+        );
+        finite_out_3 = xs::select(
+            signed_mask_wide_3,
+            finite_out_3 | WideBitsSIMD(kToSignBit),
+            finite_out_3 & ~WideBitsSIMD(kToSignBit)
+        );
+        
+        store_to_full(i, finite_out_0);
+        store_to_full(i + step, finite_out_1);
+        store_to_full(i + step*2, finite_out_2);
+        store_to_full(i + step*3, finite_out_3);
+    }
+    
+    // Remaining iterations
+    for (; i <= n - step; i += step)
+    {
+        WideBitsSIMD result = process_iteration(i);
+        store_to_full(i, result);
+    }
+    #endif
 }                         };
 
         template <typename Derived, typename UnderlyingType>
