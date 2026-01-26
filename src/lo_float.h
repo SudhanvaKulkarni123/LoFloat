@@ -2406,8 +2406,11 @@ static WideBitsSIMD handle_expanding_conversion(
         countl_zero<kFromBits, WideBitsSIMD, WideBitsSIMD>(from_bits) -
         (WideBitsSIMD(kFromBits - kFromMantissaBits) + WideBitsSIMD(1));
     
-    auto biased_exponent =
-        SignedWideBitsSIMD(kExponentOffset) - SignedWideBitsSIMD(normalization_factor) + SignedWideBitsSIMD(1);
+    auto biased_exponent = SignedWideBitsSIMD(kExponentOffset) - [&]() {
+        SignedWideBitsSIMD result;
+        result.data = reinterpret_cast<decltype(result.data)>(normalization_factor.data);
+        return result;
+    }() + SignedWideBitsSIMD(1);
     
     auto is_lezero_exp = (biased_exponent <= SignedWideBitsSIMD(0));
     
