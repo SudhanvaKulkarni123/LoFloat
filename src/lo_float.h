@@ -2478,7 +2478,7 @@ for (i = 0; i <= n - step; i += step)
     // from_bits_wide dies here
     
     // Extract exponent - DON'T keep biased_from_exponent alive
-    auto input_exp = SignedWideBitsSIMD(from_bits >> kFromMantissaBits);
+    auto input_exp = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
     auto is_zero_from_exp = (input_exp == SignedWideBitsSIMD(0));
     
     // Output variables
@@ -2535,7 +2535,7 @@ for (i = 0; i <= n - step; i += step)
                   std::numeric_limits<From>::min_exponent)
     {
         // RECOMPUTE input_exp if needed (cheap: 1 shift + 1 cast)
-        auto input_exp_local = SignedWideBitsSIMD(from_bits >> kFromMantissaBits);
+        auto input_exp_local = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
         
         auto unbiased_exp = input_exp_local - SignedWideBitsSIMD(kFromExponentBias);
         auto biased_to_exp = unbiased_exp + SignedWideBitsSIMD(kToExponentBias);
