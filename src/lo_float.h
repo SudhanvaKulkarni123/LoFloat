@@ -2536,8 +2536,7 @@ for (i = 0; i <= n - step; i += step)
         // RECOMPUTE input_exp if needed (cheap: 1 shift + 1 cast)
         auto input_exp_local = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
         
-        auto unbiased_exp = input_exp_local - SignedWideBitsSIMD(kFromExponentBias);
-        auto biased_to_exp = unbiased_exp + SignedWideBitsSIMD(kToExponentBias);
+        auto biased_to_exp = input_exp_local - SignedWideBitsSIMD(kFromExponentBias) + SignedWideBitsSIMD(kToExponentBias);
         
         auto is_subnormal = (biased_to_exp <= SignedWideBitsSIMD(0));
         
