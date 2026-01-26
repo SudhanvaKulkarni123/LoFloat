@@ -2482,7 +2482,6 @@ for (i = 0; i <= n - step; i += step)
     
     // Output variables
     WideBitsSIMD bits;
-    WideBitsSIMD underflow_bits;
     batch_bool<WideBits, arch> completed_elems;
     batch_bool<WideBits, arch> res_is_zero = batch_bool<WideBits, arch>(false);
 
@@ -2526,7 +2525,6 @@ for (i = 0; i <= n - step; i += step)
                          WideBitsSIMD(0), bits);
         
         completed_elems = xs::batch_bool<WideBits, arch>(input_exp == SignedWideBitsSIMD(0));
-        underflow_bits = bits;
     }
     
     // Branch B - shrinking conversion
@@ -2575,7 +2573,6 @@ for (i = 0; i <= n - step; i += step)
                          WideBitsSIMD(0));
         
         completed_elems = xs::batch_bool<WideBits, arch>(is_subnormal);
-        underflow_bits = bits;
     }
     
     // SCOPE 4: Final rounding and overflow check
@@ -2591,14 +2588,14 @@ for (i = 0; i <= n - step; i += step)
             
             auto bits_active = rounded_active >> mod_digitshift;
             
-            finite_out = xs::select(completed_elems, underflow_bits, bits_active);
+            finite_out = xs::select(completed_elems, bits, bits_active);
             
         } else {
             auto rounded = from_bits + 
                 WideBitsSIMD((xs::batch_cast<WideBits>(kExponentOffset) << kFromMantissaBits));
             auto bits_normal = rounded << WideBitsSIMD(kDigitShift);
             
-            finite_out = xs::select(completed_elems, underflow_bits, bits_normal);
+            finite_out = xs::select(completed_elems, bits, bits_normal);
         }
         
         finite_out = xs::select(res_is_zero, WideBitsSIMD(0), finite_out);
