@@ -2117,7 +2117,7 @@ namespace lo_float
 
             // set exception flags for overflow and underflow  here
             // current implementation cant deal with round ups near +zero and round downs near -0
-            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE To run(const From &from, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0)
+            static LOFLOAT_HOST_DEVICE __attribute__((noinline)) To run(const From &from, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0)
             {
                 // Shift bits to destination type, without sign bit.
 

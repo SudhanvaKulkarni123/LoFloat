@@ -11,7 +11,7 @@ INCLUDE_PATH += -I$(LOFLOAT_ROOT)/third_party/xsimd/include
 CXX ?= g++
 
 # Base flags (keep these consistent with your tests)
-CXXFLAGS ?= -O3 -DNDEBUG -std=c++20 -Wall -Wextra
+CXXFLAGS ?= -O3 -march=native  -fno-omit-frame-pointer -g  -std=c++20 -Wall -Wextra
 LDFLAGS  ?=
 LDLIBS   ?=
 
@@ -48,7 +48,7 @@ OPENMP_AVAILABLE := $(shell \
   $(CXX) $(OPENMP_CXXFLAGS) -x c++ - -o /dev/null $(OPENMP_LDFLAGS) 2>/dev/null && echo yes)
 
 ifeq ($(OPENMP_AVAILABLE),yes)
-  CXXFLAGS += $(OPENMP_CXXFLAGS) -D_LOFOPENMP
+  CXXFLAGS += $(OPENMP_CXXFLAGS) 
   LDFLAGS  += $(OPENMP_LDFLAGS)
   $(info OpenMP: enabled)
 else
