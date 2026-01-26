@@ -2680,7 +2680,7 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
             // Handle conversions for all 4 iterations
             WideBitsSIMD finite_out_0, finite_out_1, finite_out_2, finite_out_3;
             
-            if constexpr (std::numeric_limits<To>::min_exponent 
+            if constexpr (std::numeric_limits<To>::min_exponent <
                           std::numeric_limits<From>::min_exponent)
             {
                 finite_out_0 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
@@ -3109,6 +3109,95 @@ void fma_vec(const In1* LOFLOAT_RESTRICT x,
         out[i] = lo_float::Round<Out>(result, rm, stoch_len);
     }
 }
+
+
+
+template <typename TA, typename TX, typename TY, class arch = xsimd::default_arch>
+LOFLOAT_HOST LOFLOAT_FORCEINLINE
+void axpy(const int n,
+          const TA* LOFLOAT_RESTRICT a,
+          const TX* LOFLOAT_RESTRICT x,
+          const int incx,
+          TY* LOFLOAT_RESTRICT y,
+          const int incy,
+          Rounding_Mode rm = Rounding_Mode::RoundToNearestEven,
+          int stoch_len = 0) noexcept
+{
+    static_assert(std::is_trivially_copyable_v<TA> &&
+                  std::is_trivially_copyable_v<TX> &&
+                  std::is_trivially_copyable_v<TY>,
+                  "axpy expects trivially copyable element types.");
+
+    if (!a || !x || !y || n <= 0) return;
+
+    using xs_arch = arch;
+    using f_batch = xsimd::batch<float, xs_arch>;
+    constexpr std::size_t W = f_batch::size;
+
+    const float a_f = static_cast<float>(*a);
+    const f_batch fa(a_f);
+
+    // Only vectorize when contiguous
+    if (incx == 1 && incy == 1)
+    {
+        const int vec_end = (n / static_cast<int>(W)) * static_cast<int>(W);
+
+        auto microkernel = [&](int i) {
+            alignas(xs_arch::alignment()) float x_fp32[W];
+            alignas(xs_arch::alignment()) float y_fp32[W];
+            alignas(xs_arch::alignment()) float out_fp32[W];
+
+            for (std::size_t lane = 0; lane < W; ++lane) {
+                x_fp32[lane] = static_cast<float>(x[i + lane]);
+                y_fp32[lane] = static_cast<float>(y[i + lane]);
+            }
+
+            const f_batch fx = xsimd::load_aligned(x_fp32);
+            const f_batch fy = xsimd::load_aligned(y_fp32);
+
+            // y = a*x + y
+            const f_batch fs = xsimd::fma(fa, fx, fy);
+
+            xsimd::store_aligned(out_fp32, fs);
+
+            for (std::size_t lane = 0; lane < W; ++lane) {
+                y[i + lane] = lo_float::Round<TY>(out_fp32[lane], rm, stoch_len);
+            }
+        };
+
+    #if defined(_LOFOPENMP)
+#pragma omp parallel for
+#endif
+    for (int i = 0; i < vec_end; i += static_cast<int>(W)) {
+        microkernel(i);
+    }
+
+    // Tail
+    for (int i = vec_end; i < n; ++i) {
+        const float xf = static_cast<float>(x[i]);
+        const float yf = static_cast<float>(y[i]);
+        const float result = a_f * xf + yf;
+        y[i] = lo_float::Round<TY>(result, rm, stoch_len);
+    }
+}
+else
+{
+    // strided fallback
+    int ix = 0, iy = 0;
+    for (int i = 0; i < n; ++i) {
+        const float xf = static_cast<float>(x[ix]);
+        const float yf = static_cast<float>(y[iy]);
+        const float result = a_f * xf + yf;
+        y[iy] = lo_float::Round<TY>(result, rm, stoch_len);
+        ix += incx;
+        iy += incy;
+    }
+}
+
+}
+
+
+
     template <typename T>
     concept Float = lo_float::is_floating_point_v<T>;
 
