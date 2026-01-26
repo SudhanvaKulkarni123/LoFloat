@@ -2455,10 +2455,11 @@ static WideBitsSIMD handle_shrinking_conversion(
     int stoch_len)
 {
     auto input_exp_local = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
+auto is_zero_bool = xs::batch_bool<WideBits, arch>(input_exp_local == SignedWideBitsSIMD(0));
+auto s_is_zero_bool = xs::batch_cast<SignedWideBits>(is_zero_bool);
+
 auto biased_to_exp = input_exp_local - SignedWideBitsSIMD(kFromExponentBias) + 
                      SignedWideBitsSIMD(kToExponentBias);
-
-auto is_zero_bool = xs::batch_bool<WideBits, arch>(input_exp_local == SignedWideBitsSIMD(0));
 auto is_subnormal = (biased_to_exp <= SignedWideBitsSIMD(0));
 
 auto s_exponent_shift = SignedWideBitsSIMD(-kDigitShift) - biased_to_exp +
@@ -2471,7 +2472,7 @@ auto needs_shift = is_subnormal && (s_exponent_shift <= threshold);
 auto becomes_zero = is_subnormal && (s_exponent_shift > threshold);
 
 auto mantissa = (from_bits & WideBitsSIMD(static_cast<WideBits>(FromTraits::kMantissaMask))) |
-                xs::select(is_zero_bool, WideBitsSIMD(0), 
+                xs::select(s_is_zero_bool, WideBitsSIMD(0), 
                           WideBitsSIMD(1) << WideBits(kFromMantissaBits));
 
 mantissa = RoundMantissa(mantissa, exponent_shift, round_mode, stoch_len);
