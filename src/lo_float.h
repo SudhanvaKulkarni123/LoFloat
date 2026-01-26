@@ -2454,53 +2454,63 @@ static WideBitsSIMD handle_shrinking_conversion(
     Rounding_Mode round_mode,
     int stoch_len)
 {
-    auto input_exp_local = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
-auto is_zero_bool = xs::batch_bool<WideBits, arch>(input_exp_local == SignedWideBitsSIMD(0));
-auto s_is_zero_bool = xs::batch_cast<SignedWideBits>(is_zero_bool);
+   // Extract exponent in unsigned (no cast needed)
+auto input_exp = (from_bits >> kFromMantissaBits);
 
-auto biased_to_exp = input_exp_local - SignedWideBitsSIMD(kFromExponentBias) + 
+// Cast ONCE to signed for arithmetic
+auto input_exp_signed = xs::batch_cast<SignedWideBits>(input_exp);
+
+// Do all signed arithmetic
+auto biased_to_exp = input_exp_signed - SignedWideBitsSIMD(kFromExponentBias) + 
                      SignedWideBitsSIMD(kToExponentBias);
+
 auto is_subnormal = (biased_to_exp <= SignedWideBitsSIMD(0));
+auto is_zero_signed = (input_exp_signed == SignedWideBitsSIMD(0));
 
-auto s_exponent_shift = SignedWideBitsSIMD(-kDigitShift) - biased_to_exp +
-                        xs::select(is_zero_bool, SignedWideBitsSIMD(0), SignedWideBitsSIMD(1));
-
-// Handle subnormal path (allows earlier values to die)
-auto exponent_shift = xs::batch_cast<WideBits>(s_exponent_shift);
 auto threshold = SignedWideBitsSIMD(kFromMantissaBits + 1);
+auto s_exponent_shift = SignedWideBitsSIMD(-kDigitShift) - biased_to_exp +
+                        xs::select(is_zero_signed, SignedWideBitsSIMD(0), SignedWideBitsSIMD(1));
+
 auto needs_shift = is_subnormal && (s_exponent_shift <= threshold);
 auto becomes_zero = is_subnormal && (s_exponent_shift > threshold);
 
-auto mantissa = (from_bits & WideBitsSIMD(static_cast<WideBits>(FromTraits::kMantissaMask))) |
-                xs::select(s_is_zero_bool, WideBitsSIMD(0), 
-                          WideBitsSIMD(1) << WideBits(kFromMantissaBits));
+// Key insight: use bitwise operations instead of cast
+// Reinterpret the bits without cast - just use the shift in unsigned domain
+auto exponent_shift_unsigned = xs::bitwise_cast<WideBits>(s_exponent_shift); // or direct bit manipulation
 
-mantissa = RoundMantissa(mantissa, exponent_shift, round_mode, stoch_len);
+// For the select, work with the mask directly
+auto leading_one_mask = xs::bitwise_cast<WideBitsSIMD>(is_zero_signed); // all 1s or all 0s
+auto leading_one = ~leading_one_mask & (WideBitsSIMD(1) << WideBits(kFromMantissaBits));
 
-auto subnormal_result = xs::select(xs::batch_bool<WideBits, arch>(needs_shift),
-                                   mantissa >> exponent_shift,
+auto mantissa = (from_bits & WideBitsSIMD(static_cast<WideBits>(FromTraits::kMantissaMask))) | leading_one;
+
+mantissa = RoundMantissa(mantissa, exponent_shift_unsigned, round_mode, stoch_len);
+
+// Use bitwise_cast for batch_bool conversions
+auto subnormal_result = xs::select(xs::bitwise_cast<xs::batch_bool<WideBits, arch>>(needs_shift),
+                                   mantissa >> exponent_shift_unsigned,
                                    WideBitsSIMD(0));
 
-// Compute normal result last
+// Normal path - no casts needed, already in unsigned
 WideBitsSIMD normal_result;
 if constexpr (kDigitShift < 0) {
     auto mod_digitshift = WideBitsSIMD(-kDigitShift);
     normal_result = RoundMantissa(from_bits, mod_digitshift, round_mode, stoch_len);
     normal_result = normal_result & ~((WideBits{1} << mod_digitshift) - 1);
     normal_result = (normal_result + 
-                    WideBitsSIMD((xs::batch_cast<WideBits>(kExponentOffset) << kFromMantissaBits)))
+                    WideBitsSIMD((static_cast<WideBits>(kExponentOffset) << kFromMantissaBits)))
                     >> mod_digitshift;
 } else {
     normal_result = (from_bits + 
-                    WideBitsSIMD((xs::batch_cast<WideBits>(kExponentOffset) << kFromMantissaBits))) 
+                    WideBitsSIMD((static_cast<WideBits>(kExponentOffset) << kFromMantissaBits))) 
                     << WideBitsSIMD(kDigitShift);
 }
 
-auto result = xs::select(xs::batch_bool<WideBits, arch>(is_subnormal), 
+auto result = xs::select(xs::bitwise_cast<xs::batch_bool<WideBits, arch>>(is_subnormal), 
                         subnormal_result, 
                         normal_result);
 
-return xs::select(xs::batch_bool<WideBits, arch>(becomes_zero), 
+return xs::select(xs::bitwise_cast<xs::batch_bool<WideBits, arch>>(becomes_zero), 
                  WideBitsSIMD(0), 
                  result);
 }
