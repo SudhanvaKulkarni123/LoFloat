@@ -2631,9 +2631,8 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
     int i = 0;
     
     #ifdef _LOFOPENMP
-    #pragma omp parallel
     {
-        #pragma omp for schedule(static) nowait
+        #pragma omp parallel for
         for (int idx = 0; idx <= n - step*4; idx += step*4)
         {
             // Increased prefetch distance
@@ -2680,7 +2679,7 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
             // Handle conversions for all 4 iterations
             WideBitsSIMD finite_out_0, finite_out_1, finite_out_2, finite_out_3;
             
-            if constexpr (std::numeric_limits<To>::min_exponent 
+            if constexpr (std::numeric_limits<To>::min_exponent <
                           std::numeric_limits<From>::min_exponent)
             {
                 finite_out_0 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
