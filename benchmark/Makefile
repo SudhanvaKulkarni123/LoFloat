@@ -54,19 +54,23 @@ ifeq ($(OPENMP_AVAILABLE),yes)
 else
   $(info OpenMP: not available)
 endif
+# ---- Targets ----
+TARGETS := vec_round axpy_bench
 
-# ---- Target ----
-TARGET := vec_round
-SRC    := vec_round.cpp
+SRC_ROUND := vec_round.cpp
+SRC_AXPY  := axpy_bench.cpp
 
 .PHONY: all clean
 
-all: $(TARGET)
+all: $(TARGETS)
 
-# Build in current directory
-$(TARGET): $(SRC)
+# Build each target in current directory
+vec_round: $(SRC_ROUND)
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+axpy_bench: $(SRC_AXPY)
 	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@ $(LDFLAGS) $(LDLIBS)
 
 clean:
-	@rm -f $(TARGET)
+	@rm -f $(TARGETS)
 
