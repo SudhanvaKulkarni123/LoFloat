@@ -2578,30 +2578,32 @@ static LOFLOAT_HOST LOFLOAT_FORCEINLINE void run(const From* from,
                 static constexpr WideBits kFromSignBit = (WideBits(1) << (kFromBits - 1));
     static constexpr WideBits kToSignBit = (WideBits(1) << (kToBits - 1));
   
-
-
-                // Correct pointer casts (do NOT take &from / &to)
     const FromBits* from_bits_ptr = reinterpret_cast<const FromBits*>(from);
     ToBits* to_bits_ptr           = reinterpret_cast<ToBits*>(to);
 
-
     auto load_from_widened = [&](int i) -> WideBitsSIMD {
-            using FromBitsSIMD = xs::batch<FromBits, arch>;
+        if constexpr (sizeof(FromBits) == sizeof(WideBits)) {
+            return xs::bit_cast<WideBitsSIMD>(
+                FromBitsSIMD::load_unaligned(&from_bits_ptr[i])
+            );
+        } else {
             WideBits tmp[step];
-            #pragma unroll
-            for (int lane = 0; lane < step; ++lane)
-            {
-                tmp[lane] = static_cast<WideBits>(from_bits_ptr[i + lane]);
-            }
-
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                ((tmp[Is] = static_cast<WideBits>(from_bits_ptr[i + Is])), ...);
+            }(std::make_index_sequence<step>{});
             return WideBitsSIMD::load_unaligned(tmp);
+        }
     };
 
     auto store_to_full = [&](int i, const WideBitsSIMD& v) {
-        #pragma unroll
-        for (int lane = 0; lane < step; ++lane)
-        {
-            to_bits_ptr[i + lane] = static_cast<ToBits>(v.get(lane));
+        if constexpr (sizeof(ToBits) == sizeof(WideBits)) {
+            xs::bit_cast<ToBitsSIMD>(v).store_unaligned(&to_bits_ptr[i]);
+        } else {
+            alignas(64) WideBits tmp[step];
+            v.store_aligned(tmp);
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                ((to_bits_ptr[i + Is] = static_cast<ToBits>(tmp[Is])), ...);
+            }(std::make_index_sequence<step>{});
         }
     };
 
