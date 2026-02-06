@@ -216,10 +216,6 @@ struct FloatingPointParams
     {}
 };
 
-struct LoPy_Template_Params {
-
-};
-
 
 
 /**

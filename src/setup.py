@@ -1,51 +1,52 @@
-from setuptools import setup, Extension
-from setuptools.command.build_ext import build_ext
-import sys
-import setuptools
+from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CppExtension
 import os
 
-#run file with python3 setup.py build_ext --inplace
-class get_pybind_include(object):
-    """Helper class to determine the pybind11 include path."""
-    def __str__(self):
-        import pybind11
-        return pybind11.get_include()
+xsimd_include = os.environ.get('XSIMD_INCLUDE_PATH', '../third_party/xsimd/include')
 
-def get_torch_include_paths():
-    """Get the required PyTorch include directories."""
-    import torch
-    torch_path = torch.__path__[0]
-    print(torch_path)
-    return [
-        os.path.join(torch_path, "include"),
-        os.path.join(torch_path, "include", "torch", "csrc", "api", "include"),
-    ]
+# Check if OpenMP is enabled
+use_openmp = os.environ.get('_LOFOPENMP', '0') == '1'
 
-
-ext_modules = [
-    Extension(
-        "LoFloat",  # name of the resulting Python module
-        ["Torch_overload.cpp"],  # path to your C++ source(s)
-        include_dirs=[
-            # Path to pybind11 headers
-            str(get_pybind_include()),
-            *get_torch_include_paths(),
-        ],
-        language="c++",
-        # Add -mmacosx-version-min=10.12 for macOS target
-        extra_compile_args=["-O3", "-std=c++20", "-w"],
-    ),
+# Base compile args
+compile_args = [
+    '-std=c++20',
+    '-O3',
+    '-march=native',
+    '-fPIC',
 ]
 
+# Add OpenMP flag if enabled
+if use_openmp:
+    compile_args.append('-fopenmp')
+
+# Base link args
+link_args = []
+if use_openmp:
+    link_args.append('-fopenmp')
+
+# Get script directory for relative paths
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
 setup(
-    name="LoFloat",
-    version="0.0.1",
-    author="Sudhanva Kulkarni",
-    author_email="sudhanvakulkarni@berkeley.edu",
-    description="A module to simulate custom float and integer formats",
-    ext_modules=ext_modules,
-    cmdclass={"build_ext": build_ext},
-    zip_safe=False,
-    python_requires=">=3.7",
-    install_requires=["pybind11>=2.6"],
+    name='LoFloat',
+    version='0.1.0',
+    ext_modules=[
+        CppExtension(
+            name='LoFloat',
+            sources=[
+                'LoPy_bind.cpp',
+            ],
+            include_dirs=[
+                xsimd_include,
+                '.',
+                os.path.join(script_dir, '../third_party/xsimd/include'),
+            ],
+            extra_compile_args={
+                'cxx': compile_args
+            },
+            extra_link_args=link_args,
+        ),
+    ],
+    cmdclass={'build_ext': BuildExtension},
+    install_requires=['torch>=2.0.0'],
 )

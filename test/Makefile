@@ -1,9 +1,10 @@
 # Compiler / flags
 CXX       ?= g++
-CXXFLAGS  += -std=c++20 -g -O3 -v
+CXXFLAGS  += -std=c++20 -g -O3 -v -framework Accelerate -ftree-vectorize \
+    -fvectorize 
 CDBG      += -w
 
-OPENMP_FLAG := -fopenmp
+OPENMP_FLAG := -fopenmp -funroll-loops -fprefetch-loop-arrays -frename-register 
 
 OPENMP_AVAILABLE := $(shell \
   echo "int main(){return 0;}" | \
@@ -47,6 +48,9 @@ test_expectation: stoch_expect_test.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
 test_probability: stoch_prob_test.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
+
+test_virtual_round: test_virtual_round.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
 
 test_exceptions: exceptions_test.cpp
