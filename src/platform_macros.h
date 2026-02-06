@@ -19,10 +19,12 @@
   #define LOFLOAT_HOST __host__
   #define LOFLOAT_DEVICE __device__
   #define LOFLOAT_HOST_DEVICE __host__ __device__
+  #define LOFLOAT_GLOBAL __global__
 #else
   #define LOFLOAT_HOST
   #define LOFLOAT_DEVICE
   #define LOFLOAT_HOST_DEVICE
+  #define LOFLOAT_GLOBAL
 #endif
 
 // Inline control
