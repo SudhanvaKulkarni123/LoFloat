@@ -445,7 +445,7 @@ void instantiate_array_all() {
 // ------------------------------------------------------------------
 int main() {
    instantiate_all();
-   test_n2n_old();
+    //test_n2n_old();
    instantiate_array_all();
 
 //    float float_arr[4];

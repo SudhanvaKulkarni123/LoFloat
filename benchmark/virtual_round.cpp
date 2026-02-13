@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <fstream>
 #include <cctype>
+#include <torch/torch.h>
 
 // Include your library headers here
 #include "lo_float.h"
@@ -34,8 +35,8 @@ BenchResult<float> bench_virtual_round(
     // ---- helpers (local so you don't change anything else) ----
     auto sanitize = [](const char* s) {
         std::string out;
-        for (const unsigned char* p = (const unsigned char*)s; *p; ++p) {
-            if (std::isalnum(*p)) out.push_back((char)*p);
+        for (const unsigned char* pt = (const unsigned char*)s; *pt; ++pt) {
+            if (std::isalnum(*pt)) out.push_back((char)*pt);
             else out.push_back('_');
         }
         return out;
@@ -80,23 +81,23 @@ BenchResult<float> bench_virtual_round(
     }
 
     // ---- Create FloatingPointParams for this type ----
-    constexpr auto ToFp = lo_float_internal::param_float_p3109<k, p, is_signed, has_inf>();
+    constexpr auto ToFp = lo_float_internal::param_float_p3109<k, p, is_signed, has_inf>;
 
     // ---- run sweep ----
     BenchResult<float> last{0, 0, 0};
     const std::string type_name = sanitize(name);
 
     for (int n : sizes) {
-        std::vector<float> in(n);
-        for (int i = 0; i < n; i++) {
-            in[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
-        }
-        std::vector<float> out(n);
+        // Use torch tensors instead of std::vector<float>
+        auto in_tensor = torch::rand({n}, torch::kFloat32);
+        auto out_tensor = torch::zeros({n}, torch::kFloat32);
+        float* in_ptr = in_tensor.data_ptr<float>();
+        float* out_ptr = out_tensor.data_ptr<float>();
 
         // Warmup
         for (int i = 0; i < warmup_iters; i++) {
-            lo_float::virtual_round(in.data(), out.data(), n, ToFp, mode);
-            g_sink += out[i % n];
+            lo_float::virtual_round(in_ptr, out_ptr, n, ToFp, mode);
+            g_sink += out_ptr[i % n];
         }
 
         // Optional: adapt iterations so the 1e8 case doesn't take forever.
@@ -110,9 +111,9 @@ BenchResult<float> bench_virtual_round(
 
         for (int i = 0; i < iters_used; i++) {
             auto t0 = std::chrono::steady_clock::now();
-            lo_float::virtual_round(in.data(), out.data(), n, ToFp, mode);
+            lo_float::virtual_round(in_ptr, out_ptr, n, ToFp, mode);
             auto t1 = std::chrono::steady_clock::now();
-            g_sink += out[(i * 17) % n];
+            g_sink += out_ptr[(i * 17) % n];
 
             double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
             samples_us.push_back(us);
@@ -160,7 +161,7 @@ BenchResult<float> bench_virtual_round_half(
     // ---- helpers ----
     auto sanitize = [](const char* s) {
         std::string out;
-        for (const unsigned char* p = (const unsigned char*)s; *p; ++p) {
+        for (char* p = (char*)s; *p; ++p) {
             if (std::isalnum(*p)) out.push_back((char)*p);
             else out.push_back('_');
         }
@@ -205,23 +206,23 @@ BenchResult<float> bench_virtual_round_half(
     }
 
     // ---- Use halfPrecisionParams ----
-    constexpr auto ToFp = halfPrecisionParams();
+    constexpr auto ToFp = halfPrecisionParams;
 
     // ---- run sweep ----
     BenchResult<float> last{0, 0, 0};
     const std::string type_name = sanitize(name);
 
     for (int n : sizes) {
-        std::vector<float> in(n);
-        for (int i = 0; i < n; i++) {
-            in[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
-        }
-        std::vector<float> out(n);
+        // Use torch tensors instead of std::vector<float>
+        auto in_tensor = torch::rand({n}, torch::kFloat32);
+        auto out_tensor = torch::zeros({n}, torch::kFloat32);
+        float* in_ptr = in_tensor.data_ptr<float>();
+        float* out_ptr = out_tensor.data_ptr<float>();
 
         // Warmup
         for (int i = 0; i < warmup_iters; i++) {
-            lo_float::virtual_round(in.data(), out.data(), n, ToFp, mode);
-            g_sink += out[i % n];
+            lo_float::virtual_round(in_ptr, out_ptr, n, ToFp, mode);
+            g_sink += out_ptr[i % n];
         }
 
         // Adapt iterations
@@ -235,9 +236,9 @@ BenchResult<float> bench_virtual_round_half(
 
         for (int i = 0; i < iters_used; i++) {
             auto t0 = std::chrono::steady_clock::now();
-            lo_float::virtual_round(in.data(), out.data(), n, ToFp, mode);
+            lo_float::virtual_round(in_ptr, out_ptr, n, ToFp, mode);
             auto t1 = std::chrono::steady_clock::now();
-            g_sink += out[(i * 17) % n];
+            g_sink += out_ptr[(i * 17) % n];
 
             double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
             samples_us.push_back(us);

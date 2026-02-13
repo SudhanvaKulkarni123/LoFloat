@@ -11,12 +11,19 @@ INCLUDE_PATH += -I$(LOFLOAT_ROOT)/third_party/xsimd/include
 CXX ?= g++
 
 # Base flags (keep these consistent with your tests)
-CXXFLAGS ?= -O3 -march=native  -std=c++20 -Wall -Wextra
+CXXFLAGS ?= -O3 -march=native -std=c++20 -Wall -Wextra
 LDFLAGS  ?=
 LDLIBS   ?=
 
 # OS detection
 UNAME_S := $(shell uname -s)
+
+# TORCH_INCLUDES := $(shell python3 -c "import torch.utils.cpp_extension; print(' '.join(['-I' + p for p in torch.utils.cpp_extension.include_paths()]))")
+# TORCH_LDFLAGS  := $(shell python3 -c "import torch.utils.cpp_extension; print(' '.join(['-L' + p for p in torch.utils.cpp_extension.library_paths()]))")
+# TORCH_LIBS     := -ltorch -ltorch_cpu -lc10
+
+# CXXFLAGS += $(TORCH_INCLUDES)
+# LDFLAGS  += $(TORCH_LDFLAGS) $(TORCH_LIBS) -Wl,-rpath,$(shell python3 -c "import torch.utils.cpp_extension; print(':'.join(torch.utils.cpp_extension.library_paths()))")
 
 # Default (Linux GCC / Clang)
 OPENMP_CXXFLAGS := -fopenmp
@@ -59,7 +66,8 @@ TARGETS := vec_round axpy_bench
 
 SRC_ROUND := vec_round.cpp
 SRC_AXPY  := axpy_bench.cpp
-
+SRC_VIRTUAL := virtual_round.cpp
+SRC_ADD := vec_add.cpp
 .PHONY: all clean
 
 all: $(TARGETS)
@@ -69,6 +77,12 @@ vec_round: $(SRC_ROUND)
 	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@ $(LDFLAGS) $(LDLIBS)
 
 axpy_bench: $(SRC_AXPY)
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+virtual_round: $(SRC_VIRTUAL)
+	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+vec_add: $(SRC_ADD)
 	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@ $(LDFLAGS) $(LDLIBS)
 
 clean:

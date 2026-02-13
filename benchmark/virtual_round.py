@@ -166,7 +166,7 @@ def bench_virtual_round(name, params, iters=50, warmup_iters=5,
     for n in sizes:
         arr = torch.rand(n, dtype=torch.float32)
         
-        for _ in range(warmup_iters):
+        for _ in range(0):
             _ = lof.virtual_round(arr, params, round_mode=round_mode, stoch_len=0)
         
         iters_used = iters
@@ -177,16 +177,21 @@ def bench_virtual_round(name, params, iters=50, warmup_iters=5,
         iters_used = max(1, iters_used)
         
         samples_us = []
+        a = 0
         for _ in range(iters_used):
             t0 = time.perf_counter()
             result = lof.virtual_round(arr, params, round_mode=round_mode, stoch_len=0)
             t1 = time.perf_counter()
+
+            a = a +  result.sum().item()
+            
             
             samples_us.append((t1 - t0) * 1e6)
         
         avg_us = sum(samples_us) / len(samples_us)
         min_us = min(samples_us)
         max_us = max(samples_us)
+        print(a)
         
         print(f"{name:30s}  n={n:>10d}  avg={avg_us:>12.2f} us  "
               f"min={min_us:>12.2f} us  max={max_us:>12.2f} us  iters={iters_used}")
@@ -222,4 +227,7 @@ def main():
 
 
 if __name__ == "__main__":
+    print("num threads = ")
+    print(torch.get_num_threads())
+    torch.set_num_threads(1)
     main()
