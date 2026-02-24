@@ -213,7 +213,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("signedness"),
              py::arg("is_inf_checker"),
              py::arg("is_nan_checker"),
-             "Create a custom float format descriptor");
+             "Create a custom float format descriptor")
+        .def_readonly("total_bits",    &FloatingPointParamsPy::bitwidth)
+        .def_readonly("mantissa_bits", &FloatingPointParamsPy::mantissa_bits);
 
     m.def("virtual_round", &virtual_round_mantissa,
           py::arg("input"),
