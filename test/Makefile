@@ -1,7 +1,6 @@
 # Compiler / flags
 CXX       ?= g++
-CXXFLAGS  += -std=c++20 -g -O3 -v -framework Accelerate -ftree-vectorize \
-    -fvectorize 
+CXXFLAGS  += -std=c++20 -O3 -march=armv9-a+sve -msve-vector-bits=128
 CDBG      += -w
 
 OPENMP_FLAG := -fopenmp -funroll-loops -fprefetch-loop-arrays -frename-register 

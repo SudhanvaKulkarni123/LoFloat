@@ -52,9 +52,10 @@ class P3109_InfChecker:
             return (1 << self.k) - 2
         
 
-def create_p3109_params(k, p, is_signed=True, saturating=True):
+def create_p3109_params(k, p, is_signed=True, saturating=True, bias=None):
     mantissa_bits = p - 1
-    bias = 1 << (k - p - 1)
+    if bias is None:
+        bias = 1 << (k - p - 1)
     inf_behavior = lof.InfBehavior.Saturating if saturating else lof.InfBehavior.Extended
     
     return lof.FloatFormatDescriptor(
@@ -67,6 +68,7 @@ def create_p3109_params(k, p, is_signed=True, saturating=True):
         is_inf_checker=P3109_InfChecker(k, is_signed, saturating),
         is_nan_checker=P3109_NaNChecker(k, is_signed)
     )
+
 
 
 class HalfPrecisionInfChecker:

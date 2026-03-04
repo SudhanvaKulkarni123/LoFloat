@@ -18,16 +18,23 @@
 #include <complex>
 #include <limits>
 #include <ostream>
+#include <iostream>
 #include <type_traits>
 #include <climits>
 #include "platform_macros.h"
+#ifndef USE_CUDA    
 #include <xsimd/xsimd.hpp>
+#include "simd_helpers.hpp"     //simd helpers
+#endif
 #include "fp_tools.hpp"     //structs and concepts to define Floating Point params
+#ifdef ENABLE_EXCEPT
 #include "f_exceptions.hpp" //global env for exceptions
+#endif
 
 #include "lo_int.h"           //custom integer types
 #include "template_helpers.h" //helper templataes
-#include "simd_helpers.hpp"     //simd helpers
+
+
 
 #ifdef __has_include
 #if __has_include(<version>)
@@ -39,7 +46,9 @@
 #include <bit>
 #endif
 
+#ifndef USE_CUDA
 namespace xs = xsimd;
+#endif
 
 namespace lo_float
 {
@@ -67,11 +76,7 @@ namespace lo_float
 
         static std::mt19937 mt(static_cast<int>(time(nullptr)));
 
-        // global function to set seed
-        void set_seed(int a)
-        {
-            mt.seed(a);
-        }
+
 
 #ifdef ENABLE_EXCEPT
         Environment f_env{};
@@ -434,12 +439,14 @@ namespace lo_float
             using value_type = pod_type_t<Bits>;
 
             Bits bias;
-            if constexpr (xsimd::is_batch<Roundoff>::value)
+            if constexpr (is_xsimd_batch<Roundoff>::value)
             {
+                #ifndef USE_CUDA
                 // SIMD roundoff (fast path)
                 bias = xsimd::select(Bits(roundoff) == Bits{},
                     Bits(0),
                     (xs::bitwise_rshift(bits, xs::batch_cast<value_type>(roundoff)) & Bits(1)) + xs::bitwise_lshift(Bits(1),xs::batch_cast<value_type>(roundoff - 1)) - Bits(1));
+                #endif
             }
             else
             {
@@ -502,6 +509,7 @@ namespace lo_float
             const unsigned maxv = (1u << unsigned(len)) - 1u;
             std::uniform_int_distribution<unsigned> dist(0u, maxv);
 
+            #ifndef USE_CUDA
             std::array<lane_t, lanes> samp{};
             for (std::size_t i = 0; i < lanes; ++i) samp[i] = static_cast<lane_t>(dist(mt));
             Bits to_add;
@@ -518,6 +526,10 @@ namespace lo_float
             {
                 return bits + (to_add << (roundoff - len));
             }
+            #else
+            Bits to_add = static_cast<Bits>(dist(mt));
+            return bits + (to_add << (roundoff - len));
+            #endif
         }
 
 
@@ -926,6 +938,7 @@ namespace lo_float
             }
         }
 
+        #ifndef USE_CUDA
         template <typename Bits, typename Roundoff,  class arch = xsimd::default_arch>
         LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE xs::batch<Bits, arch> RoundMantissa(xs::batch<Bits, arch> bits, const xs::batch<Roundoff, arch> roundoff, const Rounding_Mode rm, const int len = 0)
         {
@@ -957,6 +970,7 @@ namespace lo_float
                 return bits; // no rounding
             }
         }
+        #endif
 
         /// varfloat base
         template <typename Derived, FloatingPointParams Fp>
@@ -1323,6 +1337,7 @@ namespace lo_float
                 return bits == (is_signed == Signedness::Signed ? (1 << (k - 1)) : (1 << k) - 1);
             }
 
+            #ifndef USE_CUDA
             template <typename Int, class Arch>
             inline xsimd::batch_bool<Int, Arch>
             sim_check(const xsimd::batch<Int, Arch>& bits) const
@@ -1335,6 +1350,7 @@ namespace lo_float
                 const auto target = xsimd::broadcast<Int>(target_scalar);
                 return bits == target;
             }
+            #endif
 
             uint32_t qNanBitPattern() const
             {
@@ -1362,6 +1378,7 @@ namespace lo_float
                 }
             }
 
+            #ifndef USE_CUDA
             template <typename Int, class Arch>
             inline xsimd::batch_bool<Int, Arch>
             sim_check(const xsimd::batch<Int, Arch>& bits) const
@@ -1380,6 +1397,7 @@ namespace lo_float
                     return false; // No infinity for P3109
                 }
             }
+            #endif
 
             uint32_t minNegInf() const
             {
@@ -1457,6 +1475,7 @@ namespace lo_float
             static constexpr bits_t qnan() { return float_bits::qnan; }
             static constexpr bits_t snan() { return float_bits::snan; }
 
+            #ifndef USE_CUDA
             template <class Arch>
             xs::batch_bool<bits_t, Arch> sim_check(const xs::batch<bits_t, Arch>& bits) const
             {
@@ -1466,6 +1485,7 @@ namespace lo_float
                                 != xs::batch<bits_t, Arch>(bits_t{0});
                 return exp_all_ones & frac_nonzero;
             }
+            #endif
         };
 
         template <>
@@ -1482,6 +1502,7 @@ namespace lo_float
             static constexpr bits_t qnan() { return double_bits::qnan; }
             static constexpr bits_t snan() { return double_bits::snan; }
 
+            #ifndef USE_CUDA
             template <class Arch>
             xs::batch_bool<bits_t, Arch> sim_check(const xs::batch<bits_t, Arch>& bits) const
             {
@@ -1491,6 +1512,7 @@ namespace lo_float
                                 != xs::batch<bits_t, Arch>(bits_t{0});
                 return exp_all_ones & frac_nonzero;
             }
+            #endif
         };
 
         // ------------------------
@@ -1512,6 +1534,7 @@ namespace lo_float
             static constexpr bits_t posinf() { return float_bits::pos_inf; }
             static constexpr bits_t neginf() { return float_bits::neg_inf; }
 
+            #ifndef USE_CUDA
             template <class Arch>
             xs::batch_bool<bits_t, Arch> sim_check(const xs::batch<bits_t, Arch>& bits) const
             {
@@ -1521,6 +1544,7 @@ namespace lo_float
                                 == xs::batch<bits_t, Arch>(bits_t{0});
                 return exp_all_ones & frac_zero;
             }
+            #endif
         };
 
         template <>
@@ -1537,6 +1561,7 @@ namespace lo_float
             static constexpr bits_t posinf() { return double_bits::pos_inf; }
             static constexpr bits_t neginf() { return double_bits::neg_inf; }
 
+            #ifndef USE_CUDA
             template <class Arch>
             xs::batch_bool<bits_t, Arch> sim_check(const xs::batch<bits_t, Arch>& bits) const
             {
@@ -1546,6 +1571,7 @@ namespace lo_float
                                 == xs::batch<bits_t, Arch>(bits_t{0});
                 return exp_all_ones & frac_zero;
             }
+            #endif
         };
 
     } // namepsace lo_float_internal
@@ -1767,13 +1793,7 @@ namespace lo_float
     template <FloatingPointParams Fp>
     using Templated_Float = lo_float_internal::Templated_Float<Fp>;
 
-    void set_seed(unsigned int seedVal)
-    {
-        // Just forward to the internal function or directly:
-        lo_float_internal::mt.seed(seedVal);
 
-        // or lo_float_internal::set_seed_internal(seedVal);
-    }
 }
 
 namespace lo_float
@@ -1799,6 +1819,7 @@ namespace lo_float
         }
 
         //the simd version takes in the rep for now
+        #ifndef USE_CUDA
         template <NaNChecker IsNaN,
           typename Int,
           class Arch = xsimd::default_arch>
@@ -1812,6 +1833,7 @@ namespace lo_float
             // Call the SIMD checker directly
             return IsNaNFunc.sim_check(a);
         }
+        #endif
 
         template <FloatingPointParams Fp>
         constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE bool isinf(const Templated_Float<Fp> &a)
@@ -1819,6 +1841,7 @@ namespace lo_float
             return Fp.IsInf(a.rep()) && Fp.OV_behavior != Inf_Behaviors::Saturating;
         }
 
+        #ifndef USE_CUDA
         template <bool OV_behavior,
         typename IsInf,
           typename Int,
@@ -1840,6 +1863,7 @@ namespace lo_float
                 return inf_func.sim_check(a);
             }
         }
+        #endif
 
 
     }
@@ -1869,12 +1893,14 @@ namespace std
         return lo_float::lo_float_internal::isnan(a);
     }
 
+    #ifndef USE_CUDA
     template <lo_float::NaNChecker IsNaN, typename Int, class Arch>
     xsimd::batch_bool<Int, Arch>
     isnan_simd(const xsimd::batch<Int, Arch>& a, IsNaN isnan_func)
     {
         return lo_float::lo_float_internal::isnan_simd<IsNaN>(a, isnan_func);
     }
+    #endif
 
     // isinf override
     template <lo_float::FloatingPointParams Fp>
@@ -1884,12 +1910,14 @@ namespace std
     }
 
 
+    #ifndef USE_CUDA
     template <lo_float::InfChecker IsInf, typename Int, bool OV_behavior, class Arch>
     xsimd::batch_bool<Int, Arch>
     isinf_simd(const xsimd::batch<Int, Arch>& a, IsInf inf_func)
     {
         return lo_float::lo_float_internal::isinf_simd<IsInf, OV_behavior>(a, inf_func);
     }
+    #endif
 
 } // namespace std
 
@@ -1908,14 +1936,19 @@ namespace lo_float
 
             // Work in ret_type width (so small inputs are handled correctly)
             ret_type xw;
+            #ifndef USE_CUDA
             if constexpr (xsimd::is_batch<UInt>::value)
                 xw = widen_low_lanes<ret_scalar, uint_scalar>(x);
             else
                 xw = static_cast<ret_type>(x);
+            #else
+            xw = static_cast<ret_type>(x);
+            #endif
 
             ret_type zeroes = ret_type(le_size - 4);
 
             auto step = [&](int k) {
+                #ifndef USE_CUDA
                 if constexpr (xsimd::is_batch<ret_type>::value)
                 {
                     using M = typename ret_type::batch_bool_type;
@@ -1927,6 +1960,9 @@ namespace lo_float
                 {
                     if (xw >> k) { zeroes -= ret_type(k); xw >>= k; }
                 }
+                #else
+                if (xw >> k) { zeroes -= ret_type(k); xw >>= k; }
+                #endif
             };
 
             if constexpr (le_size > 64) step(64);
@@ -1943,6 +1979,7 @@ namespace lo_float
             // Safe nibble index
             auto idx = xw & ret_type(0xF);
 
+            #ifndef USE_CUDA
             if constexpr (xsimd::is_batch<ret_type>::value)
             {
                 using scalar_t = typename ret_type::value_type;
@@ -1971,6 +2008,11 @@ namespace lo_float
             {
                 return ret_type(clz4_lut32[static_cast<uint32_t>(idx)]) + zeroes;
             }
+            #else
+            return ret_type(clz4_lut32[static_cast<uint32_t>(idx)]) + zeroes;
+            #endif
+
+
         }
 
 
@@ -2036,6 +2078,7 @@ namespace lo_float
                 return from;
             }
 
+            #ifndef USE_CUDA
             template <class arch = xsimd::default_arch>
             static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE void run(const Scalar* from, Scalar* to, int n, Rounding_Mode rm = Rounding_Mode::RoundAwayFromZero, int stoch_len = 0)
             {
@@ -2044,6 +2087,7 @@ namespace lo_float
                 }
                 return;
             }
+            #endif
         };
 
         template <typename Scalar>
@@ -2066,7 +2110,6 @@ namespace lo_float
                                                           ? (BitsType{1} << (kExponentBits - 1)) - 1
                                                           : (BitsType{1} << kExponentBits) - 1;
             static constexpr BitsType kMantissaMask = (BitsType{1} << kMantissaBits) - 1;
-            static constexpr int kExponentBias = std::numeric_limits<Float>::kExponentBias;
         };
 
         template <int len, Signedness sign>
@@ -2156,6 +2199,7 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int
     
 }
 
+#ifndef USE_CUDA
 template<typename From, class arch = xs::default_arch>
 LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
 
@@ -2212,22 +2256,39 @@ LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results,
     }
     
 }
+#endif
 
-template<typename From, typename ToInf, typename ToNaN>
-LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(From& value, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+
+LOFLOAT_DEVICE LOFLOAT_FORCEINLINE bool isnan(float value) {
+    return ::isnan(value);
+}
+LOFLOAT_DEVICE LOFLOAT_FORCEINLINE bool isnan(double value) {
+    return ::isnan(value);
+}
+
+
+template<typename From_p, typename ToInf, typename ToNaN>
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From_p virtual_round(From_p& value, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+    //need this for const correctness
+    using From = std::remove_cv_t<From_p>;
     using FromBits = typename Traits<From>::BitsType;
+    using SignedFromBits = std::make_signed_t<FromBits>;
     static constexpr int kFromBits = Traits<From>::kBits;
     int kDigitShift = ToFp.mantissa_bits - Traits<From>::kMantissaBits;
+    static constexpr int kExponentBias = Traits<From>::kExponentBias;
     static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
+    FromBits sign_bit = std::bit_cast<FromBits>(value) & (FromBits{1} << (kFromBits - 1));
 
-    static const int ToMax_exp = ToFp.is_signed == Signedness::Signed
+    const int ToMax_exp = ToFp.is_signed == Signedness::Signed
                                     ? (1 << (ToFp.bitwidth - ToFp.mantissa_bits - 1)) - 1 - ToFp.bias
                                     : (1 << (ToFp.bitwidth - ToFp.mantissa_bits)) - 1 - ToFp.bias;
-    static const int ToMin_exp = 1 - ToFp.bias;
+    const int ToMin_exp = 1 - ToFp.bias;
+    
 
     FromBits from_bits =
         std::bit_cast<FromBits>(abs(value));
-    FromBits from_exp = from_bits >> kFromMantissaBits;
+    int from_exp = (from_bits >> kFromMantissaBits) - kExponentBias;
+
 
     if (from_exp < ToMin_exp) return static_cast<From>(0); 
     if (isnan(value)) return std::numeric_limits<From>::quiet_NaN();
@@ -2237,12 +2298,14 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(From& value, Floating
         from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
         from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
     }
-    from_exp = from_bits >> kFromMantissaBits;
+ 
+    from_exp = (from_bits >> kFromMantissaBits) - kExponentBias;
     if (from_exp > ToMax_exp) return ToFp.OV_behavior == Inf_Behaviors::Saturating ? value : std::numeric_limits<From>::infinity();
 
-    return std::bit_cast<From>(from_bits);
+    return std::bit_cast<From>(from_bits | sign_bit);
 }
 
+#ifndef USE_CUDA
 template<typename From, typename ToInf, typename ToNaN,  class arch = xs::default_arch>
 LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
    using FromBits = typename Traits<From>::BitsType;
@@ -2318,6 +2381,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
     }
 }
 }
+#endif
 
         template <typename From, typename To>
         struct ConvertImpl<From, To,
@@ -2629,6 +2693,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
             // SIMD round for fast - round array of length n
  // SIMD round for fast - round array of length n
 // Branch A helper function
+#ifndef USE_CUDA
 template <typename WideBitsSIMD, typename SignedWideBitsSIMD, 
           typename WideBits, typename SignedWideBits, typename arch>
 __attribute__((noinline))
@@ -2678,7 +2743,7 @@ static WideBitsSIMD handle_expanding_conversion(
                      WideBitsSIMD(0), 
                      result);
 }
-
+#endif
 // Branch B helper function
 /* register break down-
 x0 stores from_bits
@@ -2688,7 +2753,7 @@ v31 store sthe mask
 
 */
 
-
+#ifndef USE_CUDA
 
 template <typename FromTraits, typename WideBitsSIMD, 
           typename SignedWideBitsSIMD, typename WideBits, typename SignedWideBits, typename arch>
@@ -2749,9 +2814,12 @@ static WideBitsSIMD handle_shrinking_conversion(
 
     auto is_subnormal_unsigned = xs::batch_bool<WideBits, arch>(is_subnormal);
     return xs::select(is_subnormal_unsigned, subnormal_result, normal_result);
-}                
+}       
+
+#endif
 
 // Main run function
+#ifndef USE_CUDA
 template <class arch = xs::default_arch>
 static LOFLOAT_HOST void run(const From* from,
                                                 To* to,
@@ -3050,7 +3118,9 @@ static LOFLOAT_HOST void run(const From* from,
         store_to_full(i, result);
     }
     #endif
-}                         };
+}
+#endif                         
+};
 
         template <typename Derived, typename UnderlyingType>
         template <typename From>
@@ -3072,11 +3142,13 @@ static LOFLOAT_HOST void run(const From* from,
             return ConvertImpl<in, out>::run(x, rm, stoch_len);
         }
 
+        #ifndef USE_CUDA
         template <typename out, typename in>
         constexpr LOFLOAT_HOST LOFLOAT_FORCEINLINE out Round(in* x, out* y, int n, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
         {
             return ConvertImpl<in, out>::run(x, y, n, rm, stoch_len);
         }
+        #endif
 
         template <typename out, typename in1, typename in2>
         constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out add(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
@@ -3201,6 +3273,7 @@ static LOFLOAT_HOST void run(const From* from,
         return lo_float_internal::div<in1, in2, out>(x, y, rm, stoch_len);
     }
 
+    #ifndef USE_CUDA
     template <typename out, typename in, int unroll_len = 0, class arch = xsimd::default_arch>
     LOFLOAT_HOST void Project(in* x, out *y, int n, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
     {
@@ -3208,7 +3281,9 @@ static LOFLOAT_HOST void run(const From* from,
         Converter::template run<arch>(x, y, n, rm, stoch_len);
         return;
     }
+    #endif
 
+    #ifndef USE_CUDA
  template <typename Out, typename In1, typename In2, typename In3, class arch = xsimd::default_arch>
 LOFLOAT_HOST LOFLOAT_FORCEINLINE
 void fma_vec(const In1* LOFLOAT_RESTRICT x,
@@ -3285,7 +3360,9 @@ void fma_vec(const In1* LOFLOAT_RESTRICT x,
         out[i] = lo_float::Round<Out>(result, rm, stoch_len);
     }
 }
+#endif
 
+#ifndef USE_CUDA
 template <typename Out, typename In1, typename In2, class arch = xsimd::default_arch>
 LOFLOAT_HOST LOFLOAT_FORCEINLINE
 void add_vec(const In1* LOFLOAT_RESTRICT x,
@@ -3352,10 +3429,12 @@ void add_vec(const In1* LOFLOAT_RESTRICT x,
         out[i] = lo_float::Round<Out>(result, rm, stoch_len);
     }
 }
+#endif
 
 
 
 
+#ifndef USE_CUDA
 template <typename TA, typename TX, typename TY, class arch = xsimd::default_arch>
 LOFLOAT_HOST LOFLOAT_FORCEINLINE
 void axpy(const int n,
@@ -3440,27 +3519,45 @@ else
 }
 
 }
+#endif
 
 template <typename From>
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     return lo_float_internal::virtual_round(from, ToMantissaBits, round_mode, stoch_len);
 }
 
+#ifndef USE_CUDA
 template<typename From>
 LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int ToMantissaBits, int n, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     return lo_float_internal::virtual_round(values, results, ToMantissaBits, n, round_mode, stoch_len);
 }
+#endif
 
 template <typename From, typename ToInf, typename ToNaN>
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     return lo_float_internal::virtual_round(from, ToFp, round_mode, stoch_len);
 }
 
+#ifndef USE_CUDA
 template<typename From, typename ToInf, typename ToNaN>
 LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     return lo_float_internal::virtual_round(values, results, n, ToFp, round_mode, stoch_len);
 }
+#endif
 
+struct DeviceInfChecker {
+    uint64_t exp_mask, mant_mask, neg_inf, pos_inf;
+    LOFLOAT_HOST_DEVICE bool operator()(uint64_t bits) const { return (bits & exp_mask) == exp_mask && (bits & mant_mask) == 0; }
+    LOFLOAT_HOST_DEVICE uint64_t minNegInf() const { return neg_inf; }
+    LOFLOAT_HOST_DEVICE uint64_t minPosInf() const { return pos_inf; }
+};
+
+struct DeviceNaNChecker {
+    uint64_t exp_mask, mant_mask, qnan, snan;
+    LOFLOAT_HOST_DEVICE bool operator()(uint64_t bits) const { return (bits & exp_mask) == exp_mask && (bits & mant_mask) != 0; }
+    LOFLOAT_HOST_DEVICE uint64_t qNanBitPattern() const { return qnan; }
+    LOFLOAT_HOST_DEVICE uint64_t sNanBitPattern() const { return snan; }
+};
 
 
 
