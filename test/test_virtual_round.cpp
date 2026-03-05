@@ -4,7 +4,7 @@
 #include <random>
 
 int main() {
-    int N = 4000;
+    int N = 4;
     float arr[N];
     float og_arr[N];
     srand(42);
@@ -14,7 +14,9 @@ int main() {
         og_arr[i] = arr[i];
     }
 
-    lo_float::virtual_round(arr, arr, N, lo_float::halfPrecisionParams, lo_float::Rounding_Mode::RoundToNearestEven, 0);
+    for (int i = 0; i < N; ++i) {
+        arr[i] = lo_float::virtual_round(arr[i], lo_float::halfPrecisionParams, lo_float::Rounding_Mode::RoundToNearestEven, 0);
+    }
 
     if (N < 5) {
         for (int i = 0; i < N; ++i) {

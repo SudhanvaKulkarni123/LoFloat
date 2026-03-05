@@ -1,9 +1,12 @@
+#ifndef USE_CUDA
 #include <xsimd/xsimd.hpp>   // xsimd::batch, xsimd::is_batch, load_unaligned, broadcast
+#endif
 #include <type_traits>      // std::conditional_t, std::is_same_v, remove_cv_t
 
 
-
+#ifndef USE_CUDA
 using namespace xsimd;
+#endif
 namespace lo_float {
     namespace lo_float_internal {
 
@@ -202,10 +205,12 @@ struct get_pod_type {
     using type = std::remove_cv_t<std::remove_reference_t<T>>;
 };
 
+#ifndef USE_CUDA
 template <typename U, typename Arch>
 struct get_pod_type<xsimd::batch<U, Arch>> {
     using type = U;
 };
+#endif
 
 template <typename T>
 using pod_type_t = typename get_pod_type<T>::type;
@@ -214,10 +219,13 @@ template <typename T>
 struct num_lanes {
     static constexpr std::size_t value = 1;
 };
+
+#ifndef USE_CUDA
 template <typename U, typename Arch>
 struct num_lanes<xsimd::batch<U, Arch>> {
     static constexpr std::size_t value = xsimd::batch<U, Arch>::size;
 };
+#endif
 
 template <typename T>
 inline constexpr std::size_t num_lanes_v = num_lanes<T>::value;
@@ -284,4 +292,13 @@ inline constexpr auto get_mantissa_bits_v = lo_float_internal::get_mantissa_bits
 
 template<typename T>
 inline constexpr auto get_bias = lo_float_internal::get_bias_v<T>;
+
+#ifdef USE_CUDA
+template <typename T>
+struct is_xsimd_batch : std::false_type {};
+#else
+template <typename T>
+struct is_xsimd_batch : std::bool_constant<xsimd::is_batch<T>::value> {};
+#endif
+
 }   //namespace lo_float
