@@ -5,7 +5,7 @@ import LoFloat as lof
 
 class STERound(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, tensor, params, rounding_mode):
+    def forward(ctx, tensor, params, rounding_mode=lof.RoundingMode.RoundToNearestEven):
         return lof.virtual_round(tensor, params, round_mode=rounding_mode, stoch_len=0)
 
     @staticmethod
@@ -36,15 +36,15 @@ def _quantize(self, tensor, params):
         return tensor
     return STERound.apply(tensor, params, self.rounding_mode)
 
-def mantissa_quantize(self, tensor, mantissa_bits):
+def mantissa_quantize(tensor, mantissa_bits):
     if mantissa_bits is None:
         return tensor
-    return STERound.apply(tensor, lof.create_p3109_params(8 + mantissa_bits + 1, mantissa_bits, True, True), self.rounding_mode)
+    return STERound.apply(tensor, lof.create_p3109_params(8 + mantissa_bits + 1, mantissa_bits, True, True))
 
-def exp_mant_quantize(self, tensor, exp_bits, mantissa_bits):
+def exp_mant_quantize(tensor, exp_bits, mantissa_bits):
     if exp_bits is None or mantissa_bits is None:
         return tensor
-    return STERound.apply(tensor, lof.create_p3109_params(exp_bits + mantissa_bits + 1, mantissa_bits, True, True), self.rounding_mode)
+    return STERound.apply(tensor, lof.create_p3109_params(exp_bits + mantissa_bits + 1, mantissa_bits, True, True))
 
 class LoF_Linear(nn.Module):
 
