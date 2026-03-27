@@ -3,8 +3,10 @@ import torch
 import torch.nn as nn
 import LoFloat as lof
 
-def lofloatify(model: nn.Module, rounding_mode: lof.RoundingMode = lof.RoundingMode.RoundToNearestEven) -> nn.Module:
+
+def lofloatify(model: nn.Module, rounding_mode: lof.RoundingMode = lof.RoundingMode.RoundToNearestEven, device="cuda", debug=False) -> nn.Module:
     model = copy.deepcopy(model)
+    lof.replace_mha_with_explicit(model)
     single_params = lof.create_single_params()
     for name, module in model.named_children():
         if isinstance(module, nn.Linear):
@@ -15,6 +17,15 @@ def lofloatify(model: nn.Module, rounding_mode: lof.RoundingMode = lof.RoundingM
                 bias_params=single_params,
                 rounding_mode=rounding_mode
             )
+            if debug:
+                print(f"  orig dtype: {module.weight.dtype}")
+                print(f"  new dtype:  {new_layer.weight.dtype}")
+                diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
+                print(f"{name} (Linear)")
+                print(f"  diff mean: {diff.mean():.10f}")
+                print(f"  diff max:  {diff.abs().max():.10f}")
+                print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
+                print(f"  has NaN:   {torch.isnan(diff).any()}")
             if isinstance(model, nn.Sequential):
                 model[int(name)] = new_layer
             else:
@@ -27,15 +38,21 @@ def lofloatify(model: nn.Module, rounding_mode: lof.RoundingMode = lof.RoundingM
                 bias_params=single_params,
                 rounding_mode=rounding_mode
             )
+            if debug:
+                print(f"  orig dtype: {module.weight.dtype}")
+                print(f"  new dtype:  {new_layer.weight.dtype}")
+                diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
+                print(f"{name} (Conv2d)")
+                print(f"  diff mean: {diff.mean():.10f}")
+                print(f"  diff max:  {diff.abs().max():.10f}")
+                print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
+                print(f"  has NaN:   {torch.isnan(diff).any()}")
             if isinstance(model, nn.Sequential):
                 model[int(name)] = new_layer
             else:
                 setattr(model, name, new_layer)
         else:
-            if isinstance(model, nn.Sequential):
-                model[int(name)] = lofloatify(module, rounding_mode=rounding_mode)
-            else:
-                setattr(model, name, lofloatify(module, rounding_mode=rounding_mode))
+            setattr(model, name, lofloatify(module, rounding_mode=rounding_mode, debug=debug))
     return model
 
 #set mantissa_bits for activation, weight or bias of all layers
@@ -46,10 +63,6 @@ def set_mantissa_fields(model, activation_mantissa_bits: dict, weight_mantissa_b
         act_mant    = activation_mantissa_bits.get(name)
         weight_mant = weight_mantissa_bits.get(name)
         bias_mant   = bias_mantissa_bits.get(name)
-
-        if act_mant is None or weight_mant is None or bias_mant is None:
-            print(f"[set_mantissa_fields] skipping '{name}': missing entry in one or more dicts")
-            continue
 
         module.set_mantissa(act_mant, weight_mant, bias_mant)
 
@@ -62,7 +75,7 @@ def set_exponent_fields(model, activation_exp_bits: dict, weight_exp_bits: dict,
         weight_exp = weight_exp_bits.get(name)
         bias_exp   = bias_exp_bits.get(name)
 
-        if act_exp is None or weight_exp is None or bias_exp is None:
+        if act_exp is None or weight_exp is None:
             print(f"[set_exponent_fields] skipping '{name}': missing entry in one or more dicts")
             continue
 
@@ -76,7 +89,7 @@ def set_exponentbias_fields(model, activation_expbias: dict, weight_expbias: dic
         w_expbias = weight_expbias.get(name)
         b_expbias   = bias_expbias.get(name)
 
-        if act_expbias is None or w_expbias is None or b_expbias is None:
+        if act_expbias is None or w_expbias is None:
             print(f"[set_exponentbias_fields] skipping '{name}': missing entry in one or more dicts")
             continue
 
@@ -266,5 +279,24 @@ def record_formats(model):
                     formats_flops[fp32_key] = 0
                 formats_flops[fp32_key] += num_flops_of_layer
 
+    total_flops = sum(formats_flops.values())
+    for format_key, flops in formats_flops.items():
+        percentage = (flops / total_flops) * 100 if total_flops > 0 else 0
+        formats_flops[format_key] = (percentage)
+
     return formats_flops
+
+def sparsity_in_weights(model):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            tensor = param.data
+            num_zeros = torch.sum(tensor == 0).item()
+            num_elements = tensor.numel()
+            sparsity = num_zeros / num_elements
+
+            sparsity_dict[name] = sparsity
+
+    return sparsity_dict
             
+def set_saturation_modes(model):
+    

@@ -85,17 +85,17 @@ BenchResult<OutFloat> bench_project(
     for (int n : sizes) {
         std::vector<float> in(n);
         for (int i = 0; i < n; i++) {
-            in[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+            in[i] = 0.0f + (static_cast<float>(rand()) / static_cast<float>(RAND_MAX));
         }
         std::vector<OutFloat> out(n);
 
         // Warmup
         for (int i = 0; i < warmup_iters; i++) {
             lo_float::Project(in.data(), out.data(), n, mode);
-            //#pragma omp parallel for
-            //for (int i = 0; i < n; i++) {
-               // out[i] = lo_float::Project<OutFloat>(in[i], mode);
-            //}
+            // #pragma omp parallel for
+            // for (int i = 0; i < n; i++) {
+            //    out[i] = lo_float::Project<OutFloat>(in[i], mode);
+            // }
             g_sink += static_cast<float>(out[i % n]);
         }
 
@@ -111,10 +111,10 @@ BenchResult<OutFloat> bench_project(
         for (int i = 0; i < iters_used; i++) {
             auto t0 = std::chrono::steady_clock::now();
             lo_float::Project(in.data(), out.data(), n, mode);
-            //#pragma omp parallel for
-            //for (int i = 0; i < n; i++) {
-              //  out[i] = lo_float::Project<OutFloat>(in[i], mode);
-            //}
+            // #pragma omp parallel for
+            // for (int i = 0; i < n; i++) {
+            //    out[i] = lo_float::Project<OutFloat>(in[i], mode);
+            // }
             auto t1 = std::chrono::steady_clock::now();
 
             g_sink += static_cast<float>(out[(i * 17) % n]);
@@ -122,7 +122,7 @@ BenchResult<OutFloat> bench_project(
             double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
             samples_us.push_back(us);
         }
-
+//td::cout << "in_0 = " << in[0] << ", out_0 = " << (float)out[0] << "\n";
         auto [min_it, max_it] = std::minmax_element(samples_us.begin(), samples_us.end());
         double avg = 0.0;
         for (double x : samples_us) avg += x;

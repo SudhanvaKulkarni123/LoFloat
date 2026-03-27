@@ -32,18 +32,20 @@ def test_virtual_round():
         def sNanBitPattern(self):
             return 0x7D00
 
-    half_params = lof.FloatFormatDescriptor(
-        16, 10, 15,
-        inf_behavior=lof.InfBehavior.Extended,
-        nan_behavior=lof.NaNBehavior.QuietNaN,
-        signedness=lof.Signedness.Signed,
-        is_inf_checker=HalfPrecisionInfChecker(),
-        is_nan_checker=HalfPrecisionNaNChecker()
-    )
+    # half_params = lof.FloatFormatDescriptor(
+    #     16, 10, 15,
+    #     inf_behavior=lof.InfBehavior.Extended,
+    #     nan_behavior=lof.NaNBehavior.QuietNaN,
+    #     signedness=lof.Signedness.Signed,
+    #     is_inf_checker=HalfPrecisionInfChecker(),
+    #     is_nan_checker=HalfPrecisionNaNChecker()
+    # )
+
+    P3109_params = lof.create_single_params()
 
     rounded = lof.virtual_round(
         arr,
-        half_params,
+        P3109_params,
         round_mode=lof.RoundingMode.RoundToNearestEven,
         stoch_len=0
     )

@@ -26,6 +26,10 @@
 #include <xsimd/xsimd.hpp>
 #include "simd_helpers.hpp"     //simd helpers
 #endif
+#ifdef USE_CUDA
+#include <cuda_fp16.h>
+#include <c10/util/Half.h>
+#endif
 #include "fp_tools.hpp"     //structs and concepts to define Floating Point params
 #ifdef ENABLE_EXCEPT
 #include "f_exceptions.hpp" //global env for exceptions
@@ -110,6 +114,26 @@ namespace lo_float
         // alias
         template <int mantissa_bits>
         using SqrtType = typename SqrtTypeSelector<mantissa_bits>::type;
+
+
+        //bitcast helper
+        template <typename To, typename From>
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE To bit_cast(From val) {
+            return std::bit_cast<To>(val);
+        } 
+
+        // c10::Half -> uint16_t
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE uint16_t bit_cast(c10::Half val) {
+            return val.x;
+        }
+
+        // uint16_t -> c10::Half
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE c10::Half bit_cast(uint16_t val) {
+            c10::Half h;
+            h.x = val;
+            return h;
+        }
+
 
         template <typename Derived, typename UnderlyingType = uint8_t>
         class lo_float_base
@@ -389,8 +413,8 @@ namespace lo_float
             SignAndMagnitude(Derived x)
             {
                 const UnderlyingType x_abs_bits =
-                    std::bit_cast<UnderlyingType>(abs(x));
-                const UnderlyingType x_bits = std::bit_cast<UnderlyingType>(x);
+                    bit_cast<UnderlyingType>(abs(x));
+                const UnderlyingType x_bits = bit_cast<UnderlyingType>(x);
                 const UnderlyingType x_sign = x_bits ^ x_abs_bits;
                 return {x_sign, x_abs_bits};
             }
@@ -1886,6 +1910,8 @@ namespace std
         return lo_float::lo_float_internal::abs(a);
     }
 
+
+
     // isnan overrides
     template <lo_float::FloatingPointParams Fp>
     bool isnan(const lo_float::Templated_Float<Fp> &a)
@@ -2148,6 +2174,24 @@ namespace lo_float
             using Base = TraitsBase<i_n<len, sign>>;
         };
 
+
+        //FP16
+
+        #ifdef USE_CUDA
+        template <>
+        struct Traits<c10::Half> : public TraitsBase<c10::Half> {
+            using BitsType = uint16_t;
+            static constexpr int kBits = 16;
+            static constexpr int kExponentBits = 5;
+            static constexpr int kMantissaBits = 10;
+            static constexpr int kExponentBias = 15;  // (1 << 4) - 1
+            static constexpr BitsType kExponentMask = (BitsType{0x1F} << 10);   // 0x7C00
+            static constexpr BitsType kMantissaMask = (BitsType{1} << 10) - 1;  // 0x03FF
+            static constexpr BitsType kSignBit = BitsType{1} << 15;             // 0x8000
+            static constexpr int kMinExponent = 1 - kExponentBias;              // -14
+            static constexpr int kMaxExponent = (1 << kExponentBits) - 2 - kExponentBias; // 16
+        };
+        #endif
         // float (FP32)
 template <>
 struct Traits<float> : public TraitsBase<float> {
@@ -2178,6 +2222,20 @@ struct Traits<double> : public TraitsBase<double> {
     static constexpr int kMaxExponent = (1 << kExponentBits) - 2 - kExponentBias;
 };
 
+template <typename T>
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE T from_double(double val) {
+    return static_cast<T>(val);
+}
+
+template <typename T>
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE float get_float(T val) {
+    return static_cast<float>(val);
+}
+
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE c10::Half abs(c10::Half val) {
+    val.x &= 0x7FFF;  // clear sign bit
+    return val;
+}
 
 template<typename From>
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
@@ -2187,7 +2245,7 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int
     int kDigitShift = ToMantissaBits - Traits<From>::kMantissaBits;
     static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
     FromBits from_bits =
-        std::bit_cast<FromBits>(abs(from));
+        bit_cast<FromBits>(abs(from));
     {
         from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
         from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
@@ -2195,7 +2253,7 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int
 
     // from_bits += static_cast<FromBits>(kExponentOffset)
     //                             << kFromMantissaBits;
-    return std::bit_cast<From>(from_bits);
+    return bit_cast<From>(from_bits);
     
 }
 
@@ -2247,12 +2305,12 @@ LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results,
     // Handle remainder
     for (int i = n - (n % step); i < n; ++i) {
         auto from = values[i];
-        FromBits from_bits = std::bit_cast<FromBits>(abs(from));
+        FromBits from_bits = bit_cast<FromBits>(abs(from));
         {
             from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
             from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
         }
-        results[i] = std::bit_cast<From>(from_bits);
+        results[i] = bit_cast<From>(from_bits);
     }
     
 }
@@ -2267,6 +2325,8 @@ LOFLOAT_DEVICE LOFLOAT_FORCEINLINE bool isnan(double value) {
 }
 
 
+
+
 template<typename From_p, typename ToInf, typename ToNaN>
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From_p virtual_round(From_p& value, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     //need this for const correctness
@@ -2277,23 +2337,25 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From_p virtual_round(From_p& value, Floa
     int kDigitShift = ToFp.mantissa_bits - Traits<From>::kMantissaBits;
     static constexpr int kExponentBias = Traits<From>::kExponentBias;
     static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
-    FromBits sign_bit = std::bit_cast<FromBits>(value) & (FromBits{1} << (kFromBits - 1));
+    FromBits sign_bit = bit_cast<FromBits>(value) & (FromBits{1} << (kFromBits - 1));
 
     const int ToMax_exp = ToFp.is_signed == Signedness::Signed
                                     ? (1 << (ToFp.bitwidth - ToFp.mantissa_bits - 1)) - 1 - ToFp.bias
                                     : (1 << (ToFp.bitwidth - ToFp.mantissa_bits)) - 1 - ToFp.bias;
     const int ToMin_exp = 1 - ToFp.bias;
-    
+    const float To_min_val = std::pow(2.0, ToMin_exp)*std::pow(2.0, -ToFp.mantissa_bits);
 
-    FromBits from_bits =
-        std::bit_cast<FromBits>(abs(value));
+    FromBits from_bits = bit_cast<FromBits>(abs(value));
     int from_exp = (from_bits >> kFromMantissaBits) - kExponentBias;
 
 
-    if (from_exp < ToMin_exp) return static_cast<From>(0); 
-    if (isnan(value)) return std::numeric_limits<From>::quiet_NaN();
-
     
+    if (isnan(value)) return std::numeric_limits<From>::quiet_NaN();
+    
+    if (get_float(abs(value)) < To_min_val) return from_double<From>(0.0); 
+    if (from_exp < ToMin_exp) kDigitShift += (from_exp - ToMin_exp);
+    
+    if (kDigitShift < 0)
     {
         from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
         from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
@@ -2302,7 +2364,7 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From_p virtual_round(From_p& value, Floa
     from_exp = (from_bits >> kFromMantissaBits) - kExponentBias;
     if (from_exp > ToMax_exp) return ToFp.OV_behavior == Inf_Behaviors::Saturating ? value : std::numeric_limits<From>::infinity();
 
-    return std::bit_cast<From>(from_bits | sign_bit);
+    return bit_cast<From>(static_cast<FromBits>(from_bits | sign_bit));
 }
 
 #ifndef USE_CUDA
@@ -2423,7 +2485,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
             {
                 // Shift bits to destination type, without sign bit.
 
-                const bool from_sign_bit = (get_signedness_v<From> == Signedness::Unsigned) ? false : std::bit_cast<FromBits>(from) >> (kFromBits - 1);
+                const bool from_sign_bit = (get_signedness_v<From> == Signedness::Unsigned) ? false : bit_cast<FromBits>(from) >> (kFromBits - 1);
 
                 if (get_signedness_v<To> == Signedness::Unsigned && from_sign_bit)
                 {
@@ -2458,7 +2520,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                 }
 
                 const FromBits from_bits =
-                    std::bit_cast<FromBits>(abs(from));
+                    bit_cast<FromBits>(abs(from));
 
                 // Special values, preserving sign.
 
@@ -2524,7 +2586,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                             bits >>= -kDigitShift;
                         }
 
-                        To to = std::bit_cast<To>(static_cast<ToBits>(bits));
+                        To to = bit_cast<To>(static_cast<ToBits>(bits));
 
                         return from_sign_bit ? -to : to;
                     }
@@ -2625,7 +2687,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
 
                         }
                         // Insert sign and return.
-                        return from_sign_bit ? -std::bit_cast<To>(bits) : std::bit_cast<To>(bits);
+                        return from_sign_bit ? -bit_cast<To>(bits) : bit_cast<To>(bits);
                     }
                 }
 
@@ -2647,7 +2709,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                 // Check for overflows by aligning the significands. We always align the
                 // narrower significand to the wider significand.
                 const WideBits kToHighestRep =
-                    std::bit_cast<ToBits>(std::numeric_limits<To>::max());
+                    bit_cast<ToBits>(std::numeric_limits<To>::max());
                 WideBits aligned_highest{kToHighestRep};
                 if constexpr (kDigitShift < 0)
                 {
@@ -2660,7 +2722,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                     bits = ToBits{static_cast<ToBits>(rounded_from_bits)};
                 }
 
-                To to = std::bit_cast<To>(bits);
+                To to = bit_cast<To>(bits);
                 if constexpr (std::make_pair(std::numeric_limits<To>::max_exponent,
                                              std::numeric_limits<To>::digits) <
                               std::make_pair(std::numeric_limits<From>::max_exponent,

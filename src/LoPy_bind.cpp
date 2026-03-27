@@ -74,7 +74,7 @@ static DeviceNaNChecker make_device_nan(const FloatingPointParamsPy &p, const De
 
 torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa_bits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     auto output = torch::empty_like(input);
-    AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "virtual_round_mantissa", ([&] {
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "virtual_round_mantissa", ([&] {
         auto* in_ptr  = input.data_ptr<scalar_t>();
         auto* out_ptr = output.data_ptr<scalar_t>();
         if (input.is_cuda()) {
@@ -103,7 +103,7 @@ torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPoi
             params.OV_behavior, params.NA_behavior, params.is_signed,
             inf_dev, nan_dev, Unsigned_behavior::NegtoZero
         };
-        AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "virtual_round_params_cuda", ([&] {
+        AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "virtual_round_params_cuda", ([&] {
             output = input.clone();
             round_fp_params(output.data_ptr<scalar_t>(), output.numel(), cpp_params, round_mode, stoch_len);
         }));
@@ -119,7 +119,7 @@ torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPoi
             params.OV_behavior, params.NA_behavior, params.is_signed,
             inf_adapter, nan_adapter, Unsigned_behavior::NegtoZero
         };
-        AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "virtual_round_params_cpu", ([&] {
+        AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "virtual_round_params_cpu", ([&] {
             virtual_round(input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), input.numel(), cpp_params, round_mode, stoch_len);
         }));
         #endif
@@ -159,12 +159,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .export_values();
 
     py::class_<FloatingPointParamsPy>(m, "FloatFormatDescriptor")
-        .def(py::init<int, int, int, Inf_Behaviors, NaN_Behaviors, Signedness, py::object, py::object>(),
-             py::arg("total_bits"), py::arg("exponent_bits"), py::arg("mantissa_bits"),
-             py::arg("inf_behavior"), py::arg("nan_behavior"), py::arg("signedness"),
-             py::arg("is_inf_checker"), py::arg("is_nan_checker"))
+    .def(py::init<int, int, int, Inf_Behaviors, NaN_Behaviors, Signedness, py::object, py::object>(),
+    py::arg("total_bits"), py::arg("mantissa_bits"), py::arg("bias"),
+    py::arg("inf_behavior"), py::arg("nan_behavior"), py::arg("signedness"),
+    py::arg("is_inf_checker"), py::arg("is_nan_checker"))
         .def_readonly("total_bits",    &FloatingPointParamsPy::bitwidth)
-        .def_readonly("mantissa_bits", &FloatingPointParamsPy::mantissa_bits);
+        .def_readonly("mantissa_bits", &FloatingPointParamsPy::mantissa_bits)
+        .def_readonly("bias",          &FloatingPointParamsPy::bias)
+        .def_readonly("inf_behavior",  &FloatingPointParamsPy::OV_behavior)
+        .def_readonly("nan_behavior",  &FloatingPointParamsPy::NA_behavior)
+        .def_readonly("signedness",    &FloatingPointParamsPy::is_signed)
+        .def_readonly("is_inf_checker",&FloatingPointParamsPy::IsInf)
+        .def_readonly("is_nan_checker",&FloatingPointParamsPy::IsNaN);
 
     m.def("virtual_round", &virtual_round_mantissa,
           py::arg("input"), py::arg("to_mantissa_bits"),

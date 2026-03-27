@@ -25,18 +25,23 @@ if use_cuda and not os.environ.get('CUDA_HOME'):
 # --- Extension ---
 if use_cuda:
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+    cuda_home = os.environ.get('CUDA_HOME', '/usr/local/cuda')
     cxx_args = ['-std=c++20', '-O3', '-fPIC', '-DUSE_CUDA']
     nvcc_args = ['-std=c++20', '-O3', '-DUSE_CUDA']
     use_openmp = os.environ.get('_LOFOPENMP', '0') == '1'
     link_args = ['-fopenmp'] if use_openmp else []
     if use_openmp:
         cxx_args.append('-fopenmp')
+
     # --- Paths and flags ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
     include_dirs = [
         os.path.join(script_dir, 'src/'),
         os.path.join(script_dir, 'third_party/xsimd/include'),
+        os.path.join(cuda_home, 'include'),
     ]
+
     ext = CUDAExtension(
         name='LoFloat.LoFloat',
         sources=[
@@ -50,6 +55,7 @@ if use_cuda:
     )
 else:
     from torch.utils.cpp_extension import BuildExtension, CppExtension
+
     # --- Paths and flags ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
     xsimd_include = os.environ.get('XSIMD_INCLUDE_PATH', 'third_party/xsimd/include')
@@ -63,6 +69,7 @@ else:
     cxx_args = ['-std=c++20', '-O3', '-fPIC']
     if use_openmp:
         cxx_args.append('-fopenmp')
+
     ext = CppExtension(
         name='LoFloat.LoFloat',
         sources=[
