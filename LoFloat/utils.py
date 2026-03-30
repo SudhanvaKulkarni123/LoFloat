@@ -95,6 +95,20 @@ def set_exponentbias_fields(model, activation_expbias: dict, weight_expbias: dic
 
         module.set_exponentbias(act_expbias, w_expbias, b_expbias)
 
+def set_saturation_modes(model, activation_sat: dict, weight_sat: dict, bias_sat: dict):
+    for name, module in model.named_modules():
+        if not isinstance(module, (lof.LoF_Linear, lof.LoF_Conv2d)):
+            continue
+        act_sat    = activation_sat.get(name)
+        w_sat = weight_sat.get(name)
+        b_sat   = bias_sat.get(name)
+
+        if act_sat is None or w_sat is None:
+            print(f"[set_saturation_modes] skipping '{name}': missing entry in one or more dicts")
+            continue
+
+        module.set_saturation_mode(act_sat, w_sat, b_sat)
+
 def set_all_to_half(model):
     half_params = lof.create_half_params()
     for name, module in model.named_children():
@@ -287,6 +301,7 @@ def record_formats(model):
     return formats_flops
 
 def sparsity_in_weights(model):
+    sparsity_dict = {}
     for name, param in model.named_parameters():
         if param.requires_grad:
             tensor = param.data
@@ -298,5 +313,5 @@ def sparsity_in_weights(model):
 
     return sparsity_dict
             
-def set_saturation_modes(model):
+
     

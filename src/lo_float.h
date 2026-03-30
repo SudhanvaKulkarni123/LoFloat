@@ -457,478 +457,565 @@ namespace lo_float
 
         // rounding functions-
 
-        template <typename Bits, typename Roundoff>
-        constexpr inline Bits RoundBitsToNearestEven(Bits bits, Roundoff roundoff)
-        {
-            using value_type = pod_type_t<Bits>;
+       // ============================================================================
+//  Rounding operations — scalar + SIMD (xsimd) implementations
+//
+//  Pattern: single template per function, `if constexpr` to branch on
+//  whether the type is an xsimd batch.  SIMD paths are guarded with
+//  #ifndef USE_CUDA.
+// ============================================================================
 
-            Bits bias;
-            if constexpr (is_xsimd_batch<Roundoff>::value)
+// ----- RoundBitsToNearestEven (unchanged) -----------------------------------
+
+template <typename Bits, typename Roundoff>
+constexpr inline Bits RoundBitsToNearestEven(Bits bits, Roundoff roundoff)
+{
+    using value_type = pod_type_t<Bits>;
+
+    Bits bias;
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        bias = xsimd::select(Bits(roundoff) == Bits{},
+            Bits(0),
+            (xs::bitwise_rshift(bits, xs::batch_cast<value_type>(roundoff)) & Bits(1))
+                + xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff - 1))
+                - Bits(1));
+        #endif
+    }
+    else
+    {
+        bias = roundoff == 0
+            ? Bits(0)
+            : ((bits >> roundoff) & Bits(1)) + (Bits(1) << (roundoff - 1)) - Bits(1);
+    }
+
+    return bits + bias;
+}
+
+// ----- Probabilistic_Round --------------------------------------------------
+// Coin-flip rounding: if any truncated bits are nonzero, round up with p=0.5.
+
+template <typename Bits, typename Roundoff>
+inline Bits Probabilistic_Round(Bits bits, Roundoff roundoff)
+{
+    using lane_t = pod_type_t<Bits>;
+    constexpr std::size_t lanes = num_lanes_v<Bits>;
+
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        using vt = pod_type_t<Roundoff>;
+        Bits mask = xs::bitwise_lshift(Bits(1), xs::batch_cast<lane_t>(roundoff)) - Bits(1);
+        Bits truncated = bits & ~mask;
+        Bits tail = bits & mask;
+
+        // Per-lane random 0/1
+        std::uniform_int_distribution<int> d01(0, 1);
+        std::array<lane_t, lanes> r{};
+        for (std::size_t i = 0; i < lanes; ++i)
+            r[i] = static_cast<lane_t>(d01(mt));
+
+        Bits r01;
+        if constexpr (lanes == 1)
+            r01 = Bits{r[0]};
+        else
+            r01 = xsimd::load_unaligned(r.data());
+
+        Bits bump = xsimd::select(tail != Bits(0), r01, Bits(0));
+        return truncated + xs::bitwise_lshift(bump, xs::batch_cast<lane_t>(roundoff));
+        #endif
+    }
+    else
+    {
+        Bits mask = (Bits(1) << roundoff) - Bits(1);
+        Bits truncated = bits & ~mask;
+        Bits tail = bits & mask;
+
+        std::uniform_int_distribution<int> d01(0, 1);
+        lane_t r01 = static_cast<lane_t>(d01(mt));
+
+        Bits bump = (tail != Bits(0)) ? Bits(r01) : Bits(0);
+        return truncated + (bump << roundoff);
+    }
+}
+
+// ----- Stochastic_Round_A (unchanged) ---------------------------------------
+
+template <typename Bits, typename Roundoff>
+inline Bits Stochastic_Round_A(Bits bits, Roundoff roundoff, const int len = 0)
+{
+    using lane_t = pod_type_t<Bits>;
+    constexpr std::size_t lanes = num_lanes_v<Bits>;
+
+    if (len <= 0) return bits;
+
+    const unsigned maxv = (1u << unsigned(len)) - 1u;
+    std::uniform_int_distribution<unsigned> dist(0u, maxv);
+
+    #ifndef USE_CUDA
+    std::array<lane_t, lanes> samp{};
+    for (std::size_t i = 0; i < lanes; ++i)
+        samp[i] = static_cast<lane_t>(dist(mt));
+
+    Bits to_add;
+    if constexpr (lanes == 1)
+        to_add = Bits{samp[0]};
+    else
+        to_add = xsimd::load_unaligned(samp.data());
+
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        return bits + xsimd::bitwise_lshift(to_add, (roundoff - lane_t(len)));
+    }
+    else
+    {
+        return bits + (to_add << (roundoff - len));
+    }
+    #else
+    Bits to_add = static_cast<Bits>(dist(mt));
+    return bits + (to_add << (roundoff - len));
+    #endif
+}
+
+// ----- Stochastic_Round_B ---------------------------------------------------
+// Bits may be scalar or batch; roundoff and len are always scalar.
+
+template <typename Bits>
+inline Bits Stochastic_Round_B(Bits bits, const int roundoff, const int len = 0)
+{
+    using lane_t = pod_type_t<Bits>;
+    constexpr std::size_t lanes = num_lanes_v<Bits>;
+
+    if constexpr (is_xsimd_batch<Bits>::value)
+    {
+        #ifndef USE_CUDA
+        if (len <= 0 || roundoff <= 0) return bits;
+        const int effective_len = (len > roundoff) ? roundoff : len;
+        const int shift = roundoff - effective_len;
+
+        const uint64_t max_u64 = (uint64_t{1} << effective_len) - 1u;
+        std::uniform_int_distribution<uint32_t> dist(0u, static_cast<uint32_t>(max_u64));
+
+        alignas(64) lane_t samp_arr[lanes];
+        for (std::size_t i = 0; i < lanes; ++i)
+            samp_arr[i] = static_cast<lane_t>(dist(mt));
+
+        const Bits samp = xsimd::load_aligned(samp_arr);
+
+        const lane_t complement_scalar = (lane_t{1} << effective_len) - lane_t{1};
+        const Bits complement(complement_scalar);
+        const Bits to_add = (samp & complement) + Bits(lane_t{1});
+
+        const lane_t lower_mask_scalar = (lane_t{1} << roundoff) - lane_t{1};
+        const Bits lower = bits & Bits(lower_mask_scalar);
+
+        const auto sum_mask = (lower > Bits(lane_t{0}));
+
+        Bits add = to_add;
+        if (shift > 0) add = add << shift;
+
+        return bits + xsimd::select(sum_mask, add, Bits(lane_t{0}));
+        #endif
+    }
+    else
+    {
+        std::uniform_int_distribution<unsigned int> distribution(0, (1 << (len)) - 1);
+        int samp = distribution(mt);
+        Bits complement = (Bits{1} << (len)) - 1;
+        Bits to_add = static_cast<Bits>(samp & complement) + 1;
+        const Bits lower = bits & ((Bits{1} << roundoff) - 1);
+        const bool sum_mask = lower > 0;
+        Bits to_ret = bits + (sum_mask ? (to_add << (roundoff - len)) : Bits{});
+        return to_ret;
+    }
+}
+
+// ----- Stochastic_Round_C ---------------------------------------------------
+
+template <typename Bits>
+inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
+{
+    using lane_t = pod_type_t<Bits>;
+    constexpr std::size_t lanes = num_lanes_v<Bits>;
+
+    if constexpr (is_xsimd_batch<Bits>::value)
+    {
+        #ifndef USE_CUDA
+        if (len <= 0 || roundoff <= 0) return bits;
+        const int effective_len = (len > roundoff + 1) ? roundoff + 1 : len;
+        const int top_shift = roundoff - effective_len + 1;
+
+        const uint64_t max_u64 = (uint64_t{1} << effective_len) - 1u;
+        std::uniform_int_distribution<uint32_t> dist(0u, static_cast<uint32_t>(max_u64));
+
+        alignas(64) lane_t samp_arr[lanes];
+        for (std::size_t i = 0; i < lanes; ++i)
+            samp_arr[i] = static_cast<lane_t>(dist(mt));
+
+        const Bits samp = xsimd::load_aligned(samp_arr);
+        const Bits one(lane_t{1});
+
+        const Bits coin_bit     = samp & one;
+        const Bits remaining    = samp >> 1;
+
+        const lane_t bottom_mask_scalar =
+            (roundoff >= int(sizeof(lane_t) * 8)) ? ~lane_t{0} : (lane_t{1} << roundoff) - 1;
+        const Bits bottom_bits = bits & Bits(bottom_mask_scalar);
+
+        Bits top_bits = remaining + coin_bit;
+        if (top_shift > 0) top_bits = top_bits << top_shift;
+
+        const auto do_add = (bottom_bits != Bits(lane_t{0}));
+        return xsimd::select(do_add, bits + top_bits, bits);
+        #endif
+    }
+    else
+    {
+        std::uniform_int_distribution<unsigned int> distribution(0, (1 << (len)) - 1);
+        int samp = distribution(mt);
+        const unsigned int coin_bit = samp & 1;
+        unsigned int remaining_bits = samp >> 1;
+        Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
+        Bits top_bits = static_cast<Bits>((remaining_bits + coin_bit) << (roundoff - len + 1));
+        return (len == 0 || bottom_bits == 0) ? bits : bits + (top_bits);
+    }
+}
+
+// ----- True_Stochastic_Round ------------------------------------------------
+// Rounds up with probability  tail / 2^roundoff.
+// roundoff is always a uniform scalar; Bits may be scalar or batch.
+
+template <typename Bits>
+inline Bits True_Stochastic_Round(Bits bits, const int roundoff)
+{
+    using lane_t = pod_type_t<Bits>;
+    constexpr std::size_t lanes = num_lanes_v<Bits>;
+
+    if constexpr (is_xsimd_batch<Bits>::value)
+    {
+        #ifndef USE_CUDA
+        const Bits mask_val  = Bits(lane_t{1} << roundoff) - Bits(lane_t{1});
+        const Bits tail      = bits & mask_val;
+        const Bits truncated = bits & ~mask_val;
+        const Bits bump      = Bits(lane_t{1} << roundoff);
+
+        const double denom = static_cast<double>(lane_t{1} << roundoff);
+        std::uniform_real_distribution<double> dist(0.0, 1.0);
+
+        // Extract tail per lane, decide per lane
+        alignas(64) lane_t tail_arr[lanes];
+        alignas(64) lane_t trunc_arr[lanes];
+        xsimd::store_aligned(tail_arr, tail);
+        xsimd::store_aligned(trunc_arr, truncated);
+
+        alignas(64) lane_t result_arr[lanes];
+        for (std::size_t i = 0; i < lanes; ++i)
+        {
+            const double prob = static_cast<double>(tail_arr[i]) / denom;
+            if (dist(mt) < prob)
             {
-                #ifndef USE_CUDA
-                // SIMD roundoff (fast path)
-                bias = xsimd::select(Bits(roundoff) == Bits{},
-                    Bits(0),
-                    (xs::bitwise_rshift(bits, xs::batch_cast<value_type>(roundoff)) & Bits(1)) + xs::bitwise_lshift(Bits(1),xs::batch_cast<value_type>(roundoff - 1)) - Bits(1));
-                #endif
+                lane_t rounded = trunc_arr[i] + (lane_t{1} << roundoff);
+                result_arr[i] = (rounded < trunc_arr[i]) ? trunc_arr[i] : rounded;
             }
             else
             {
-                // Scalar roundoff (fast path)
-                bias = roundoff == 0
-                    ? Bits(0)
-                    : ((bits >> roundoff) & Bits(1)) + (Bits(1) << (roundoff - 1)) - Bits(1);
+                result_arr[i] = trunc_arr[i];
             }
-
-            return bits + bias;
         }
 
+        if constexpr (lanes == 1)
+            return Bits{result_arr[0]};
+        else
+            return xsimd::load_aligned(result_arr);
+        #endif
+    }
+    else
+    {
+        const Bits mask = (Bits{1} << roundoff) - 1;
+        const Bits tail = bits & mask;
+        const Bits truncated = bits & ~mask;
 
-        template <typename Bits, typename Roundoff>
-        inline Bits Probabilistic_Round(Bits bits, Roundoff roundoff)
+        const double prob = static_cast<double>(tail) / static_cast<double>(Bits{1} << roundoff);
+
+        std::uniform_real_distribution<double> distribution(0.0, 1.0);
+        const double samp = distribution(mt);
+
+        if (samp < prob)
         {
-            // using lane_t = pod_type_t<Bits>;
-            // constexpr std::size_t lanes = num_lanes_v<Bits>;
-
-            // Bits mask = (Bits(1) << roundoff) - Bits(1);
-            // Bits truncated = bits & ~mask;
-            // Bits tail = bits & mask;
-
-            // // Per-lane random 0/1 (from the same global mt stream)
-            // std::array<lane_t, lanes> r{};
-            // std::uniform_int_distribution<int> d01(0, 1);
-            // for (std::size_t i = 0; i < lanes; ++i) r[i] = static_cast<lane_t>(d01(mt));
-            // Bits r01;
-            // if constexpr (lanes == 1)
-            //     r01 = Bits{r[0]};
-            // else
-            //     r01 = xsimd::load_unaligned(r.data());
-
-            // // if constexpr (xsimd::is_batch<Roundoff>::value)
-            // // {
-            // //     auto tail_nz = (tail != Bits(0));
-            // //     Bits bump = xsimd::select(tail_nz, r01, Bits(0));
-            // //     return truncated + (bump << roundoff);
-            // // }
-            // // else
-            // {
-            //     Bits bump = (tail != Bits(0)) * r01;
-            //     return truncated + (bump << roundoff);
-            // }
-            return bits;
-        }
-
-        template <typename Bits, typename Roundoff>
-        inline Bits Stochastic_Round_A(Bits bits, Roundoff roundoff, const int len = 0)
-        {
-         using lane_t = pod_type_t<Bits>;
-
-        constexpr std::size_t lanes = num_lanes_v<Bits>;
-
-
-            if (len <= 0) return bits;
-
-            // Per-lane random integer in [0, 2^len - 1]
-            // Assumes len < 32 (and < bitwidth(lane_t)); adjust if you need larger.
-            const unsigned maxv = (1u << unsigned(len)) - 1u;
-            std::uniform_int_distribution<unsigned> dist(0u, maxv);
-
-            #ifndef USE_CUDA
-            std::array<lane_t, lanes> samp{};
-            for (std::size_t i = 0; i < lanes; ++i) samp[i] = static_cast<lane_t>(dist(mt));
-            Bits to_add;
-            if constexpr (lanes == 1)
-                to_add = Bits{samp[0]};
-            else
-                to_add = xsimd::load_unaligned(samp.data());
-
-            if constexpr (xsimd::is_batch<Roundoff>::value)
-            {
-                return bits + xsimd::bitwise_lshift(to_add , (roundoff - lane_t(len)));
-            }
-            else
-            {
-                return bits + (to_add << (roundoff - len));
-            }
-            #else
-            Bits to_add = static_cast<Bits>(dist(mt));
-            return bits + (to_add << (roundoff - len));
-            #endif
-        }
-
-
-        template <typename Bits>
-        inline Bits Stochastic_Round_B(Bits bits, const int roundoff, const int len = 0)
-        {
-            std::uniform_int_distribution<unsigned int> distribution(0, (1 << (len)) - 1);
-            // auto len = 2;
-            int samp = distribution(mt); // Generate a random integer
-            Bits complement = (Bits{1} << (len)) - 1;
-            Bits to_add = static_cast<Bits>(samp & complement) + 1;
-            const Bits lower = bits & ((Bits{1} << roundoff) - 1); // Get the lower bits to be rounded off
-            const bool sum_mask = lower > 0;
-            Bits to_ret = bits + (sum_mask ? (to_add << (roundoff - len)) : Bits{}); // Add random bits to the input bits
-            return to_ret;
-        }
-
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // inline xsimd::batch<Bits, arch>
-        // Stochastic_Round_B(xsimd::batch<Bits, arch> bits, int roundoff, int len = 0)
-        // {
-        //     static_assert(std::is_integral_v<Bits>, "Bits must be an integral type.");
-        //     using B = xsimd::batch<Bits, arch>;
-        //     constexpr std::size_t lanes = B::size;
-
-        //     // Match scalar behavior expectations: these are "fast exits"
-        //     if (len <= 0 || roundoff <= 0) return bits;
-
-        //     // Scalar code assumes len <= roundoff (otherwise shift is negative UB)
-        //     if (len > roundoff) len = roundoff;
-
-        //     const int shift = roundoff - len;  // >= 0
-
-        //     // --- RNG per lane: uniform in [0, 2^len - 1] ---
-        //     // Use uint64_t to avoid UB for shifts; for valid ranges it matches scalar.
-        //     const uint64_t max_u64 = (uint64_t{1} << len) - 1u;
-        //     std::uniform_int_distribution<uint32_t> dist(0u, static_cast<uint32_t>(max_u64));
-
-        //     alignas(B::alignment()) Bits samp_arr[lanes];
-        //     for (std::size_t i = 0; i < lanes; ++i)
-        //         samp_arr[i] = static_cast<Bits>(dist(mt));
-
-        //     const B samp = xsimd::load_aligned(samp_arr);
-
-        //     // complement = (1<<len)-1
-        //     const Bits complement_scalar = (Bits{1} << len) - Bits{1};
-        //     const B complement(complement_scalar);
-
-        //     // to_add = (samp & complement) + 1
-        //     const B to_add = (samp & complement) + B(Bits{1});
-
-        //     // lower = bits & ((1<<roundoff)-1)
-        //     // (Assumes roundoff < bitwidth, same as scalar's valid range.)
-        //     const Bits lower_mask_scalar = (Bits{1} << roundoff) - Bits{1};
-        //     const B lower = bits & B(lower_mask_scalar);
-
-        //     // sum_mask = lower > 0
-        //     const auto sum_mask = (lower > B(Bits{0}));
-
-        //     // add = to_add << shift
-        //     B add = to_add;
-        //     if (shift > 0) add = add << shift;
-
-        //     return bits + xsimd::select(sum_mask, add, B(Bits{0}));
-        // }
-
-
-
-        template <typename Bits>
-        inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
-        {
-            // given pattern FFF...FLRTT...T,rounds stochastically by generating random bits
-            //  corresponding to  RTT...T and adding the genned number.
-            // Then we truncate the mantissa
-            // auto len = 2;
-            std::uniform_int_distribution<unsigned int> distribution(0, (1 << (len)) - 1);
-            int samp = distribution(mt); // Generate a random integer of length len, next get top "roundoff" bits
-            // if RTTTT != 0, add a coin flip to samp
-            const unsigned int coin_bit = samp & 1;
-            unsigned int remaining_bits = samp >> 1; // Get the remaining bits after the coin flip
-            Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
-            Bits top_bits = static_cast<Bits>((remaining_bits + coin_bit) << (roundoff - len + 1));
-            return (len == 0 || bottom_bits == 0) ? bits : bits + (top_bits);
-        }
-
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // inline xs::batch<Bits, arch> Stochastic_Round_C(xs::batch<Bits, arch> bits, xs::batch<int, arch> roundoff, int len = 0)
-        // {
-        //     static_assert(std::is_integral_v<Bits>, "Bits must be an integral type.");
-        //     using batch_bits = xs::batch<Bits, arch>;
-        //     constexpr std::size_t lanes = num_lanes_v<batch_bits>;
-
-        //     // Fast exits + avoid UB
-        //     if (len <= 0 || roundoff <= 0) return bits;
-
-        //     // This shift must be >= 0 for your formula
-        //     // top_bits shift = roundoff - len + 1
-        //     if (len > roundoff + 1) len = roundoff + 1;
-        //     const int top_shift = roundoff - len + 1; // now >= 0
-
-        //     // ----- RNG per lane (scalar) -----
-        //     // Compute max = 2^len - 1 without UB for len==32
-        //     const uint64_t max_u64 = (uint64_t{1} << len) - 1u;
-        //     std::uniform_int_distribution<uint32_t> dist(0u, static_cast<uint32_t>(max_u64));
-
-        //     alignas(64) Bits samp_arr[lanes];
-        //     #pragma unroll
-        //     for (std::size_t i = 0; i < lanes; ++i)
-        //         samp_arr[i] = static_cast<Bits>(dist(mt));
-
-        //     const batch_bits samp = xs::load_aligned(samp_arr);
-
-        //     // ----- SIMD logic -----
-        //     const batch_bits one(Bits{1});
-
-        //     // coin_bit = samp & 1
-        //     const batch_bits coin_bit = samp & one;
-
-        //     // remaining_bits = samp >> 1
-        //     const batch_bits remaining_bits = samp >> 1;
-
-        //     // bottom_bits = bits & ((1<<roundoff)-1)
-        //     const Bits bottom_mask_scalar =
-        //         (roundoff >= int(sizeof(Bits) * 8)) ? ~Bits{0} : (Bits{1} << roundoff) - 1;
-        //     const batch_bits bottom_mask(bottom_mask_scalar);
-        //     const batch_bits bottom_bits = bits & bottom_mask;
-
-        //     // top_bits = (remaining_bits + coin_bit) << (roundoff - len + 1)
-        //     batch_bits top_bits = remaining_bits + coin_bit;
-        //     if (top_shift > 0) top_bits = top_bits << top_shift;
-
-        //     // return (bottom_bits == 0) ? bits : bits + top_bits
-        //     const auto do_add = (bottom_bits != batch_bits(Bits{0}));
-        //     return xs::select(do_add, bits + top_bits, bits);
-        // }
-
-        template <typename Bits>
-        inline Bits True_Stochastic_Round(Bits bits, const int roundoff)
-        {
-            // true stoch round rounds up with prob RTT...T / 2^roundoff
-            const Bits mask = (Bits{1} << roundoff) - 1;
-            const Bits tail = bits & mask;       // bits to be discarded
-            const Bits truncated = bits & ~mask; // keep the rest
-
-            // Compute probability of rounding up
-            const double prob = static_cast<double>(tail) / static_cast<double>(Bits{1} << roundoff);
-
-            std::uniform_real_distribution<double> distribution(0.0, 1.0);
-            const double samp = distribution(mt);
-
-            // Round up with probability equal to tail / 2^roundoff
-            if (samp < prob)
-            {
-                Bits rounded = truncated + (Bits{1} << roundoff);
-                if (rounded < truncated)
-                {
-                    return truncated;
-                }
-                return rounded;
-            }
-            else
-            {
+            Bits rounded = truncated + (Bits{1} << roundoff);
+            if (rounded < truncated)
                 return truncated;
-            }
+            return rounded;
         }
-
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // inline xs::batch<Bits, arch> True_Stochastic_Round(xs::batch<Bits, arch> bits, const int roundoff)
-        // {
-        //     const Bits mask = (Bits{1} << roundoff) - 1;
-        //     const Bits tail = bits & mask;       // bits to be discarded
-        //     const Bits truncated = bits & ~mask; // keep the rest
-
-        //     //get num lanes
-        //     constexpr size_t num_lanes = xs::batch<Bits, arch>::size;
-        //     double prob[num_lanes];
-        //     double samp[num_lanes];
-
-        //     // Compute probability of rounding up
-        //     #pragma unroll
-        //     for (size_t i = 0; i < num_lanes; i++)
-        //     {
-        //         const double prob = static_cast<double>(tail) / static_cast<double>(Bits{1} << roundoff);
-        //     }
-
-        //     std::uniform_real_distribution<double> distribution(0.0, 1.0);
-        //     #pragma unroll
-        //     for (size_t i = 0; i < num_lanes; i++)
-        //     {
-        //         samp[i] = distribution(mt);
-        //     }
-        //     // Round up with probability equal to tail / 2^roundoff
-        //     #pragma unroll
-        //     for (size_t i = 0; i < num_lanes; i++)
-        //     {
-        //     if (samp[i] < prob[i])
-        //     {
-        //         Bits rounded = truncated + (Bits{1} << roundoff);
-        //         if (rounded < truncated)
-        //         {
-        //             return truncated;
-        //         }
-        //         return rounded;
-        //     }
-        //     else
-        //     {
-        //         return truncated;
-        //     }
-        //     }
-
-        // }
-
-
-        template <typename Bits>
-        inline Bits RoundBitsTowardsZero(Bits bits, int roundoff)
+        else
         {
-            // Round towards zero by just truncating the bits
-            // in bits FFF...FLRTT....T RTT....T needs to be rounded off, so just set  RTT..T to be 0
-            auto mask = ~((Bits{1} << (roundoff)) - 1);
-
-            return bits & mask;
-        }
-
-        template <typename Bits>
-        inline Bits RoundTiedBitsTowardsZero(Bits bits, int roundoff)
-        {
-            // Round towards zero by just truncating the bits
-            // in bits FFF...FLRTT....T RTT....T needs to be rounded off, so just set  RTT..T to be 0
-            auto mask = ~((Bits{1} << (roundoff)) - 1);
-
-            return bits & mask;
-        }
-
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // inline xs::batch<Bits, arch> RoundBitsTowardsZero(xs::batch<Bits, arch> bits, xs::batch<int, arch> roundoff)
-        // {
-        //     // Round towards zero by just truncating the bits
-        //     // in bits FFF...FLRTT....T RTT....T needs to be rounded off, so just set  RTT..T to be 0
-        //     auto mask = ~((xs::batch<Bits, arch>(1) << (roundoff)) - xs::batch<Bits, arch>(1));
-        //     return bits & mask;
-        // }
-
-        template <typename Bits>
-        inline Bits RoundBitsAwayFromZero(Bits bits, int roundoff)
-        {
-            // Round away from Zero by truncating bits and adding one to the remaining bit pattern if RTT...T > 0
-            //  in bits FFF...FRTT...T, set RTT...T to be zero and add 1 to FFF...F
-            auto mask = ~((Bits{1} << roundoff) - 1);
-            Bits truncated = bits & mask;
-            return truncated + (bits > 0 ? Bits{1} << roundoff : 0);
-        }
-
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // inline xs::batch<Bits, arch> RoundBitsAwayFromZero(xs::batch<Bits, arch> bits, xs::batch<int, arch> roundoff)
-        // {
-        //     // Round away from Zero by truncating bits and adding one to the remaining bit pattern if RTT...T > 0
-        //     //  in bits FFF...FRTT...T, set RTT...T to be zero and add 1 to FFF...F
-        //     auto mask = ~((xs::batch<Bits, arch>(1) << roundoff) - xs::batch<Bits, arch>(1));
-        //     xs::batch<Bits, arch> truncated = bits & mask;
-        //     return truncated + (bits > xs::batch<Bits, arch>(0) ? xs::batch<Bits, arch>(1) << roundoff : xs::batch<Bits, arch>(0));
-        // }
-
-        template <typename Bits>
-        constexpr inline Bits RoundBitsToNearestOdd(Bits bits, int roundoff)
-        {
-            // Round to nearest odd by adding a bias term.
-            // Consider a bit pattern:
-            //   FFF...FLRTT...T,
-            // where bits RTT...T need to be rounded-off. We add a bias term to the
-            // bit pattern such that a carry is introduced to round up only if
-            // - L is 0, R is 1, and any T is one, OR
-            // - L is 0, R is 1
-            // This ensures the final result is odd.
-            Bits bias = roundoff == 0
-                            ? 0
-                            : ((~bits >> roundoff) & 1) + (Bits{1} << (roundoff - 1)) - 1;
-            return bits + bias;
-        }
-
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // constexpr inline xs::batch<Bits, arch> RoundBitsToNearestOdd(xs::batch<Bits, arch> bits, xs::batch<int, arch> roundoff)
-        // {
-        //     xs::batch<Bits, arch> bias = roundoff == xs::batch<int, arch>(0)
-        //                                      ? xs::batch<Bits, arch>(0)
-        //                                      : (((~bits) >> roundoff) & xs::batch<Bits, arch>(1)) + (xs::batch<Bits, arch>(1) << (roundoff - 1)) - xs::batch<Bits, arch>(1);
-        //     return bits + bias;
-        // }
-
-        template <typename Bits>
-        inline Bits RoundUp(Bits bits, int roundoff, bool positive = true)
-        {
-            // round bit pattern up by adding 1 to the bit pattern if positive, truncate if negative
-            // in bits FFF...FLRTT...T, set RTT...T to be 0 and add 1 to FFF...F
-            const Bits low_mask = (Bits{1} << roundoff) - 1; // 000…0111…1
-            const Bits high_mask = ~low_mask;                // 111…1000…0
-            Bits truncated = bits & high_mask;               // keep the high part
-
-            truncated += (positive && ((bits & low_mask) != 0)) ? Bits{1} << roundoff : 0;
-
             return truncated;
         }
+    }
+}
 
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // inline xs::batch<Bits, arch> RoundUp(xs::batch<Bits, arch> bits, xs::batch<int, arch> roundoff, xs::batch_bool<Bits, arch> positive = true)
-        // {
-        //     const xs::batch<Bits, arch> low_mask = (xs::batch<Bits, arch>(1) << roundoff) - xs::batch<Bits, arch>(1); // 000…0111…1
-        //     const xs::batch<Bits, arch> high_mask = ~low_mask;                                                        // 111…1000…0
-        //     xs::batch<Bits, arch> truncated = bits & high_mask;                                                       // keep the high part
+// ----- RoundBitsTowardsZero -------------------------------------------------
 
-        //     truncated += (positive & ((bits & low_mask) != xs::batch<Bits, arch>(0))) ? xs::batch<Bits, arch>(1) << roundoff : xs::batch<Bits, arch>(0);
+template <typename Bits, typename Roundoff>
+inline Bits RoundBitsTowardsZero(Bits bits, Roundoff roundoff)
+{
+    using value_type = pod_type_t<Bits>;
 
-        //     return truncated;
-        // }
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        auto mask = ~(xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1));
+        return bits & mask;
+        #endif
+    }
+    else
+    {
+        auto mask = ~((Bits{1} << roundoff) - 1);
+        return bits & mask;
+    }
+}
 
-        template <typename Bits>
-        inline Bits RoundDown(Bits bits, int roundoff, bool positive = true)
-        {
-            // just truncate the bits
-            // in bits FFF...FLRTT...T, set RTT...T to be 0 if positive, add 1 if negative
-            auto mask = ~((Bits{1} << roundoff) - 1);
-            Bits truncated = bits & mask;
-            return truncated + (!positive ? (bits > 0 ? Bits{1} << roundoff : 0) : 0);
-        }
+// ----- RoundTiedBitsTowardsZero ---------------------------------------------
+// Round to nearest; break ties towards zero (i.e. truncate on exact tie).
+//
+//   bias = (1 << (roundoff-1)) - 1
+//
+// Adding this bias causes a carry past the rounding point when the tail
+// *strictly exceeds* the midpoint, but NOT when the tail equals the
+// midpoint exactly (the tie case), giving ties-towards-zero behaviour.
 
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // inline xsimd::batch<Bits, arch>
-        // RoundDown(xsimd::batch<Bits, arch> bits,
-        //         xsimd::batch<int, arch> roundoff,
-        //         xsimd::batch_bool<Bits, arch> positive = xsimd::batch_bool<Bits, arch>(true))
-        // {
-        //     using B = xsimd::batch<Bits, arch>;
-        //     using M = xsimd::batch_bool<Bits, arch>;
+template <typename Bits, typename Roundoff>
+inline Bits RoundTiedBitsTowardsZero(Bits bits, Roundoff roundoff)
+{
+    using value_type = pod_type_t<Bits>;
 
-        //     if (roundoff <= 0) return bits;
-        //     if (roundoff >= int(sizeof(Bits) * 8)) return B(Bits{0}); // or return bits; pick your policy
+    Bits bias;
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        bias = xsimd::select(Bits(roundoff) == Bits{},
+            Bits(0),
+            xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff - 1)) - Bits(1));
+        #endif
+    }
+    else
+    {
+        bias = roundoff == 0
+            ? Bits(0)
+            : (Bits{1} << (roundoff - 1)) - Bits(1);
+    }
 
-        //     const B one(Bits{1});
-        //     const B lowmask  = (one << roundoff) - one;  // low `roundoff` bits = 1
-        //     const B keepmask = ~lowmask;                 // keep upper bits
+    return bits + bias;
+}
 
-        //     const B truncated = bits & keepmask;
+// ----- RoundBitsAwayFromZero ------------------------------------------------
 
-        //     // Any truncated-off bits?
-        //     const M has_remainder = (bits & lowmask) != B(Bits{0});
+template <typename Bits, typename Roundoff>
+inline Bits RoundBitsAwayFromZero(Bits bits, Roundoff roundoff)
+{
+    using value_type = pod_type_t<Bits>;
 
-        //     // For negative lanes (positive == false), rounding down means:
-        //     // if remainder exists, increase magnitude by 1<<roundoff
-        //     const M is_negative = !positive;
-        //     const M do_inc = is_negative & has_remainder;
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        auto mask = ~(xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1));
+        Bits truncated = bits & mask;
+        Bits inc = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff));
+        return truncated + xsimd::select(bits > Bits(0), inc, Bits(0));
+        #endif
+    }
+    else
+    {
+        auto mask = ~((Bits{1} << roundoff) - 1);
+        Bits truncated = bits & mask;
+        return truncated + (bits > 0 ? Bits{1} << roundoff : 0);
+    }
+}
 
-        //     const B inc = (one << roundoff);
-        //     return truncated + xsimd::select(do_inc, inc, B(Bits{0}));
-        // }
+// ----- RoundBitsToNearestOdd ------------------------------------------------
+
+template <typename Bits, typename Roundoff>
+constexpr inline Bits RoundBitsToNearestOdd(Bits bits, Roundoff roundoff)
+{
+    using value_type = pod_type_t<Bits>;
+
+    Bits bias;
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        // bias = ((~bits >> roundoff) & 1) + (1 << (roundoff-1)) - 1
+        Bits inv_lsb = xs::bitwise_rshift(~bits, xs::batch_cast<value_type>(roundoff)) & Bits(1);
+        Bits half     = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff - 1));
+        bias = xsimd::select(Bits(roundoff) == Bits{},
+            Bits(0),
+            inv_lsb + half - Bits(1));
+        #endif
+    }
+    else
+    {
+        bias = roundoff == 0
+            ? 0
+            : ((~bits >> roundoff) & 1) + (Bits{1} << (roundoff - 1)) - 1;
+    }
+
+    return bits + bias;
+}
+
+// ----- RoundUp --------------------------------------------------------------
+// Positive lanes: truncate + round up if remainder.
+// Negative lanes: truncate only.
+
+template <typename Bits, typename Roundoff, typename BoolT>
+inline Bits RoundUp(Bits bits, Roundoff roundoff, BoolT positive)
+{
+    using value_type = pod_type_t<Bits>;
+
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        // positive is expected to be xsimd::batch_bool<value_type>
+        Bits low_mask  = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1);
+        Bits high_mask = ~low_mask;
+        Bits truncated = bits & high_mask;
+
+        auto has_remainder = (bits & low_mask) != Bits(0);
+        auto do_inc = positive & has_remainder;
+
+        Bits inc = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff));
+        return truncated + xsimd::select(do_inc, inc, Bits(0));
+        #endif
+    }
+    else
+    {
+        const Bits low_mask  = (Bits{1} << roundoff) - 1;
+        const Bits high_mask = ~low_mask;
+        Bits truncated = bits & high_mask;
+
+        truncated += (positive && ((bits & low_mask) != 0)) ? Bits{1} << roundoff : 0;
+        return truncated;
+    }
+}
+
+// Convenience overload: default positive = true
+template <typename Bits, typename Roundoff>
+inline Bits RoundUp(Bits bits, Roundoff roundoff)
+{
+    if constexpr (is_xsimd_batch<Bits>::value)
+    {
+        using value_type = pod_type_t<Bits>;
+        return RoundUp(bits, roundoff, xsimd::batch_bool<value_type>(true));
+    }
+    else
+    {
+        return RoundUp(bits, roundoff, true);
+    }
+}
+
+// ----- RoundDown ------------------------------------------------------------
+// Positive lanes: truncate only.
+// Negative lanes: truncate + round up (increase magnitude) if remainder.
+
+template <typename Bits, typename Roundoff, typename BoolT>
+inline Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
+{
+    using value_type = pod_type_t<Bits>;
+
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        Bits low_mask  = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1);
+        Bits high_mask = ~low_mask;
+        Bits truncated = bits & high_mask;
+
+        auto has_remainder = (bits & low_mask) != Bits(0);
+        auto is_negative   = !positive;
+        auto do_inc = is_negative & has_remainder;
+
+        Bits inc = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff));
+        return truncated + xsimd::select(do_inc, inc, Bits(0));
+        #endif
+    }
+    else
+    {
+        auto mask = ~((Bits{1} << roundoff) - 1);
+        Bits truncated = bits & mask;
+        return truncated + (!positive ? (bits > 0 ? Bits{1} << roundoff : 0) : 0);
+    }
+}
+
+// Convenience overload: default positive = true
+template <typename Bits, typename Roundoff>
+inline Bits RoundDown(Bits bits, Roundoff roundoff)
+{
+    if constexpr (is_xsimd_batch<Bits>::value)
+    {
+        using value_type = pod_type_t<Bits>;
+        return RoundDown(bits, roundoff, xsimd::batch_bool<value_type>(true));
+    }
+    else
+    {
+        return RoundDown(bits, roundoff, true);
+    }
+}
+
+// ----- RoundTiesToAway ------------------------------------------------------
+// Round to nearest; break ties away from zero (if R==1, round up).
+
+template <typename Bits, typename Roundoff>
+inline Bits RoundTiesToAway(Bits bits, Roundoff roundoff)
+{
+    using value_type = pod_type_t<Bits>;
+
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        auto mask = ~(xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1));
+        Bits truncated = bits & mask;
+
+        // Extract R bit: (bits >> (roundoff-1)) & 1
+        Bits r_bit = xs::bitwise_rshift(bits, xs::batch_cast<value_type>(roundoff - 1)) & Bits(1);
+        // Add r_bit << roundoff
+        return truncated + xs::bitwise_lshift(r_bit, xs::batch_cast<value_type>(roundoff));
+        #endif
+    }
+    else
+    {
+        auto mask = ~((Bits{1} << roundoff) - 1);
+        Bits truncated = bits & mask;
+        return truncated + (((bits >> (roundoff - 1)) & 1) << roundoff);
+    }
+}
 
 
-        template <typename Bits>
-        inline Bits RoundTiesToAway(Bits bits, int roundoff)
-        {
-            // given LLLRTT...T, round to nearest and if tie, round away from zero by adding 1
-            // so if R = 1, add 1 to the bit pattern, else trunctate
-            auto mask = ~((Bits{1} << roundoff) - 1);
-            Bits truncated = bits & mask;
-            return truncated + (((bits >> (roundoff - 1)) & 1) << roundoff);
-        }
 
-        // template <typename Bits, class arch = xsimd::default_arch>
-        // LOFLOAT_HOST LOFLOAT_FORCEINLINE xs::batch<Bits, arch> RoundTiesToAway(xs::batch<Bits, arch> bits, xs::batch<int, arch> roundoff)
-        // {
-        //     // given LLLRTT...T, round to nearest and if tie, round away from zero by adding 1
-        //     // so if R = 1, add 1 to the bit pattern, else trunctate
-        //     auto mask = ~((xs::batch<Bits, arch>(1) << roundoff) - xs::batch<Bits, arch>(1));
-        //     xs::batch<Bits, arch> truncated = bits & mask;
-        //     return truncated + (((bits >> (roundoff - 1)) & xs::batch<Bits, arch>(1)) << roundoff);
-        // }
-
+template <typename Bits, typename Roundoff>
+inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
+{
+    using value_type = pod_type_t<Bits>;
+ 
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+    {
+        #ifndef USE_CUDA
+        Bits low_mask  = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1);
+        Bits high_mask = ~low_mask;
+        Bits truncated = bits & high_mask;
+ 
+        Bits tail = bits & low_mask;
+        Bits sticky = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff));
+        return truncated | xsimd::select(tail != Bits(0), sticky, Bits(0));
+        #endif
+    }
+    else
+    {
+        Bits low_mask  = (Bits{1} << roundoff) - 1;
+        Bits high_mask = ~low_mask;
+        Bits truncated = bits & high_mask;
+ 
+        Bits tail = bits & low_mask;
+        return truncated | (tail != 0 ? Bits{1} << roundoff : Bits{0});
+    }
+}
         //#TODO: add sign to list of args for roundUp and RoundDown
         template <typename Bits>
         LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundMantissa(Bits bits, const int roundoff, const Rounding_Mode rm, const int len = 0)
@@ -970,26 +1057,26 @@ namespace lo_float
             {
             case Rounding_Mode::RoundToNearestEven:
                 return RoundBitsToNearestEven(bits, roundoff);
-            // case Rounding_Mode::RoundToNearestOdd:
-            //     return RoundBitsToNearestOdd(bits, roundoff);
-            // case Rounding_Mode::RoundTowardsZero:
-            //     return RoundBitsTowardsZero(bits, roundoff);
-            // case Rounding_Mode::RoundAwayFromZero:
-            //     return RoundBitsAwayFromZero(bits, roundoff);
-            // case Rounding_Mode::RoundUp:
-            //     return RoundUp(bits, roundoff);
-            // case Rounding_Mode::RoundDown:
-            //     return RoundDown(bits, roundoff);
-            // case Rounding_Mode::RoundTiesToAway:
-            //     return RoundTiesToAway(bits, roundoff);
-            // case Rounding_Mode::StochasticRoundingA:
-            //     return Stochastic_Round_A(bits, roundoff, len);
-            // case Rounding_Mode::StochasticRoundingB:
-            //     return Stochastic_Round_B(bits, roundoff, len);
-            // case Rounding_Mode::StochasticRoundingC:
-            //     return Stochastic_Round_C(bits, roundoff, len);
-            // case Rounding_Mode::True_StochasticRounding:
-            //     return True_Stochastic_Round(bits, roundoff);
+            case Rounding_Mode::RoundToNearestOdd:
+                return RoundBitsToNearestOdd(bits, roundoff);
+            case Rounding_Mode::RoundTowardsZero:
+                return RoundBitsTowardsZero(bits, roundoff);
+            case Rounding_Mode::RoundAwayFromZero:
+                return RoundBitsAwayFromZero(bits, roundoff);
+            case Rounding_Mode::RoundUp:
+                return RoundUp(bits, roundoff);
+            case Rounding_Mode::RoundDown:
+                return RoundDown(bits, roundoff);
+            case Rounding_Mode::RoundTiesToAway:
+                return RoundTiesToAway(bits, roundoff);
+            case Rounding_Mode::StochasticRoundingA:
+                return Stochastic_Round_A(bits, roundoff, len);
+            case Rounding_Mode::StochasticRoundingB:
+                return Stochastic_Round_B(bits, roundoff, len);
+            case Rounding_Mode::StochasticRoundingC:
+                return Stochastic_Round_C(bits, roundoff, len);
+            case Rounding_Mode::True_StochasticRounding:
+                return True_Stochastic_Round(bits, roundoff);
              default:
                 return bits; // no rounding
             }

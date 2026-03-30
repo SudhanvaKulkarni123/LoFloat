@@ -14,6 +14,28 @@
 namespace lo_float {
 
 
+    namespace lo_float_internal {
+
+        template <typename RangeReducer, typename Table, typename Interpolator>
+        class LutApprox {
+            RangeReducer reducer;
+            Table        table;
+            Interpolator interp;
+
+        public:
+            
+            LutApprox(RangeReducer r, Table t, Interpolator i) : reducer(r), table(t), interp(i) {}
+
+            template <FloatingPointParams Fp>
+            Templated_Float<Fp> operator()(Templated_Float<Fp> x) const {
+                auto [reduced, ctx] = reducer(x);
+                auto intrepolated = interp(table, reduced);
+                return reducer.reconstruct(intrepolated, ctx);
+            }
+        };
+    }
+
+
 //template to get required datatype for exact multiplication based on number of mantissa bits (just pick the type with at least 2n mantissa bits)
 template<Float T1, Float T2>
 struct exact_mult_type {
@@ -62,9 +84,7 @@ inline Templated_Float<Fp> floor(Templated_Float<Fp> x) noexcept
 template <FloatingPointParams Fp>
 inline Templated_Float<Fp> log2(Templated_Float<Fp> x) noexcept
 {
-    // The original code calls std::log() (natural log). If you actually
-    // want base-2, consider std::log2(). We'll replicate the original:
-    return Templated_Float<Fp>(std::log(static_cast<double>(x)));
+    return Templated_Float<Fp>(std::log2(static_cast<double>(x)));
 }
 
 
@@ -98,6 +118,50 @@ inline Templated_Float<Fp> pow(int base, Templated_Float<Fp> expVal)
         std::pow(static_cast<double>(base), static_cast<double>(expVal))
     );
 }
+
+template <FloatingPointParams Fp>
+inline Templated_Float<Fp> sin(Templated_Float<Fp> x) noexcept
+{
+    return Templated_Float<Fp>(std::sin(static_cast<double>(x)));
+}
+
+template <FloatingPointParams Fp>
+inline Templated_Float<Fp> cos(Templated_Float<Fp> x) noexcept
+{
+    return Templated_Float<Fp>(std::cos(static_cast<double>(x)));
+}
+
+template <FloatingPointParams Fp>
+inline Templated_Float<Fp> tan(Templated_Float<Fp> x) noexcept
+{
+    return Templated_Float<Fp>(std::tan(static_cast<double>(x)));
+}
+
+template <FloatingPointParams Fp>
+inline Templated_Float<Fp> exp(Templated_Float<Fp> x) noexcept
+{
+    return Templated_Float<Fp>(std::exp(static_cast<double>(x)));
+}
+
+template <FloatingPointParams Fp>
+inline Templated_Float<Fp> sinh(Templated_Float<Fp> x) noexcept
+{
+    return Templated_Float<Fp>(std::sinh(static_cast<double>(x)));
+}
+
+template <FloatingPointParams Fp>
+inline Templated_Float<Fp> cosh(Templated_Float<Fp> x) noexcept
+{
+    return Templated_Float<Fp>(std::cosh(static_cast<double>(x)));
+}
+
+template <FloatingPointParams Fp>
+inline Templated_Float<Fp> tanh(Templated_Float<Fp> x) noexcept
+{
+    return Templated_Float<Fp>(std::tanh(static_cast<double>(x)));
+}
+
+
 
 //9) FMA
 template <FloatingPointParams Fp_x, FloatingPointParams Fp_y, FloatingPointParams Fp_Acc, FloatingPointParams Fp_out>
