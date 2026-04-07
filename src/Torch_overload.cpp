@@ -79,47 +79,47 @@ auto fake_quantize_tensor(const torch::Tensor& tensor, float scale, float zero_p
 
     switch(type) {
         case LoPyTypes::binary8p3se: {
-            using out_type = P3109_float<8, 3, Signedness::Signed, Inf_Behaviors::Extended>;
+            using out_type = P_3109_float<8, 3, Signedness::Signed, Inf_Behaviors::Extended>;
             LOOP_CAST(out_type);
             break;
         }
         case LoPyTypes::binary8p4se: {
-            using out_type = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
+            using out_type = P_3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
             LOOP_CAST(out_type);
             break;
         }
         case LoPyTypes::binary8p5se: {
-            using out_type = P3109_float<8, 5, Signedness::Signed, Inf_Behaviors::Extended>;
+            using out_type = P_3109_float<8, 5, Signedness::Signed, Inf_Behaviors::Extended>;
             LOOP_CAST(out_type);
             break;
         }
         case LoPyTypes::binary6p1ue: {
-            using out_type = P3109_float<6, 1, Signedness::Unsigned, Inf_Behaviors::Extended>;
+            using out_type = P_3109_float<6, 1, Signedness::Unsigned, Inf_Behaviors::Extended>;
             LOOP_CAST(out_type);
             break;
         }
         case LoPyTypes::binary6p2sf: {
-            using out_type = P3109_float<6, 2, Signedness::Signed, Inf_Behaviors::Saturating>;
+            using out_type = P_3109_float<6, 2, Signedness::Signed, Inf_Behaviors::Saturating>;
             LOOP_CAST(out_type);
             break;
         }
         case LoPyTypes::binary6p3sf: {
-            using out_type = P3109_float<6, 3, Signedness::Signed, Inf_Behaviors::Saturating>;
+            using out_type = P_3109_float<6, 3, Signedness::Signed, Inf_Behaviors::Saturating>;
             LOOP_CAST(out_type);
             break;
         }
         case LoPyTypes::binary6p4sf: {
-            using out_type = P3109_float<6, 4, Signedness::Signed, Inf_Behaviors::Saturating>;
+            using out_type = P_3109_float<6, 4, Signedness::Signed, Inf_Behaviors::Saturating>;
             LOOP_CAST(out_type);
             break;
         }
         case LoPyTypes::binary4p1ue: {
-            using out_type = P3109_float<4, 1, Signedness::Unsigned, Inf_Behaviors::Extended>;
+            using out_type = P_3109_float<4, 1, Signedness::Unsigned, Inf_Behaviors::Extended>;
             LOOP_CAST(out_type);
             break;
         }
         case LoPyTypes::binary4p2sf: {
-            using out_type = P3109_float<4, 2, Signedness::Signed, Inf_Behaviors::Saturating>;
+            using out_type = P_3109_float<4, 2, Signedness::Signed, Inf_Behaviors::Saturating>;
             LOOP_CAST(out_type);
             break;
         }
@@ -185,7 +185,7 @@ inline auto real_quantize_tensor(const torch::Tensor& tensor, float scale, float
 
 
     using out_type = get_next_uint<k>::uint_type;
-    using P3109_type = P3109_float<k, p, sign, has_inf>;
+    using P_3109_type = P_3109_float<k, p, sign, has_inf>;
     using specifier = get_specifier<out_type>;
 
     // Create an empty tensor for the quantized output
@@ -194,7 +194,7 @@ inline auto real_quantize_tensor(const torch::Tensor& tensor, float scale, float
     #pragma omp parallel for
     for (int64_t i = 0; i < tensor.numel(); ++i) {
         // Apply quantization
-        quantized_tensor[i] = std::bit_cast<out_type>(static_cast<P3109_type>((tensor[i].item<float>() / scale) + zero_point));
+        quantized_tensor[i] = std::bit_cast<out_type>(static_cast<P_3109_type>((tensor[i].item<float>() / scale) + zero_point));
     }
 
     return quantized_tensor;
@@ -209,12 +209,12 @@ inline auto dequantize_tensor(const torch::Tensor& tensor, float scale, float ze
     // Create an empty tensor for the dequantized output
     auto dequantized_tensor = torch::empty_like(tensor, torch_type);
 
-    using P3109_type = P3109_float<k, p, sign, has_inf>;
+    using P_3109_type = P_3109_float<k, p, sign, has_inf>;
 
     #pragma omp parallel for
     for (int64_t i = 0; i < tensor.numel(); ++i) {
         // Apply dequantization
-        dequantized_tensor[i] = static_cast<out_type>(std::bit_cast<P3109_type>(tensor[i].item<uint8_t>())) * scale + zero_point;
+        dequantized_tensor[i] = static_cast<out_type>(std::bit_cast<P_3109_type>(tensor[i].item<uint8_t>())) * scale + zero_point;
     }
 
     return dequantized_tensor;

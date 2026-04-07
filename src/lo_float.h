@@ -57,6 +57,12 @@ namespace xs = xsimd;
 namespace lo_float
 {
 
+    unsigned int lof_seed = static_cast<unsigned int>(std::time(nullptr));
+
+    void set_seed(unsigned int seed) {
+        lof_seed = seed;
+    }
+
     // Concept to constrain to floating-point types
 
     namespace lo_float_internal
@@ -78,7 +84,7 @@ namespace lo_float
         template <int len, lo_float::Signedness Sign>
         class i_n;
 
-        static std::mt19937 mt(static_cast<int>(time(nullptr)));
+   
 
 
 
@@ -122,6 +128,7 @@ namespace lo_float
             return std::bit_cast<To>(val);
         } 
 
+        #ifdef USE_CUDA
         // c10::Half -> uint16_t
         LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE uint16_t bit_cast(c10::Half val) {
             return val.x;
@@ -133,6 +140,7 @@ namespace lo_float
             h.x = val;
             return h;
         }
+        #endif
 
 
         template <typename Derived, typename UnderlyingType = uint8_t>
@@ -267,7 +275,7 @@ namespace lo_float
                     }
                     else
                     {
-                        if (get_NaN_Behavior_v<Derived> == NaN_Behaviors::QuietNaN)
+                        if (get_NaN_Behavior_v<Derived> == NaN_Behaviors::_3109)
                         {
                             return FromRep(Derived::IsNaNFunctor.qNanBitPattern());
                         }
@@ -501,6 +509,7 @@ inline Bits Probabilistic_Round(Bits bits, Roundoff roundoff)
 {
     using lane_t = pod_type_t<Bits>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+    std::mt19937 mt(lof_seed);
 
     if constexpr (is_xsimd_batch<Roundoff>::value)
     {
@@ -547,6 +556,7 @@ inline Bits Stochastic_Round_A(Bits bits, Roundoff roundoff, const int len = 0)
 {
     using lane_t = pod_type_t<Bits>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+    std::mt19937 mt(lof_seed);
 
     if (len <= 0) return bits;
 
@@ -581,20 +591,20 @@ inline Bits Stochastic_Round_A(Bits bits, Roundoff roundoff, const int len = 0)
 // ----- Stochastic_Round_B ---------------------------------------------------
 // Bits may be scalar or batch; roundoff and len are always scalar.
 
-template <typename Bits>
-inline Bits Stochastic_Round_B(Bits bits, const int roundoff, const int len = 0)
+template <typename Bits, typename Roundoff>
+inline Bits Stochastic_Round_B(Bits bits, const Roundoff roundoff, const int len = 0)
 {
     using lane_t = pod_type_t<Bits>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+    std::mt19937 mt(lof_seed);
 
     if constexpr (is_xsimd_batch<Bits>::value)
     {
         #ifndef USE_CUDA
-        if (len <= 0 || roundoff <= 0) return bits;
-        const int effective_len = (len > roundoff) ? roundoff : len;
-        const int shift = roundoff - effective_len;
+        if (len <= 0) return bits;
+        const Bits shift = roundoff - Bits(len);
 
-        const uint64_t max_u64 = (uint64_t{1} << effective_len) - 1u;
+        const uint64_t max_u64 = (uint64_t{1} << len) - 1u;
         std::uniform_int_distribution<uint32_t> dist(0u, static_cast<uint32_t>(max_u64));
 
         alignas(64) lane_t samp_arr[lanes];
@@ -603,17 +613,17 @@ inline Bits Stochastic_Round_B(Bits bits, const int roundoff, const int len = 0)
 
         const Bits samp = xsimd::load_aligned(samp_arr);
 
-        const lane_t complement_scalar = (lane_t{1} << effective_len) - lane_t{1};
+        const lane_t complement_scalar = (lane_t{1} << len) - lane_t{1};
         const Bits complement(complement_scalar);
         const Bits to_add = (samp & complement) + Bits(lane_t{1});
 
-        const lane_t lower_mask_scalar = (lane_t{1} << roundoff) - lane_t{1};
+        const Bits lower_mask_scalar = (Bits{1} << roundoff) - Bits{1};
         const Bits lower = bits & Bits(lower_mask_scalar);
 
         const auto sum_mask = (lower > Bits(lane_t{0}));
 
         Bits add = to_add;
-        if (shift > 0) add = add << shift;
+        add = add << shift;
 
         return bits + xsimd::select(sum_mask, add, Bits(lane_t{0}));
         #endif
@@ -633,18 +643,19 @@ inline Bits Stochastic_Round_B(Bits bits, const int roundoff, const int len = 0)
 
 // ----- Stochastic_Round_C ---------------------------------------------------
 
-template <typename Bits>
-inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
+template <typename Bits, typename Roundoff>
+inline Bits Stochastic_Round_C(Bits bits, const Roundoff roundoff, const int len = 0)
 {
     using lane_t = pod_type_t<Bits>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+    std::mt19937 mt(lof_seed);
 
     if constexpr (is_xsimd_batch<Bits>::value)
     {
         #ifndef USE_CUDA
-        if (len <= 0 || roundoff <= 0) return bits;
-        const int effective_len = (len > roundoff + 1) ? roundoff + 1 : len;
-        const int top_shift = roundoff - effective_len + 1;
+        if (len <= 0) return bits;
+        const int effective_len = len;
+        const Bits top_shift = roundoff - Bits(effective_len + 1);
 
         const uint64_t max_u64 = (uint64_t{1} << effective_len) - 1u;
         std::uniform_int_distribution<uint32_t> dist(0u, static_cast<uint32_t>(max_u64));
@@ -659,12 +670,12 @@ inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
         const Bits coin_bit     = samp & one;
         const Bits remaining    = samp >> 1;
 
-        const lane_t bottom_mask_scalar =
-            (roundoff >= int(sizeof(lane_t) * 8)) ? ~lane_t{0} : (lane_t{1} << roundoff) - 1;
-        const Bits bottom_bits = bits & Bits(bottom_mask_scalar);
+        const Bits bottom_mask =
+            (Bits(1) << roundoff) - Bits(1);
+        const Bits bottom_bits = bits & Bits(bottom_mask);
 
         Bits top_bits = remaining + coin_bit;
-        if (top_shift > 0) top_bits = top_bits << top_shift;
+        top_bits = top_bits << top_shift;
 
         const auto do_add = (bottom_bits != Bits(lane_t{0}));
         return xsimd::select(do_add, bits + top_bits, bits);
@@ -685,42 +696,46 @@ inline Bits Stochastic_Round_C(Bits bits, const int roundoff, const int len = 0)
 // ----- True_Stochastic_Round ------------------------------------------------
 // Rounds up with probability  tail / 2^roundoff.
 // roundoff is always a uniform scalar; Bits may be scalar or batch.
-
-template <typename Bits>
-inline Bits True_Stochastic_Round(Bits bits, const int roundoff)
+template <typename Bits, typename Roundoff>
+inline Bits True_Stochastic_Round(Bits bits, const Roundoff roundoff)
 {
     using lane_t = pod_type_t<Bits>;
+    using roundoff_lane_t = pod_type_t<Roundoff>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+    std::mt19937 mt(lof_seed);
 
     if constexpr (is_xsimd_batch<Bits>::value)
     {
-        #ifndef USE_CUDA
-        const Bits mask_val  = Bits(lane_t{1} << roundoff) - Bits(lane_t{1});
-        const Bits tail      = bits & mask_val;
-        const Bits truncated = bits & ~mask_val;
-        const Bits bump      = Bits(lane_t{1} << roundoff);
+#ifndef USE_CUDA
+        alignas(64) lane_t bits_arr[lanes];
+        alignas(64) roundoff_lane_t ro_arr[lanes];
+        xsimd::store_aligned(bits_arr, bits);
 
-        const double denom = static_cast<double>(lane_t{1} << roundoff);
-        std::uniform_real_distribution<double> dist(0.0, 1.0);
-
-        // Extract tail per lane, decide per lane
-        alignas(64) lane_t tail_arr[lanes];
-        alignas(64) lane_t trunc_arr[lanes];
-        xsimd::store_aligned(tail_arr, tail);
-        xsimd::store_aligned(trunc_arr, truncated);
+        if constexpr (is_xsimd_batch<Roundoff>::value)
+            xsimd::store_aligned(ro_arr, roundoff);
+        else
+            std::fill_n(ro_arr, lanes, static_cast<roundoff_lane_t>(roundoff));
 
         alignas(64) lane_t result_arr[lanes];
+        std::uniform_real_distribution<double> dist(0.0, 1.0);
+
         for (std::size_t i = 0; i < lanes; ++i)
         {
-            const double prob = static_cast<double>(tail_arr[i]) / denom;
+            const auto ro = ro_arr[i];
+            const lane_t mask = (lane_t{1} << ro) - lane_t{1};
+            const lane_t tail = bits_arr[i] & mask;
+            const lane_t truncated = bits_arr[i] & ~mask;
+            const double denom = static_cast<double>(lane_t{1} << ro);
+            const double prob = static_cast<double>(tail) / denom;
+
             if (dist(mt) < prob)
             {
-                lane_t rounded = trunc_arr[i] + (lane_t{1} << roundoff);
-                result_arr[i] = (rounded < trunc_arr[i]) ? trunc_arr[i] : rounded;
+                lane_t rounded = truncated + (lane_t{1} << ro);
+                result_arr[i] = (rounded < truncated) ? truncated : rounded;
             }
             else
             {
-                result_arr[i] = trunc_arr[i];
+                result_arr[i] = truncated;
             }
         }
 
@@ -728,16 +743,14 @@ inline Bits True_Stochastic_Round(Bits bits, const int roundoff)
             return Bits{result_arr[0]};
         else
             return xsimd::load_aligned(result_arr);
-        #endif
+#endif
     }
     else
     {
         const Bits mask = (Bits{1} << roundoff) - 1;
         const Bits tail = bits & mask;
         const Bits truncated = bits & ~mask;
-
         const double prob = static_cast<double>(tail) / static_cast<double>(Bits{1} << roundoff);
-
         std::uniform_real_distribution<double> distribution(0.0, 1.0);
         const double samp = distribution(mt);
 
@@ -754,7 +767,6 @@ inline Bits True_Stochastic_Round(Bits bits, const int roundoff)
         }
     }
 }
-
 // ----- RoundBitsTowardsZero -------------------------------------------------
 
 template <typename Bits, typename Roundoff>
@@ -1288,7 +1300,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             3,                         // mantissa bits
             7,                         // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Signed,        // It is signed
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1301,7 +1313,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             3,                         // mantissa bits
             11,                        // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Unsigned,      // It is unsigned
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1314,7 +1326,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             3,                         // mantissa bits
             7,                         // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Unsigned,      // It is unsigned
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1345,7 +1357,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             2,                         // mantissa bits
             15,                        // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Signed,        // It is signed
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1357,7 +1369,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             2,                         // mantissa bits
             15,                        // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Unsigned,      // It is unsigned
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1370,7 +1382,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             p - 1,                   // mantissa bits
             (1 << (7 - p)),          // bias
             Inf_Behaviors::Extended, // No infinity
-            NaN_Behaviors::QuietNaN, // NaN behavior
+            NaN_Behaviors::_3109, // NaN behavior
             Signedness::Signed,      // It is signed
             IEEE_F8_InfChecker(),    // Inf Functor
             IEEE_F8_NaNChecker()     // NaN Functor
@@ -1382,7 +1394,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             2,                         // mantissa bits
             3,                         // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Signed,        // It is signed
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1395,7 +1407,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             3,                         // mantissa bits
             1,                         // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Signed,        // It is signed
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1408,7 +1420,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             p - 1,                     // mantissa bits
             (1 << (5 - p)),            // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Signed,        // It is signed
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1420,7 +1432,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             1,                         // mantissa bits
             1,                         // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Signed,        // It is signed
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
@@ -1433,15 +1445,15 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             p - 1,                     // mantissa bits
             (1 << (3 - p)),            // bias
             Inf_Behaviors::Saturating, // No infinity
-            NaN_Behaviors::QuietNaN,   // NaN behavior
+            NaN_Behaviors::_3109,   // NaN behavior
             Signedness::Signed,        // It is signed
             OCP_F8E4M3_InfChecker(),   // Inf Functor
             OCP_F8E4M3_NaNChecker()    // NaN Functor
         );
 
-        // inf and nan checkers for P3109 float
+        // inf and nan checkers for P_3109 float
         template <int k, Signedness is_signed>
-        struct P3109_NaNChecker
+        struct P_3109_NaNChecker
         {
             constexpr bool operator()(uint32_t bits) const
             {
@@ -1475,7 +1487,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         };
 
         template <int k, Signedness is_signed, Inf_Behaviors has_inf>
-        struct P3109_InfChecker
+        struct P_3109_InfChecker
         {
             constexpr bool operator()(uint32_t bits) const
             {
@@ -1485,7 +1497,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
                 }
                 else
                 {
-                    return false; // No infinity for P3109
+                    return false; // No infinity for P_3109
                 }
             }
 
@@ -1505,7 +1517,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
                 }
                 else
                 {
-                    return false; // No infinity for P3109
+                    return false; // No infinity for P_3109
                 }
             }
             #endif
@@ -1521,17 +1533,17 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             } // +∞ => 0x7F800000
         };
 
-        // params for P3109 float
+        // params for P_3109 float
         template <int k, int p, Signedness is_signed = Signedness::Signed, Inf_Behaviors has_inf = Inf_Behaviors::Saturating>
-        constexpr FloatingPointParams param_float_p3109(
+        constexpr FloatingPointParams param_float_p_3109(
             k,                                         // totoal bitwidth
             p - 1,                                     // mantissa bits
             (1 << (k - p - 1)),                        // bias
             has_inf,                                   // No infinity
-            NaN_Behaviors::QuietNaN,                   // NaN behavior
+            NaN_Behaviors::_3109,                   // NaN behavior
             is_signed,                                 // It is signed
-            P3109_InfChecker<k, is_signed, has_inf>(), // Inf Functor
-            P3109_NaNChecker<k, is_signed>()           // NaN Functor
+            P_3109_InfChecker<k, is_signed, has_inf>(), // Inf Functor
+            P_3109_NaNChecker<k, is_signed>()           // NaN Functor
         );
 
         // ------------------------
@@ -1716,7 +1728,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
     using float4_p = lo_float_internal::Templated_Float<lo_float_internal::param_float4_p<p>>;
 
     template <int k, int p, lo_float::Signedness is_signed = lo_float::Signedness::Signed, lo_float::Inf_Behaviors has_inf = lo_float::Inf_Behaviors::Saturating>
-    using P3109_float = lo_float_internal::Templated_Float<lo_float_internal::param_float_p3109<k, p, is_signed, has_inf>>;
+    using P_3109_float = lo_float_internal::Templated_Float<lo_float_internal::param_float_p_3109<k, p, is_signed, has_inf>>;
 
     template <typename T>
     constexpr T ConstexprAbs(T x) { return x < T{0.0} ? -x : x; }
@@ -1811,8 +1823,8 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             static constexpr bool is_signed = Fp.is_signed == lo_float::Signedness::Signed;
             static constexpr bool is_integer = false;
             static constexpr bool is_exact = false;
-            static constexpr bool has_quiet_NaN = Fp.NA_behavior == lo_float::NaN_Behaviors::QuietNaN;
-            static constexpr bool has_signaling_NaN = Fp.NA_behavior == lo_float::NaN_Behaviors::SignalingNaN;
+            static constexpr bool has_quiet_NaN = Fp.NA_behavior == lo_float::NaN_Behaviors::_3109;
+            static constexpr bool has_signaling_NaN = Fp.NA_behavior == lo_float::NaN_Behaviors::_754;
             static constexpr bool has_denorm = true;
             static constexpr bool has_denorm_loss = false;
             static constexpr bool round_style = std::round_indeterminate;
@@ -2238,6 +2250,7 @@ namespace lo_float
             static constexpr int kExponentBias = 0;
         };
 
+
         template <typename Float>
         struct Traits : public TraitsBase<Float>
         {
@@ -2309,6 +2322,19 @@ struct Traits<double> : public TraitsBase<double> {
     static constexpr int kMaxExponent = (1 << kExponentBits) - 2 - kExponentBias;
 };
 
+        template <>
+        struct Traits<int> : public TraitsBase<int> {
+            using BitsType = uint32_t;
+            static constexpr int kBits = sizeof(int) * CHAR_BIT;
+            static constexpr int kExponentBits = 0;
+            static constexpr int kMantissaBits = sizeof(int) * CHAR_BIT - 1;
+            static constexpr int kExponentBias = 0;
+            static constexpr BitsType kExponentMask = 0;
+            static constexpr BitsType kMantissaMask = (BitsType{1} << (sizeof(int) * CHAR_BIT - 1)) - 1;
+        };
+
+
+
 template <typename T>
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE T from_double(double val) {
     return static_cast<T>(val);
@@ -2319,10 +2345,13 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE float get_float(T val) {
     return static_cast<float>(val);
 }
 
+#ifdef USE_CUDA
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE c10::Half abs(c10::Half val) {
     val.x &= 0x7FFF;  // clear sign bit
     return val;
-}
+}   
+#endif
+
 
 template<typename From>
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
@@ -2587,11 +2616,11 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                     }
                     else
                     {
-                        if (get_NaN_Behavior_v<To> == NaN_Behaviors::SignalingNaN)
+                        if (get_NaN_Behavior_v<To> == NaN_Behaviors::_754)
                         {
                             return std::numeric_limits<To>::signaling_NaN();
                         }
-                        else if (get_NaN_Behavior_v<To> == NaN_Behaviors::QuietNaN)
+                        else if (get_NaN_Behavior_v<To> == NaN_Behaviors::_3109)
                         {
                             return std::numeric_limits<To>::quiet_NaN();
                         }
@@ -3285,42 +3314,107 @@ static LOFLOAT_HOST void run(const From* from,
             return ConvertImpl<Derived, To>::run(from, rm, stoch_len);
         }
 
-        template <typename out, typename in>
-        constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Project(in x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
-        {
-            return ConvertImpl<in, out>::run(x, rm, stoch_len);
+       // ---- Proxy types ----
+
+template <typename In>
+struct ProjectProxy {
+    In x;
+    Rounding_Mode rm;
+    int stoch_len;
+
+    template <typename Out>
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE operator Out() const noexcept {
+        return ConvertImpl<In, Out>::run(x, rm, stoch_len);
         }
+};
 
         #ifndef USE_CUDA
-        template <typename out, typename in>
-        constexpr LOFLOAT_HOST LOFLOAT_FORCEINLINE out Round(in* x, out* y, int n, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
-        {
-            return ConvertImpl<in, out>::run(x, y, n, rm, stoch_len);
+template <typename In>
+struct RoundProxy {
+    In* x;
+    int n;
+    Rounding_Mode rm;
+    int stoch_len;
+
+    template <typename Out>
+    constexpr LOFLOAT_HOST LOFLOAT_FORCEINLINE operator Out() const noexcept {
+        Out* y = nullptr; // or however you want to handle this
+        return ConvertImpl<In, Out>::run(x, y, n, rm, stoch_len);
         }
+};
         #endif
 
-        template <typename out, typename in1, typename in2>
-        constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out add(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
-        {
-            return ConvertImpl<float, out>::run(static_cast<float>(x) + static_cast<float>(y), rm, stoch_len);
+template <typename In1, typename In2, typename Op>
+struct BinOpProxy {
+    In1 x;
+    In2 y;
+    Rounding_Mode rm;
+    int stoch_len;
+
+    template <typename Out>
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE operator Out() const noexcept {
+        return ConvertImpl<float, Out>::run(
+            Op{}(static_cast<float>(x), static_cast<float>(y)), rm, stoch_len);
+    }
+};
+
+struct OpAdd { constexpr float operator()(float a, float b) const noexcept { return a + b; } };
+struct OpSub { constexpr float operator()(float a, float b) const noexcept { return a - b; } };
+struct OpMul { constexpr float operator()(float a, float b) const noexcept { return a * b; } };
+struct OpDiv { constexpr float operator()(float a, float b) const noexcept { return a / b; } };
+
+// ---- Deduced versions (no explicit out) ----
+
+template <typename In>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Project(In x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return ProjectProxy<In>{x, rm, stoch_len};
+}
+
+template <typename In1, typename In2>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Add(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return BinOpProxy<In1, In2, OpAdd>{x, y, rm, stoch_len};
+}
+
+template <typename In1, typename In2>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Sub(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return BinOpProxy<In1, In2, OpSub>{x, y, rm, stoch_len};
+}
+
+template <typename In1, typename In2>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Mul(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return BinOpProxy<In1, In2, OpMul>{x, y, rm, stoch_len};
+}
+
+template <typename In1, typename In2>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Div(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return BinOpProxy<In1, In2, OpDiv>{x, y, rm, stoch_len};
+}
+
+// ---- Explicit out versions (Mul<out>(x, y) style) ----
+
+template <typename Out, typename In>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Project(In x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return ConvertImpl<In, Out>::run(x, rm, stoch_len);
+}
+
+template <typename Out, typename In1, typename In2>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Add(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return ConvertImpl<float, Out>::run(static_cast<float>(x) + static_cast<float>(y), rm, stoch_len);
         }
 
-        template <typename out, typename in1, typename in2>
-        constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out sub(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
-        {
-            return ConvertImpl<float, out>::run(static_cast<float>(x) - static_cast<float>(y), rm, stoch_len);
+template <typename Out, typename In1, typename In2>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Sub(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return ConvertImpl<float, Out>::run(static_cast<float>(x) - static_cast<float>(y), rm, stoch_len);
         }
 
-        template <typename out, typename in1, typename in2>
-        constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out mul(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
-        {
-            return ConvertImpl<float, out>::run(static_cast<float>(x) * static_cast<float>(y), rm, stoch_len);
+template <typename Out, typename In1, typename In2>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Mul(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return ConvertImpl<float, Out>::run(static_cast<float>(x) * static_cast<float>(y), rm, stoch_len);
         }
 
-        template <typename out, typename in1, typename in2>
-        constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out div(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
-        {
-            return ConvertImpl<float, out>::run(static_cast<float>(x) / static_cast<float>(y), rm, stoch_len);
+template <typename Out, typename In1, typename In2>
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Div(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
+    return ConvertImpl<float, Out>::run(static_cast<float>(x) / static_cast<float>(y), rm, stoch_len);
         }
 
         template <typename Float>
@@ -3399,27 +3493,27 @@ static LOFLOAT_HOST void run(const From* from,
     }
 
     template <typename out, typename in1, typename in2>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out add(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Add(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
     {
-        return lo_float_internal::add<out, in1, in2>(x, y, rm, stoch_len);
+        return lo_float_internal::Add<out, in1, in2>(x, y, rm, stoch_len);
     }
 
     template <typename out, typename in1, typename in2>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out sub(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Sub(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
     {
-        return lo_float_internal::sub<out, in1, in2>(x, y, rm, stoch_len);
+        return lo_float_internal::Sub<out, in1, in2>(x, y, rm, stoch_len);
     }
 
     template <typename out, typename in1, typename in2>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out mul(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Mul(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
     {
-        return lo_float_internal::mul<out, in1, in2>(x, y, rm, stoch_len);
+        return lo_float_internal::Mul<out, in1, in2>(x, y, rm, stoch_len);
     }
 
     template <typename out, typename in1, typename in2>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out div(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Div(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
     {
-        return lo_float_internal::div<in1, in2, out>(x, y, rm, stoch_len);
+        return lo_float_internal::Div<in1, in2, out>(x, y, rm, stoch_len);
     }
 
     #ifndef USE_CUDA

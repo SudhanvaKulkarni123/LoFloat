@@ -14,8 +14,8 @@ using namespace lo_float;
 template<int l, int p>
 int test_comparisons_exhaustive()
 {
-    using binary_lp = P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>;
-    using unsigned_binary_lp = P3109_float<l, p, Signedness::Unsigned, Inf_Behaviors::Saturating>;
+    using binary_lp = P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>;
+    using unsigned_binary_lp = P_3109_float<l, p, Signedness::Unsigned, Inf_Behaviors::Saturating>;
     const int total_values = 1 << l;
 
     int case1_bound = total_values/2;
@@ -125,7 +125,7 @@ int test_comparisons_exhaustive()
     }
 
 
-    printf("Total errors for P3109<%d,%d>: %d\n", l, p, errors);
+    printf("Total errors for P_3109<%d,%d>: %d\n", l, p, errors);
     return errors;
     
 }
@@ -255,7 +255,7 @@ int test_comparisons_random(int num_tests)
 
 int main()
 {
-    //run exhaustive test on P3109 formats for length <= 8
+    //run exhaustive test on P_3109 formats for length <= 8
 
     int total_errors = 0;
    

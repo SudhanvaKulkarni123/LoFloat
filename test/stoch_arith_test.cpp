@@ -9,7 +9,7 @@
 using namespace lo_float;
 int main() {
 
-    using fp8 = float8_ieee_p<4, Rounding_Mode::StochasticRoundingA, 4>;
+    using fp8 = P_3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
 
     auto A = fp8(1.0);
     auto B = fp8();

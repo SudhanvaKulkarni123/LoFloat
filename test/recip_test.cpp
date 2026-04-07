@@ -11,13 +11,9 @@ int main() {
         for(int i = 0; i < 256; i++) {
             auto b = float8_ieee_p<4>::FromRep(i);
             auto f = a / b;
-            
-
-            //cmopute results exactly
-
             auto exact_f = static_cast<float>(a) / static_cast<float>(b);
 
-            if(f == exact_f) {
+            if((float)f == exact_f) {
                 counter++;
             } 
         }

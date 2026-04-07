@@ -9,7 +9,7 @@
 #include <cctype>
 // Include your library headers here
 #include "lo_float.h"  // example
-// #include "p3109_float.hpp"
+// #include "p_3109_float.hpp"
 // #include "templated_float.hpp"
 
 static volatile float g_sink = 0.0f; // prevents over-optimization
@@ -157,7 +157,7 @@ BenchResult<OutFloat> bench_project(
  
 // Convenient aliases matching your types
 template<int l, int p>
-using p3109_s_sat = P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>;
+using p_3109_s_sat = P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>;
 
 using binary16 = Templated_Float<halfPrecisionParams>;
 
@@ -172,10 +172,10 @@ int main() {
 
 
     // Benchmark binary8p4
-    bench_project<p3109_s_sat<8,4>>("binary8p4 (P3109<8,4>)", n, iters, warmup);
+    bench_project<p_3109_s_sat<8,4>>("binary8p4 (P_3109<8,4>)", n, iters, warmup);
 
     // Benchmark binary8p3
-    bench_project<p3109_s_sat<8,3>>("binary8p3 (P3109<8,3>)", n, iters, warmup);
+    bench_project<p_3109_s_sat<8,3>>("binary8p3 (P_3109<8,3>)", n, iters, warmup);
 
     // Benchmark half
     bench_project<binary16>("half (binary16)", n, iters, warmup);

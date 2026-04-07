@@ -32,9 +32,8 @@
     X(Saturating)
 
 #define nan_behaviors \
-    X(QuietNaN) \
-    X(NoNaN) \
-    X(SignalingNaN)
+    X(_3109) \
+    X(_754)
 
 #define unsigned_behaviors \
     X(NegtoZero) \
@@ -288,7 +287,7 @@ inline constexpr FloatingPointParams<SingleInfChecker , SingleNaNChecker> single
     /* mantissa_bits */ 23,
     /* bias          */ 127,
     /* OV_behavior   */ Extended,
-    /* NA_behavior   */ QuietNaN,
+    /* NA_behavior   */ _3109,
     /* is_signed     */ Signed,
     /* IsInf         */ SingleInfChecker{},
     /* IsNaN         */ SingleNaNChecker{}
@@ -328,7 +327,7 @@ inline constexpr FloatingPointParams<FP16InfChecker, FP16NaNChecker> halfPrecisi
     /* mantissa_bits */ 10,
     /* bias          */ 15,
     /* OV_behavior   */ Extended,
-    /* NA_behavior   */ QuietNaN,
+    /* NA_behavior   */ _3109,
     /* is_signed     */ Signed,
     /* IsInf         */ FP16InfChecker{},
     /* IsNaN         */ FP16NaNChecker{});
@@ -364,7 +363,7 @@ inline constexpr FloatingPointParams<BF16InfChecker, BF16NaNChecker> bfloatPreci
     /* mantissa_bits */ 7,
     /* bias          */ 127,
     /* OV_behavior   */ Extended,
-    /* NA_behavior   */ QuietNaN,
+    /* NA_behavior   */ _3109,
     /* is_signed     */ Signed,
     /* IsInf         */ BF16InfChecker{},
     /* IsNaN         */ BF16NaNChecker{}
@@ -414,7 +413,7 @@ inline constexpr FloatingPointParams<TF32InfChecker, TF32NaNChecker> tf32Precisi
     /* mantissa_bits */ 10,
     /* bias          */ 127,
     /* OV_behavior   */ Extended,
-    /* NA_behavior   */ QuietNaN,
+    /* NA_behavior   */ _3109,
     /* is_signed     */ Signed,
     /* IsInf         */ TF32InfChecker{},
     /* IsNaN         */ TF32NaNChecker{}

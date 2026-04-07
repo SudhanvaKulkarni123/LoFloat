@@ -151,7 +151,7 @@ BenchResult<TY> bench_axpy(
 
 // ---- Type aliases ----
 template<int l, int p>
-using p3109_s_sat = P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>;
+using p_3109_s_sat = P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>;
 
 using binary16 = Templated_Float<halfPrecisionParams>;
 
@@ -162,10 +162,10 @@ int main() {
     const int warmup = 5;
     const int iters  = 50;
 
-    bench_axpy<p3109_s_sat<8,4>, float, p3109_s_sat<8,4>>(
+    bench_axpy<p_3109_s_sat<8,4>, float, p_3109_s_sat<8,4>>(
         "AXPY binary8p4", n, iters, warmup);
 
-    bench_axpy<p3109_s_sat<8,3>, float, p3109_s_sat<8,3>>(
+    bench_axpy<p_3109_s_sat<8,3>, float, p_3109_s_sat<8,3>>(
         "AXPY binary8p3", n, iters, warmup);
 
     bench_axpy<binary16, float, binary16>(

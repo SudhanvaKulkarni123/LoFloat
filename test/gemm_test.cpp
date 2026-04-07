@@ -55,7 +55,7 @@ void test_gemm_large_random() {
     constexpr int MR = 8, NR = 8, KR = 8;
    
     using half = lo_float::Templated_Float<lo_float::halfPrecisionParams>;
-    using T = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
+    using T = P_3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
     using T2 = float;
     using T3 = float;
     constexpr Layout layout = Layout::RowMajor;

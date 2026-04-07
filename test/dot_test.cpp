@@ -8,13 +8,6 @@
 using namespace lo_float;
 using namespace Lo_Gemm;
 
-/*broadly, there are 2 kinds of tests we should include - the first is the "normal test" where I only use number in the range (-1,1).
-The total number of mantissa bits I can fill using this approach is num_mantissa1 + num_mantissa_2 + min_exp1 + min_exp2. So, this test can. maybe work with fp8 input fp16 accum
-The problem arises when the number of mantissa bits in the accumulator is greater than num_mantissa1 + num_mantissa_2 + min_exp1 + min_exp2. Here, we can stretch it thin a bit more by using inputs in the range (-max, max)
-Then, our maximum mantissa bit quota becomes  num_mantissa1 + num_mantissa_2 + min_exp1 + min_exp2 + max_exp1 + max_exp2, which should be high enough for most reasonable test cases.
-If num_mantissa1 + num_mantissa_2 + min_exp1 + min_exp2 + max_exp1 + max_exp2 is still not enough , we can try a stratgey of first displacing the exponent of the accumulator upward by a large amount.
-This can be done by simply adding the maximum possible product a sufficient number of times. If we have to add it to much (say more than 1024 times), then the accumulation will be exact in nearly all cases anyway, so we ignore these cases.
-*/
 template<typename T>
 void print_vec(T* x, int n) {
     for(int i = 0; i < n; i++) {
@@ -154,8 +147,8 @@ int main() {
     int N = 32768; // Size of the vectors, can be adjusted as needed
 
     // FP8 types
-    using binary8p4 = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
-    using binary8p3 = P3109_float<8, 3, Signedness::Signed, Inf_Behaviors::Extended>; 
+    using binary8p4 = P_3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
+    using binary8p3 = P_3109_float<8, 3, Signedness::Signed, Inf_Behaviors::Extended>; 
 
     // FP16 metadata and type
     struct IsInf_f16 {
@@ -182,7 +175,7 @@ int main() {
     constexpr FloatingPointParams param_fp16(
         16, 10, 15,
         Inf_Behaviors::Extended,
-        NaN_Behaviors::QuietNaN,
+        NaN_Behaviors::_3109,
         Signedness::Signed,
         IsInf_f16(),
         IsNaN_f16()

@@ -31,7 +31,7 @@ struct IsNaN_f32 {
 constexpr FloatingPointParams param_fp32(
     /*total bits*/ 32, /*mantissa*/ 23, /*bias*/ 127,
     Inf_Behaviors::Extended,
-    NaN_Behaviors::QuietNaN,
+    NaN_Behaviors::_3109,
     Signedness::Signed,
     IsInf_f32(), IsNaN_f32());
 
@@ -48,7 +48,7 @@ void run_one_len(const char* label,
 
     for (int i = 0; i < trials; ++i) {
         // --- perform conversion with stochastic rounding of 'stoch_len' bits
-        float32 fp = Round<double, float32>(
+        float32 fp = Round<float32, double>(
             testVal, Rounding_Mode::StochasticRoundingC, stoch_len);
 
         double d = static_cast<double>(fp);

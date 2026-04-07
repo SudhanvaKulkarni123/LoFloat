@@ -8,3 +8,6 @@
 
 #include "lo_float.h"
 
+int main() {
+    return 0;
+}

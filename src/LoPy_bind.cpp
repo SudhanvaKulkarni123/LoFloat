@@ -74,6 +74,7 @@ static DeviceNaNChecker make_device_nan(const FloatingPointParamsPy &p, const De
 
 torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa_bits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     auto output = torch::empty_like(input);
+    #ifdef USE_CUDA
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "virtual_round_mantissa", ([&] {
         auto* in_ptr  = input.data_ptr<scalar_t>();
         auto* out_ptr = output.data_ptr<scalar_t>();
@@ -89,6 +90,24 @@ torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa
 #endif
         }
     }));
+    #else 
+    AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "virtual_round_mantissa", ([&] {
+        auto* in_ptr  = input.data_ptr<scalar_t>();
+        auto* out_ptr = output.data_ptr<scalar_t>();
+        if (input.is_cuda()) {
+#ifdef USE_CUDA
+            round_mantissa(in_ptr, out_ptr, input.numel(), to_mantissa_bits, round_mode, stoch_len);
+#else
+            throw std::runtime_error("CUDA not available in this build");
+#endif
+        } else {
+#ifndef USE_CUDA
+            virtual_round(in_ptr, out_ptr, to_mantissa_bits, input.numel(), round_mode, stoch_len);
+#endif
+        }
+    }));
+    #endif
+
     return output;
 }
 
@@ -119,7 +138,7 @@ torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPoi
             params.OV_behavior, params.NA_behavior, params.is_signed,
             inf_adapter, nan_adapter, Unsigned_behavior::NegtoZero
         };
-        AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "virtual_round_params_cpu", ([&] {
+        AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "virtual_round_params_cpu", ([&] {
             virtual_round(input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), input.numel(), cpp_params, round_mode, stoch_len);
         }));
         #endif
@@ -154,8 +173,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .export_values();
 
     py::enum_<NaN_Behaviors>(m, "NaNBehavior")
-        .value("QuietNaN", NaN_Behaviors::QuietNaN)
-        .value("SignalingNaN", NaN_Behaviors::SignalingNaN)
+        .value("_3109", NaN_Behaviors::_3109)
+        .value("_754", NaN_Behaviors::_754)
         .export_values();
 
     py::class_<FloatingPointParamsPy>(m, "FloatFormatDescriptor")

@@ -81,7 +81,7 @@ BenchResult<float> bench_virtual_round(
     }
 
     // ---- Create FloatingPointParams for this type ----
-    constexpr auto ToFp = lo_float_internal::param_float_p3109<k, p, is_signed, has_inf>;
+    constexpr auto ToFp = lo_float_internal::param_float_p_3109<k, p, is_signed, has_inf>;
 
     // ---- run sweep ----
     BenchResult<float> last{0, 0, 0};
@@ -285,10 +285,10 @@ int main() {
     const int iters  = 50;
 
     // Benchmark binary8p4 (e5m2 equivalent: k=8, p=4 means 1 sign + 5 exp + 2 mantissa)
-    bench_virtual_round<8, 4>("binary8p4 (P3109<8,4>)", n, iters, warmup);
+    bench_virtual_round<8, 4>("binary8p4 (P_3109<8,4>)", n, iters, warmup);
 
     // Benchmark binary8p3 (e4m3 equivalent: k=8, p=3 means 1 sign + 4 exp + 3 mantissa)
-    bench_virtual_round<8, 3>("binary8p3 (P3109<8,3>)", n, iters, warmup);
+    bench_virtual_round<8, 3>("binary8p3 (P_3109<8,3>)", n, iters, warmup);
 
     // Benchmark half (binary16)
     bench_virtual_round_half("half (binary16)", n, iters, warmup);

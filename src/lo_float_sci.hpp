@@ -63,6 +63,13 @@ inline std::istream& operator>>(std::istream& is, Templated_Float<Fp>& x)
     return is;
 }
 
+template <FloatingPointParams Fp>
+inline std::ostream& operator<<(std::ostream& os, const Templated_Float<Fp>& x)
+{
+    os << static_cast<double>(x);
+    return os;
+}
+
 // 2) ceil
 template <FloatingPointParams Fp>
 inline Templated_Float<Fp> ceil(Templated_Float<Fp> x) noexcept

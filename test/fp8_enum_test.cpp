@@ -1,4 +1,4 @@
-//test to compare generated values against table of expected values from P3109 interim report
+//test to compare generated values against table of expected values from P_3109 interim report
 #include <iostream>
 #include <iomanip>
 #include <random>
@@ -14,7 +14,7 @@ using namespace lo_float;
 int main() {
     static constexpr FloatingPointParams param_fp8(
         8, /*mant*/6, /*bias*/1,
-        Inf_Behaviors::Saturating, NaN_Behaviors::QuietNaN,
+        Inf_Behaviors::Saturating, NaN_Behaviors::_3109,
         Signedness::Signed,
         lo_float_internal::IEEE_F8_InfChecker(),
         lo_float_internal::IEEE_F8_NaNChecker()

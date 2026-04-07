@@ -43,26 +43,26 @@ T poly_sine(T x_in)
 
 int main() {
     //use ieee floats
-    using float8_e4m3 = float8_ieee_p<4, Rounding_Mode::RoundToNearestEven, 4>;
-    using fp16 = Templated_Float<halfPrecisionParams<Rounding_Mode::RoundToNearestEven>>;
-    using bf16 = Templated_Float<bfloatPrecisionParams<Rounding_Mode::RoundToNearestEven>>;
-    std::cout << std::scientific;
-    std::cout << std::setprecision(10);
-    //run the below loop for all values of p
+    // using float8_e4m3 = float8_ieee_p<4, Rounding_Mode::RoundToNearestEven, 4>;
+    // using fp16 = Templated_Float<halfPrecisionParams<Rounding_Mode::RoundToNearestEven>>;
+    // using bf16 = Templated_Float<bfloatPrecisionParams<Rounding_Mode::RoundToNearestEven>>;
+    // std::cout << std::scientific;
+    // std::cout << std::setprecision(10);
+    // //run the below loop for all values of p
 
-    for(uint16_t i = 0; i < 128; i++) {
-        float8_e4m3 a = float8_e4m3::FromRep((uint8_t)i);
-        float8_e4m3 b = static_cast<float8_e4m3>(sin(static_cast<float>(a)));
-        float8_e4m3 c = static_cast<float8_e4m3>(sin(static_cast<double>(a)));
-        float8_e4m3 d = (poly_sine<float>(a));
-        //print those cases where b != c
-        if(d != c) {
-            std::cout << "almost true value: " << sin(static_cast<double>(a)) << std::endl;
-            std::cout << "value of a in double and float: " << (double)a << " " << (float)a << std::endl;
-            std::cout <<  i << "." <<  " x: " << (float)a << " sin(x) using float: " << (float)b << ", sin(x) using double : " << (float)c << ", sin(x) wqith polynomial approx in fp16 : " << (float)d << std::endl;
-        }
+    // for(uint16_t i = 0; i < 128; i++) {
+    //     float8_e4m3 a = float8_e4m3::FromRep((uint8_t)i);
+    //     float8_e4m3 b = static_cast<float8_e4m3>(sin(static_cast<float>(a)));
+    //     float8_e4m3 c = static_cast<float8_e4m3>(sin(static_cast<double>(a)));
+    //     float8_e4m3 d = (poly_sine<float>(a));
+    //     //print those cases where b != c
+    //     if(d != c) {
+    //         std::cout << "almost true value: " << sin(static_cast<double>(a)) << std::endl;
+    //         std::cout << "value of a in double and float: " << (double)a << " " << (float)a << std::endl;
+    //         std::cout <<  i << "." <<  " x: " << (float)a << " sin(x) using float: " << (float)b << ", sin(x) using double : " << (float)c << ", sin(x) wqith polynomial approx in fp16 : " << (float)d << std::endl;
+    //     }
       
-    }
+    // }
 
     // using float8_e5m2 = float8_ieee_p<3, Rounding_Mode::RoundToNearestEven, 0>;
     // for(uint16_t i = 0; i < 128; i++) {
@@ -124,8 +124,8 @@ int main() {
 
 
     std::cout << "rounding\n";
-    auto a = float8_e4m3(-1e-5);
-    auto b = float8_e4m3(-1e-5f);
+    auto a = (-1e-5);
+    auto b = (-1e-5f);
 
     std::cout << std::scientific;
   

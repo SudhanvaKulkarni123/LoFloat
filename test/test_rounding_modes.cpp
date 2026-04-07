@@ -30,12 +30,12 @@ bool is_normal(F f) {
 }
 
 template<int l, int p> 
-int test_n2sn_3109() {
+int test_n2sn__3109() {
     
 
     int num_errors = 0;
 
-    using P3109_type = P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>;
+    using P_3109_type = P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>;
     double mach_eps = std::pow(2.0, -p + 1);
     auto rnd32 = []() -> float {
         return static_cast<float>(std::rand()) / RAND_MAX;
@@ -52,15 +52,15 @@ int test_n2sn_3109() {
     for (int i = 0; i < 2000; ++i) {
         float d  = rnd32();
 
-        double UNT = (double)std::numeric_limits<P3109_type>::denorm_min();
+        double UNT = (double)std::numeric_limits<P_3109_type>::denorm_min();
 
-        P3109_type fd   = Round<P3109_type>(d, Rounding_Mode::RoundDown);
-        P3109_type fu   = Round<P3109_type>(d, Rounding_Mode::RoundUp);
-        P3109_type frne = Round<P3109_type>(d, Rounding_Mode::RoundToNearestEven);
-        P3109_type frno = Round<P3109_type>(d, Rounding_Mode::RoundToNearestOdd);
-        P3109_type frta = Round<P3109_type>(d, Rounding_Mode::RoundTiesToAway);
-        P3109_type frtz = Round<P3109_type>(d, Rounding_Mode::RoundTowardsZero);
-        P3109_type fraw = Round<P3109_type>(d, Rounding_Mode::RoundAwayFromZero);
+        P_3109_type fd   = Round<P_3109_type>(d, Rounding_Mode::RoundDown);
+        P_3109_type fu   = Round<P_3109_type>(d, Rounding_Mode::RoundUp);
+        P_3109_type frne = Round<P_3109_type>(d, Rounding_Mode::RoundToNearestEven);
+        P_3109_type frno = Round<P_3109_type>(d, Rounding_Mode::RoundToNearestOdd);
+        P_3109_type frta = Round<P_3109_type>(d, Rounding_Mode::RoundTiesToAway);
+        P_3109_type frtz = Round<P_3109_type>(d, Rounding_Mode::RoundTowardsZero);
+        P_3109_type fraw = Round<P_3109_type>(d, Rounding_Mode::RoundAwayFromZero);
 
         double denom = get_denom(d);
 
@@ -186,14 +186,14 @@ int test_n2sn_3109() {
      //generate special "in between cases for the  tie breaking modes" -- these cases don't make sense when there are no explicit mantissa bits since all numbers are even
      if constexpr (p > 1) {
         for(uint32_t rep = 1; rep < (1u << l) - 2; rep++) {
-            P3109_type a = P3109_type::FromRep(rep);
+            P_3109_type a = P_3109_type::FromRep(rep);
             double a_d = (double)a;
-            double b_d = (double)P3109_type::FromRep(rep+1);
+            double b_d = (double)P_3109_type::FromRep(rep+1);
             double tie = (a_d + b_d) / 2.0;
 
-            P3109_type rne = Round<P3109_type>(tie, Rounding_Mode::RoundToNearestEven);
-            P3109_type rno = Round<P3109_type>(tie, Rounding_Mode::RoundToNearestOdd);
-            P3109_type rta = Round<P3109_type>(tie, Rounding_Mode::RoundTiesToAway);
+            P_3109_type rne = Round<P_3109_type>(tie, Rounding_Mode::RoundToNearestEven);
+            P_3109_type rno = Round<P_3109_type>(tie, Rounding_Mode::RoundToNearestOdd);
+            P_3109_type rta = Round<P_3109_type>(tie, Rounding_Mode::RoundTiesToAway);
 
             if(isnan(tie)) continue;
             if (!is_even(rne.rep())) {
@@ -217,7 +217,7 @@ int test_n2sn_3109() {
         }
     }
 
-std::cout << "P3109<" << l << "," << p << "> : " 
+std::cout << "P_3109<" << l << "," << p << "> : " 
                   << (num_errors == 0 ? "pass" : "FAIL") << "\n";
 
     return num_errors;
@@ -364,7 +364,7 @@ if (num_errors == 0) std::cout << "bf16, fp16, tf32, pass\n";
 
 template<int l, int... Ps>
 void instantiate_for_l(std::integer_sequence<int, Ps...>) {
-    (test_n2sn_3109<l, Ps+1>(), ...);
+    (test_n2sn__3109<l, Ps+1>(), ...);
 }
 template<int... Ls>
 void instantiate_all_l(std::integer_sequence<int, Ls...>) {
@@ -387,7 +387,7 @@ int test_array_round() {
     
     int n = 400;
     float* float_arr = (float*) malloc(n*sizeof(float));
-    P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>* arr = (P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>*) malloc(sizeof(P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>)*n);
+    P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>* arr = (P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>*) malloc(sizeof(P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>)*n);
     for (int i = 0; i < n; i++) {
         float_arr[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
     }
@@ -396,8 +396,8 @@ int test_array_round() {
 
     int num_errors = 0;
     for (int i = 0; i < n; i++) {
-        P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating> single_val = arr[i];
-        float UNT = (float)std::numeric_limits<P3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>>::denorm_min();
+        P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating> single_val = arr[i];
+        float UNT = (float)std::numeric_limits<P_3109_float<l, p, Signedness::Signed, Inf_Behaviors::Saturating>>::denorm_min();
         float x  = float_arr[i];
         float xr = static_cast<float>(arr[i]);           // [x] as float
         float diff = std::fabs(xr - x);
@@ -412,9 +412,9 @@ int test_array_round() {
     }
 
     if (num_errors == 0) {
-        std::cout << "Array rounding test passed for P3109<" << l << "," << p << ">\n";
+        std::cout << "Array rounding test passed for P_3109<" << l << "," << p << ">\n";
     } else {
-        std::cout << "Array rounding test failed for P3109<" << l << "," << p << "> with " << num_errors << " errors\n";
+        std::cout << "Array rounding test failed for P_3109<" << l << "," << p << "> with " << num_errors << " errors\n";
     }
 
     free(float_arr);
@@ -453,11 +453,11 @@ int main() {
 //     float_arr[i] = 0.0067845568992197514f;
 //    }
 
-//    P3109_float<8, 7, Signedness::Signed, Inf_Behaviors::Saturating> arr[4];
+//    P_3109_float<8, 7, Signedness::Signed, Inf_Behaviors::Saturating> arr[4];
 //    lo_float::Project(float_arr, arr, 4, Rounding_Mode::RoundToNearestEven);
 
 //    std::cout << (float)arr[0] << "\n";
-//    std::cout << (float)P3109_float<8, 7, Signedness::Signed, Inf_Behaviors::Saturating>(float_arr[0]) << "\n";
+//    std::cout << (float)P_3109_float<8, 7, Signedness::Signed, Inf_Behaviors::Saturating>(float_arr[0]) << "\n";
 
    
 

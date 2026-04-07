@@ -13,7 +13,7 @@ int main() {
 
     using fp4 = float4_p<2>;
     using fp6 = float6_p<3>;
-    using fp8 = P3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
+    using fp8 = P_3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>;
 
 
     // Random number generation

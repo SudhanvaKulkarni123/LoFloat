@@ -1,21 +1,15 @@
-//test for checking correctness of implementation of unsigned floats
 #include <iostream>
 #include <iomanip>
 #include <random>
 #include <cmath>
-
 #include <cstdint>
 #include "lo_float.h"
-
-
-//test comparisons, rounding negatives to zero and basic arithmetic ops
+#include "lo_float_sci.hpp"
 
 int main() {
-    //define 8-bit unisgned floating point params
     using namespace lo_float;
 
-    class IsInf_f8_e4m3 {
-        
+    class IsInf_f8_e4m3 {    
         public:
 
         bool operator()(uint32_t bits) const {
@@ -53,53 +47,71 @@ int main() {
         }
     };
 
+
     constexpr FloatingPointParams param_ufp8(
         8, 4, 3,
-        Rounding_Mode::RoundToNearestEven,
         Inf_Behaviors::Saturating,
-        NaN_Behaviors::QuietNaN,
+        NaN_Behaviors::_3109,
         Signedness::Unsigned,
-        IsInf_f8_e4m3(), IsNaN_f8_e4m3(), 0, Unsigned_behavior::NegtoZero
+        IsInf_f8_e4m3(), IsNaN_f8_e4m3()
     );
-
 
     using float8 = Templated_Float<param_ufp8>;
 
-    //0x66 = 0b0110_0110 = 2^(6 - 3)*(1 + 0.25 + 0.125) = 2^(3)*(1.375) = 11.0
-    //0xb3 = 0b1011_0011 = 2^(b - 3)*(1 + 0.125 + 0.0625) = 2^(8)*(1.375) = 352.0
-    //0xFF = 0b1111_1111 = 2^(f - 3)*(1 + 0.5 + 0.25 + 0.125 + 0.0625) = 7036.0
+    // Use deduced Project — no explicit <float8> needed
+    float8 zero = Project<float8>(0);
+    float8 neg_one = Project<float8>(-1);  // NegtoZero should clamp this
 
-
-    //largest number in the format-
     std::cout << "largest number in the format: " << std::numeric_limits<float8>::max() << std::endl;
     std::cout << "largest number in the format rep: " << (int)std::numeric_limits<float8>::max().rep() << std::endl;
 
-    //generate random numbers
-    std::mt19937 rng(42); // Seed for reproducibility
-    
-    std::uniform_int_distribution<uint8_t> dist(0, 255); // 8-bit unsigned range
+    // Also test the free-function API with deduced output
+    float8 test_a = float8::FromRep(0x66);
+    float8 test_b = float8::FromRep(0xB3);
+
+    // Deduced output — result type comes from the assignment target
+    float8 sum  = Add(test_a, test_b);
+    float8 diff = Sub(test_a, test_b);
+    float8 prod = Mul(test_a, test_b);
+    float8 quot = Div(test_a, test_b);
+
+
+    float sum_f = Add(test_a, test_b);
+
+    std::cout << "Free-function API (deduced):  Add=" << sum << " Sub=" << diff
+              << " Mul=" << prod << " Div=" << quot << "\n";
+    std::cout << "Free-function API (explicit float): Add=" << sum_f << "\n";
+
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<uint8_t> dist(0, 255);
+
     for (int i = 0; i < 10; ++i) {
         uint8_t rand_a = dist(rng);
-        std::cout << "a uint8_t repr in hex: " << std::hex << static_cast<int>(rand_a) << "\n";
         uint8_t rand_b = dist(rng);
-        std::cout << "b uint8_t repr in hex: " << std::hex << static_cast<int>(rand_b) << "\n";
+        std::cout << "a hex: " << std::hex << (int)rand_a
+                  << "  b hex: " << std::hex << (int)rand_b << "\n";
 
         float8 a = float8::FromRep(rand_a);
         float8 b = float8::FromRep(rand_b);
 
-        // Print values
-        std::cout << "Test " << i + 1 << ":\n";
-        std::cout << "  a and b " << (a) << " and " << (b) << "\n";
+        std::cout << std::dec << "Test " << i + 1 << ":\n";
+        std::cout << "  a=" << (float)a << "  b=" << (float)b << "\n";
 
-        // Perform arithmetic operations
-        std::cout << "  uint4  -> Add: " << (a + b)
-                  << ", Sub: " << (a - b)
-                  << ", Mul: " << (a * b)
-                  << ", Comparisons: " << (a == b) << ", " << (a < b) << ", " << (a > b) 
-                  << ", Div: " << (b != static_cast<float8>(0) ? (a / b) : static_cast<float8>(-1)) << "\n";
+        // Operators (use internal dispatch)
+        std::cout << "  Op:  Add=" << float(a + b)
+                  << " Sub=" << float(a - b)
+                  << " Mul=" << float(a * b)
+                  << " Div=" << (b != zero ? float(a / b) : (float)neg_one)
+                  << " Eq=" << (a == b)
+                  << " Lt=" << (a < b)
+                  << " Gt=" << (a > b) << "\n";
 
+        // Free functions with deduced output
+        float8 fa = Add(a, b);
+        float8 fs = Sub(a, b);
+        float8 fm = Mul(a, b);
+        std::cout << "  Free: Add=" << float(fa) << " Sub=" << float(fs) << " Mul=" << float(fm) << "\n";
         std::cout << "--------------------------------\n";
     }
-
     return 0;
 }
