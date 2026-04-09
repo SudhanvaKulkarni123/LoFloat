@@ -14,6 +14,7 @@
 #include <ostream>
 #include <type_traits>
 #include <utility>
+#include <ctime>
 #include <math.h>
 #include <complex>
 #include <limits>
@@ -37,8 +38,6 @@
 
 #include "lo_int.h"           //custom integer types
 #include "template_helpers.h" //helper templataes
-
-
 
 #ifdef __has_include
 #if __has_include(<version>)
