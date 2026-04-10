@@ -2,7 +2,7 @@
 #ifndef LO_FLOAT_H
 #define LO_FLOAT_H
 // #define ENABLE_EXCEPT
-
+#define USE_CUDA
 #define LEN 13
 #include <random>
 #include <algorithm>
@@ -28,6 +28,8 @@
 #include "simd_helpers.hpp"     //simd helpers
 #endif
 #ifdef USE_CUDA
+#include <cuda_runtime.h>
+#include <cuda/std/bit>
 #include <cuda_fp16.h>
 #include <c10/util/Half.h>
 #endif
@@ -475,22 +477,23 @@ namespace lo_float
 // ----- RoundBitsToNearestEven (unchanged) -----------------------------------
 
 template <typename Bits, typename Roundoff>
-constexpr inline Bits RoundBitsToNearestEven(Bits bits, Roundoff roundoff)
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsToNearestEven(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
     Bits bias;
+    #ifndef USE_CUDA
     if constexpr (is_xsimd_batch<Roundoff>::value)
     {
-        #ifndef USE_CUDA
         bias = xsimd::select(Bits(roundoff) == Bits{},
             Bits(0),
             (xs::bitwise_rshift(bits, xs::batch_cast<value_type>(roundoff)) & Bits(1))
                 + xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff - 1))
                 - Bits(1));
-        #endif
+    
     }
     else
+    #endif
     {
         bias = roundoff == 0
             ? Bits(0)
@@ -912,12 +915,14 @@ inline Bits RoundUp(Bits bits, Roundoff roundoff, BoolT positive)
 template <typename Bits, typename Roundoff>
 inline Bits RoundUp(Bits bits, Roundoff roundoff)
 {
+    #ifndef USE_CUDA
     if constexpr (is_xsimd_batch<Bits>::value)
     {
         using value_type = pod_type_t<Bits>;
         return RoundUp(bits, roundoff, xsimd::batch_bool<value_type>(true));
     }
     else
+    #endif
     {
         return RoundUp(bits, roundoff, true);
     }
@@ -959,12 +964,14 @@ inline Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
 template <typename Bits, typename Roundoff>
 inline Bits RoundDown(Bits bits, Roundoff roundoff)
 {
+    #ifndef USE_CUDA
     if constexpr (is_xsimd_batch<Bits>::value)
     {
         using value_type = pod_type_t<Bits>;
         return RoundDown(bits, roundoff, xsimd::batch_bool<value_type>(true));
     }
     else
+    #endif
     {
         return RoundDown(bits, roundoff, true);
     }
@@ -1031,6 +1038,8 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         template <typename Bits>
         LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundMantissa(Bits bits, const int roundoff, const Rounding_Mode rm, const int len = 0)
         {
+
+    
             switch (rm)
             {
             case Rounding_Mode::RoundToNearestEven:
@@ -2355,20 +2364,30 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE c10::Half abs(c10::Half val) {
 template<typename From>
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
 
+   
     using FromBits = typename Traits<From>::BitsType;
-    static constexpr int kFromBits = Traits<From>::kBits;
-    int kDigitShift = ToMantissaBits - Traits<From>::kMantissaBits;
-    static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
-    FromBits from_bits =
-        bit_cast<FromBits>(abs(from));
-    {
-        from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
-        from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
-    }
+static constexpr int kFromBits = Traits<From>::kBits;
+int kDigitShift = ToMantissaBits - Traits<From>::kMantissaBits;
+static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
 
-    // from_bits += static_cast<FromBits>(kExponentOffset)
-    //                             << kFromMantissaBits;
-    return bit_cast<From>(from_bits);
+
+#ifdef USE_CUDA
+    FromBits from_bits = cuda::std::bit_cast<FromBits>(abs(from));
+#else 
+    FromBits from_bits = std::bit_cast<FromBits>(abs(from));
+#endif
+// {
+     from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
+     const auto sign_bit = from_bits & (FromBits{1} << (kFromBits - 1));
+    
+     from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
+// }
+
+#ifdef USE_CUDA
+return cuda::std::bit_cast<From>(from_bits | sign_bit);
+#else
+return std::bit_cast<From>(from_bits | sign_bit);
+#endif
     
 }
 

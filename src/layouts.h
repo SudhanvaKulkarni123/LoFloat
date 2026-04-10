@@ -1,9 +1,9 @@
 #pragma once
 #include <cstdint>
 
-using namespace lo_float;
 
-namespace Lo_Gemm { 
+
+namespace lo_float {
 
 template<typename T>
 struct range : std::pair<T, T> {
