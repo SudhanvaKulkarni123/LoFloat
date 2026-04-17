@@ -1,8 +1,6 @@
 /// @author Sudhanva Kulkarni
-#ifndef LO_FLOAT_H
-#define LO_FLOAT_H
-// #define ENABLE_EXCEPT
-#define USE_CUDA
+#pragma once
+
 #define LEN 13
 #include <random>
 #include <algorithm>
@@ -58,9 +56,9 @@ namespace xs = xsimd;
 namespace lo_float
 {
 
-    unsigned int lof_seed = static_cast<unsigned int>(std::time(nullptr));
+    inline thread_local unsigned int lof_seed = 12345;
 
-    void set_seed(unsigned int seed) {
+    inline void set_seed(unsigned int seed) {
         lof_seed = seed;
     }
 
@@ -2378,13 +2376,19 @@ static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
 #endif
 // {
      from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
-     const auto sign_bit = from_bits & (FromBits{1} << (kFromBits - 1));
+     const auto sign_bit = cuda::std::bit_cast<FromBits>(from) & (FromBits{1} << (kFromBits - 1));
     
      from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
 // }
 
 #ifdef USE_CUDA
+if constexpr (std::is_same_v<From, c10::Half>) {
+    c10::Half ret;
+    ret.x = static_cast<uint16_t>(from_bits | sign_bit);
+        return ret;
+} else {
 return cuda::std::bit_cast<From>(from_bits | sign_bit);
+}
 #else
 return std::bit_cast<From>(from_bits | sign_bit);
 #endif
@@ -3830,4 +3834,4 @@ struct DeviceNaNChecker {
 
 } // namespace lo_float
 
-#endif // FLOAT_6_4
+

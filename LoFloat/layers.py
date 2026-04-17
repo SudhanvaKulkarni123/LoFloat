@@ -46,6 +46,45 @@ def exp_mant_quantize(tensor, exp_bits, mantissa_bits):
         return tensor
     return STERound.apply(tensor, lof.create_p3109_params(exp_bits + mantissa_bits + 1, mantissa_bits + 1, True, True))
 
+
+
+# ─── Helper: batched lof_gemm over leading dims ────────────────────────
+def _lof_gemm_2d(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits):
+    """Wrapper for 2-D inputs; reshapes (..., M, K) x (..., K, N) → (..., M, N)."""
+    if A.dim() == 2 and B.dim() == 2:
+        return lof.lof_gemm(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
+
+    # Batched case – flatten leading dims, loop, restack
+    batch_shape = A.shape[:-2]
+    M, K = A.shape[-2], A.shape[-1]
+    N = B.shape[-1]
+    A_flat = A.reshape(-1, M, K)
+    B_flat = B.reshape(-1, K, N)
+    out = torch.stack([
+        lof.lof_gemm(A_flat[i], B_flat[i],
+                      accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
+        for i in range(A_flat.shape[0])
+    ])
+    return out.reshape(*batch_shape, M, N)
+
+
+def _lof_linear(x, weight, bias, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits):
+    """Drop-in for F.linear using lof_gemm.  x: (..., K), weight: (N, K) → (..., N)."""
+    leading = x.shape[:-1]
+    K = x.shape[-1]
+    x_2d = x.reshape(-1, K)                          # (B, K)
+    wt = weight.t().contiguous()                      # (K, N)
+    out = lof.lof_gemm(x_2d, wt,
+                        accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
+    out = out.reshape(*leading, weight.shape[0])      # (..., N)
+    if bias is not None:
+        out = out + bias
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LoF_Linear
+# ═══════════════════════════════════════════════════════════════════════
 class LoF_Linear(nn.Module):
 
     @staticmethod
@@ -63,7 +102,10 @@ class LoF_Linear(nn.Module):
                  weight_exp=None, weight_mant=None,
                  bias_exp=None, bias_mant=None,
                  rounding_mode=None,
-                 act_scale_factor=1.0, w_scale_factor=1.0, b_scale_factor=1.0):
+                 act_scale_factor=1.0, w_scale_factor=1.0, b_scale_factor=1.0,
+                 accum_mant_bits=23,
+                 gemm_round_mode=None,
+                 stochastic_rounding_bits=0):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -71,6 +113,11 @@ class LoF_Linear(nn.Module):
         self.act_scale_factor = act_scale_factor
         self.w_scale_factor = w_scale_factor
         self.b_scale_factor = b_scale_factor
+
+        # lof_gemm parameters
+        self.accum_mant_bits = accum_mant_bits
+        self.gemm_round_mode = gemm_round_mode if gemm_round_mode is not None else lof.RoundingMode.RoundToNearestEven
+        self.stochastic_rounding_bits = stochastic_rounding_bits
 
         if act_params is None:
             self.act_params = lof.create_p3109_params(act_exp + act_mant + 1, act_mant + 1, True, True)
@@ -96,7 +143,9 @@ class LoF_Linear(nn.Module):
         nn.init.kaiming_uniform_(self.weight)
 
     @classmethod
-    def from_linear(cls, linear: nn.Linear, act_params, weight_params, bias_params=None, rounding_mode=None):
+    def from_linear(cls, linear: nn.Linear, act_params, weight_params, bias_params=None,
+                    rounding_mode=None,
+                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0):
         layer = cls(
             linear.in_features,
             linear.out_features,
@@ -105,6 +154,9 @@ class LoF_Linear(nn.Module):
             bias=linear.bias is not None,
             bias_params=bias_params,
             rounding_mode=rounding_mode,
+            accum_mant_bits=accum_mant_bits,
+            gemm_round_mode=gemm_round_mode,
+            stochastic_rounding_bits=stochastic_rounding_bits,
         )
         layer.weight = nn.Parameter(linear.weight.clone())
         if linear.bias is not None:
@@ -122,6 +174,9 @@ class LoF_Linear(nn.Module):
             act_scale_factor=self.act_scale_factor,
             w_scale_factor=self.w_scale_factor,
             b_scale_factor=self.b_scale_factor,
+            accum_mant_bits=self.accum_mant_bits,
+            gemm_round_mode=self.gemm_round_mode,
+            stochastic_rounding_bits=self.stochastic_rounding_bits,
         )
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
@@ -135,28 +190,27 @@ class LoF_Linear(nn.Module):
     def forward(self, x):
         x_q = self._quantize(x * self.act_scale_factor, self.act_params)
         w_q = self._quantize(self.weight * self.w_scale_factor, self.weight_params)
-        out = torch.matmul(x_q, w_q.t())
+
+        # ── lof_gemm replaces torch.matmul(x_q, w_q.t()) ──
+        out = _lof_linear(x_q, w_q, None,
+                          self.accum_mant_bits, self.gemm_round_mode,
+                          self.stochastic_rounding_bits)
+
         if self.bias is not None:
             b_q = self._quantize(self.bias * self.b_scale_factor, self.bias_params)
             out = out + b_q
         return out
 
+    # ── set_* and extra_repr unchanged ──────────────────────────────────
     def set_mantissa(self, activ_mant, weight_mant, bias_mant):
-        # Preserve exponent bits, update mantissa
-        # params.mantissa_bits already includes the +1 for implicit bit
-        # total_bits = sign(1) + exp + mantissa_bits_stored
-        # so exp = total_bits - mantissa_bits_stored - 1
         act_exp = self.act_params.total_bits - self.act_params.mantissa_bits - 1
         weight_exp = self.weight_params.total_bits - self.weight_params.mantissa_bits - 1
         bias_exp = self.bias_params.total_bits - self.bias_params.mantissa_bits - 1
-        # new total_bits = sign(1) + exp + new_mantissa_stored
-        # new_mantissa_stored = mant + 1 (for implicit bit)
         self.act_params = lof.create_p3109_params(1 + act_exp + activ_mant, activ_mant + 1, True, True)
         self.weight_params = lof.create_p3109_params(1 + weight_exp + weight_mant, weight_mant + 1, True, True)
         self.bias_params = lof.create_p3109_params(1 + bias_exp + bias_mant, bias_mant + 1, True, True)
 
     def set_exponent(self, activ_exp, weight_exp, bias_exp):
-        # Preserve mantissa bits (already stored with +1), update exponent
         act_mant = self.act_params.mantissa_bits
         weight_mant = self.weight_params.mantissa_bits
         bias_mant = self.bias_params.mantissa_bits
@@ -173,7 +227,6 @@ class LoF_Linear(nn.Module):
         self.bias_params = lof.create_p3109_params(bias_total_bits, self.bias_params.mantissa_bits, True, True, bias_expbias)
 
     def set_saturation_mode(self, activ_sat, weight_sat, bias_sat):
-        # This is a simplified implementation - you may need to adjust based on your specific requirements
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
         self.bias_params = lof.create_p3109_params(self.bias_params.total_bits, self.bias_params.mantissa_bits, True, bias_sat)
@@ -187,10 +240,14 @@ class LoF_Linear(nn.Module):
             f'weight_mantissa={self.weight_params.mantissa_bits}, '
             f'weight_exponent={self.weight_params.total_bits - self.weight_params.mantissa_bits - 1}, '
             f'bias_mantissa={self.bias_params.mantissa_bits}, '
-            f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}'
+            f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}, '
+            f'accum_mant_bits={self.accum_mant_bits}'
         )
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  LoF_Conv2d  (im2col + lof_gemm)
+# ═══════════════════════════════════════════════════════════════════════
 class LoF_Conv2d(nn.Module):
 
     @staticmethod
@@ -209,7 +266,10 @@ class LoF_Conv2d(nn.Module):
                  weight_exp=None, weight_mant=None,
                  bias_exp=None, bias_mant=None,
                  rounding_mode=None,
-                 act_scale_factor=1.0, w_scale_factor=1.0, b_scale_factor=1.0):
+                 act_scale_factor=1.0, w_scale_factor=1.0, b_scale_factor=1.0,
+                 accum_mant_bits=23,
+                 gemm_round_mode=None,
+                 stochastic_rounding_bits=0):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -222,6 +282,11 @@ class LoF_Conv2d(nn.Module):
         self.act_scale_factor = act_scale_factor
         self.w_scale_factor = w_scale_factor
         self.b_scale_factor = b_scale_factor
+
+        # lof_gemm parameters
+        self.accum_mant_bits = accum_mant_bits
+        self.gemm_round_mode = gemm_round_mode if gemm_round_mode is not None else lof.RoundingMode.RoundToNearestEven
+        self.stochastic_rounding_bits = stochastic_rounding_bits
 
         if act_params is None:
             self.act_params = lof.create_p3109_params(act_exp + act_mant + 1, act_mant + 1, True, True)
@@ -247,7 +312,9 @@ class LoF_Conv2d(nn.Module):
         nn.init.kaiming_uniform_(self.weight)
 
     @classmethod
-    def from_conv2d(cls, conv: nn.Conv2d, act_params, weight_params, bias_params=None, rounding_mode=None):
+    def from_conv2d(cls, conv: nn.Conv2d, act_params, weight_params, bias_params=None,
+                    rounding_mode=None,
+                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0):
         layer = cls(
             conv.in_channels,
             conv.out_channels,
@@ -261,6 +328,9 @@ class LoF_Conv2d(nn.Module):
             bias=conv.bias is not None,
             bias_params=bias_params,
             rounding_mode=rounding_mode,
+            accum_mant_bits=accum_mant_bits,
+            gemm_round_mode=gemm_round_mode,
+            stochastic_rounding_bits=stochastic_rounding_bits,
         )
         layer.weight = nn.Parameter(conv.weight.clone())
         if conv.bias is not None:
@@ -280,6 +350,9 @@ class LoF_Conv2d(nn.Module):
             act_scale_factor=self.act_scale_factor,
             w_scale_factor=self.w_scale_factor,
             b_scale_factor=self.b_scale_factor,
+            accum_mant_bits=self.accum_mant_bits,
+            gemm_round_mode=self.gemm_round_mode,
+            stochastic_rounding_bits=self.stochastic_rounding_bits,
         )
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
@@ -294,13 +367,72 @@ class LoF_Conv2d(nn.Module):
         x_q = self._quantize(x * self.act_scale_factor, self.act_params)
         w_q = self._quantize(self.weight * self.w_scale_factor, self.weight_params)
 
-        bias_q = self._quantize(self.bias * self.b_scale_factor, self.bias_params) if self.bias is not None else None
-        return F.conv2d(x_q, w_q, bias_q,
-                        stride=self.stride, padding=self.padding,
-                        dilation=self.dilation, groups=self.groups)
+        B, C_in, H_in, W_in = x_q.shape
+        C_out = self.out_channels
+        kH, kW = self.kernel_size
 
+        # ── Compute output spatial dimensions ──
+        H_out = (H_in + 2 * self.padding[0] - self.dilation[0] * (kH - 1) - 1) // self.stride[0] + 1
+        W_out = (W_in + 2 * self.padding[1] - self.dilation[1] * (kW - 1) - 1) // self.stride[1] + 1
+        L = H_out * W_out  # number of output spatial positions
+
+        if self.groups == 1:
+            # ── im2col: unfold input → (B, C_in*kH*kW, L) ──
+            x_col = F.unfold(x_q, kernel_size=self.kernel_size,
+                             dilation=self.dilation, padding=self.padding,
+                             stride=self.stride)                         # (B, C_in*kH*kW, L)
+
+            # Weight as 2-D: (C_out, C_in*kH*kW)
+            w_col = w_q.view(C_out, -1)                                  # (C_out, C_in*kH*kW)
+
+            # Per-sample GEMM: w_col @ x_col[b] → (C_out, L)
+            out = torch.stack([
+                lof.lof_gemm(w_col, x_col[b].contiguous(),
+                             self.accum_mant_bits, self.gemm_round_mode,
+                             self.stochastic_rounding_bits)
+                for b in range(B)
+            ])                                                           # (B, C_out, L)
+
+        else:
+            # ── Grouped convolution via im2col ──
+            # Split input channels per group
+            c_per_group_in = C_in // self.groups
+            c_per_group_out = C_out // self.groups
+
+            x_col = F.unfold(x_q, kernel_size=self.kernel_size,
+                             dilation=self.dilation, padding=self.padding,
+                             stride=self.stride)                         # (B, C_in*kH*kW, L)
+
+            # Reshape for groups: (B, groups, c_per_group_in*kH*kW, L)
+            x_col = x_col.view(B, self.groups, c_per_group_in * kH * kW, L)
+
+            # Weight per group: (groups, c_per_group_out, c_per_group_in*kH*kW)
+            w_col = w_q.view(self.groups, c_per_group_out, -1)
+
+            results = []
+            for b in range(B):
+                group_outs = []
+                for g in range(self.groups):
+                    # (c_per_group_out, c_per_group_in*kH*kW) @ (c_per_group_in*kH*kW, L)
+                    group_outs.append(
+                        lof.lof_gemm(w_col[g], x_col[b, g].contiguous(),
+                                     self.accum_mant_bits, self.gemm_round_mode,
+                                     self.stochastic_rounding_bits)
+                    )
+                results.append(torch.cat(group_outs, dim=0))             # (C_out, L)
+            out = torch.stack(results)                                   # (B, C_out, L)
+
+        # ── Fold back to spatial layout ──
+        out = out.view(B, C_out, H_out, W_out)
+
+        if self.bias is not None:
+            b_q = self._quantize(self.bias * self.b_scale_factor, self.bias_params)
+            out = out + b_q.view(1, -1, 1, 1)
+
+        return out
+
+    # ── set_* and extra_repr unchanged ──────────────────────────────────
     def set_mantissa(self, activ_mant, weight_mant, bias_mant):
-        # Preserve exponent bits, update mantissa
         act_exp = self.act_params.total_bits - self.act_params.mantissa_bits - 1
         weight_exp = self.weight_params.total_bits - self.weight_params.mantissa_bits - 1
         bias_exp = self.bias_params.total_bits - self.bias_params.mantissa_bits - 1
@@ -309,13 +441,9 @@ class LoF_Conv2d(nn.Module):
         self.bias_params = lof.create_p3109_params(1 + bias_exp + bias_mant, bias_mant + 1, True, True)
 
     def set_exponent(self, activ_exp, weight_exp, bias_exp):
-        # Preserve mantissa bits (already stored with +1), update exponent
         act_mant = self.act_params.mantissa_bits
         weight_mant = self.weight_params.mantissa_bits
         bias_mant = self.bias_params.mantissa_bits
-        k = 1 + bias_exp + bias_mant
-        p = bias_mant + 1
-
         self.act_params = lof.create_p3109_params(1 + activ_exp + act_mant, act_mant + 1, True, True)
         self.weight_params = lof.create_p3109_params(1 + weight_exp + weight_mant, weight_mant + 1, True, True)
         self.bias_params = lof.create_p3109_params(1 + bias_exp + bias_mant, bias_mant + 1, True, True)
@@ -343,9 +471,14 @@ class LoF_Conv2d(nn.Module):
             f'weight_mantissa={self.weight_params.mantissa_bits}, '
             f'weight_exponent={self.weight_params.total_bits - self.weight_params.mantissa_bits - 1}, '
             f'bias_mantissa={self.bias_params.mantissa_bits}, '
-            f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}'
+            f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}, '
+            f'accum_mant_bits={self.accum_mant_bits}'
         )
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LoF_MultiHeadAttention
+# ═══════════════════════════════════════════════════════════════════════
 class LoF_MultiHeadAttention(nn.Module):
 
     def __init__(self, embed_dim, num_heads,
@@ -354,7 +487,10 @@ class LoF_MultiHeadAttention(nn.Module):
                  act_exp=None, act_mant=None,
                  weight_exp=None, weight_mant=None,
                  bias_exp=None, bias_mant=None,
-                 rounding_mode=None, dropout=0.0):
+                 rounding_mode=None, dropout=0.0,
+                 accum_mant_bits=23,
+                 gemm_round_mode=None,
+                 stochastic_rounding_bits=0):
         super().__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
 
@@ -364,6 +500,11 @@ class LoF_MultiHeadAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.dropout = dropout
         self.rounding_mode = rounding_mode if rounding_mode is not None else lof.RoundingMode.RoundToNearestEven
+
+        # lof_gemm parameters
+        self.accum_mant_bits = accum_mant_bits
+        self.gemm_round_mode = gemm_round_mode if gemm_round_mode is not None else lof.RoundingMode.RoundToNearestEven
+        self.stochastic_rounding_bits = stochastic_rounding_bits
 
         if act_params is None:
             self.act_params = lof.create_p3109_params(act_exp + act_mant + 1, act_mant + 1, True, True)
@@ -403,7 +544,9 @@ class LoF_MultiHeadAttention(nn.Module):
             nn.init.xavier_uniform_(w)
 
     @classmethod
-    def from_mha(cls, mha: nn.MultiheadAttention, act_params, weight_params, bias_params=None, rounding_mode=None):
+    def from_mha(cls, mha: nn.MultiheadAttention, act_params, weight_params, bias_params=None,
+                 rounding_mode=None,
+                 accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0):
         layer = cls(
             mha.embed_dim,
             mha.num_heads,
@@ -413,6 +556,9 @@ class LoF_MultiHeadAttention(nn.Module):
             bias_params=bias_params,
             rounding_mode=rounding_mode,
             dropout=mha.dropout,
+            accum_mant_bits=accum_mant_bits,
+            gemm_round_mode=gemm_round_mode,
+            stochastic_rounding_bits=stochastic_rounding_bits,
         )
 
         E = mha.embed_dim
@@ -440,6 +586,9 @@ class LoF_MultiHeadAttention(nn.Module):
             bias_params=self.bias_params,
             rounding_mode=self.rounding_mode,
             dropout=self.dropout,
+            accum_mant_bits=self.accum_mant_bits,
+            gemm_round_mode=self.gemm_round_mode,
+            stochastic_rounding_bits=self.stochastic_rounding_bits,
         )
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
@@ -454,12 +603,12 @@ class LoF_MultiHeadAttention(nn.Module):
         B, T, E = query.shape
         S = key.shape[1]
 
-        # Quantize layer inputs only
+        # Quantize layer inputs
         query = self._quantize(query, self.act_params)
         key = self._quantize(key, self.act_params)
         value = self._quantize(value, self.act_params)
 
-        # Quantize stored weights and biases for projection
+        # Quantize stored weights and biases
         q_w = self._quantize(self.q_weight, self.weight_params)
         k_w = self._quantize(self.k_weight, self.weight_params)
         v_w = self._quantize(self.v_weight, self.weight_params)
@@ -470,16 +619,23 @@ class LoF_MultiHeadAttention(nn.Module):
         v_b = self._quantize(self.v_bias, self.bias_params) if self.v_bias is not None else None
         out_b = self._quantize(self.out_bias, self.bias_params) if self.out_bias is not None else None
 
-        # All internal computation in full precision from here
-        q = F.linear(query, q_w, q_b)
-        k = F.linear(key, k_w, k_b)
-        v = F.linear(value, v_w, v_b)
+        # ── Projections via lof_gemm (replaces F.linear) ──
+        q = _lof_linear(query, q_w, q_b,
+                        self.accum_mant_bits, self.gemm_round_mode, self.stochastic_rounding_bits)
+        k = _lof_linear(key, k_w, k_b,
+                        self.accum_mant_bits, self.gemm_round_mode, self.stochastic_rounding_bits)
+        v = _lof_linear(value, v_w, v_b,
+                        self.accum_mant_bits, self.gemm_round_mode, self.stochastic_rounding_bits)
 
         q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
 
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        # ── Attention scores via lof_gemm (replaces torch.matmul) ──
+        # q: (B, H, T, D),  k^T: (B, H, D, S)  →  (B, H, T, S)
+        attn = _lof_gemm_2d(q, k.transpose(-2, -1),
+                            self.accum_mant_bits, self.gemm_round_mode,
+                            self.stochastic_rounding_bits) * self.scale
 
         if attn_mask is not None:
             attn = attn + attn_mask
@@ -493,16 +649,24 @@ class LoF_MultiHeadAttention(nn.Module):
         if self.training and self.dropout > 0.0:
             attn = F.dropout(attn, p=self.dropout)
 
-        out = torch.matmul(attn, v)
+        # ── Context via lof_gemm (replaces torch.matmul) ──
+        # attn: (B, H, T, S),  v: (B, H, S, D)  →  (B, H, T, D)
+        out = _lof_gemm_2d(attn, v,
+                           self.accum_mant_bits, self.gemm_round_mode,
+                           self.stochastic_rounding_bits)
         out = out.transpose(1, 2).contiguous().view(B, T, E)
-        out = F.linear(out, out_w, out_b)
+
+        # ── Output projection via lof_gemm ──
+        out = _lof_linear(out, out_w, out_b,
+                          self.accum_mant_bits, self.gemm_round_mode,
+                          self.stochastic_rounding_bits)
 
         if need_weights:
             return out, attn
         return out, None
 
+    # ── set_* and extra_repr unchanged ──────────────────────────────────
     def set_mantissa(self, activ_mant, weight_mant, bias_mant):
-        # Preserve exponent bits, update mantissa
         act_exp = self.act_params.total_bits - self.act_params.mantissa_bits - 1
         weight_exp = self.weight_params.total_bits - self.weight_params.mantissa_bits - 1
         bias_exp = self.bias_params.total_bits - self.bias_params.mantissa_bits - 1
@@ -511,7 +675,6 @@ class LoF_MultiHeadAttention(nn.Module):
         self.bias_params = lof.create_p3109_params(1 + bias_exp + bias_mant, bias_mant + 1, True, True)
 
     def set_exponent(self, activ_exp, weight_exp, bias_exp):
-        # Preserve mantissa bits (already stored with +1), update exponent
         act_mant = self.act_params.mantissa_bits
         weight_mant = self.weight_params.mantissa_bits
         bias_mant = self.bias_params.mantissa_bits
@@ -526,7 +689,7 @@ class LoF_MultiHeadAttention(nn.Module):
         self.act_params = lof.create_p3109_params(act_total_bits, self.act_params.mantissa_bits, True, True, activ_expbias)
         self.weight_params = lof.create_p3109_params(weights_total_bits, self.weight_params.mantissa_bits, True, True, weight_expbias)
         self.bias_params = lof.create_p3109_params(bias_total_bits, self.bias_params.mantissa_bits, True, True, bias_expbias)
-    
+
     def set_saturation_mode(self, activ_sat, weight_sat, bias_sat):
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
@@ -542,9 +705,14 @@ class LoF_MultiHeadAttention(nn.Module):
             f'weight_mantissa={self.weight_params.mantissa_bits}, '
             f'weight_exponent={self.weight_params.total_bits - self.weight_params.mantissa_bits - 1}, '
             f'bias_mantissa={self.bias_params.mantissa_bits}, '
-            f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}'
+            f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}, '
+            f'accum_mant_bits={self.accum_mant_bits}'
         )
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  ExplicitMultiheadAttention & replace_mha_with_explicit  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════
 class ExplicitMultiheadAttention(torch.nn.Module):
     def __init__(self, mha: torch.nn.MultiheadAttention):
         super().__init__()
@@ -558,7 +726,6 @@ class ExplicitMultiheadAttention(torch.nn.Module):
         bias = mha.in_proj_bias is not None if mha.in_proj_weight is not None \
                else (hasattr(mha, 'q_proj_weight') and mha.q_proj_weight is not None)
 
-        # Build q/k/v projections
         self.q_proj = torch.nn.Linear(embed_dim, embed_dim, bias=bias)
         self.k_proj = torch.nn.Linear(embed_dim, embed_dim, bias=bias)
         self.v_proj = torch.nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -582,7 +749,6 @@ class ExplicitMultiheadAttention(torch.nn.Module):
                 self.k_proj.bias.data = mha.bias_k.data.clone()
                 self.v_proj.bias.data = mha.bias_v.data.clone()
 
-        # Copy out_proj
         self.out_proj = torch.nn.Linear(embed_dim, embed_dim,
                                          bias=mha.out_proj.bias is not None)
         self.out_proj.weight.data = mha.out_proj.weight.data.clone()
@@ -599,17 +765,14 @@ class ExplicitMultiheadAttention(torch.nn.Module):
         B, T, C = query.shape
         S = key.shape[1]
 
-        # Project through explicit Linear modules (hooks fire, LoF quantizes)
         q = self.q_proj(query)
         k = self.k_proj(key)
         v = self.v_proj(value)
 
-        # Reshape to (B, num_heads, seq_len, head_dim)
         q = q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Scaled dot-product attention
         scale = self.head_dim ** -0.5
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
 
@@ -627,7 +790,6 @@ class ExplicitMultiheadAttention(torch.nn.Module):
         attn_output = torch.matmul(attn_weights, v)
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
 
-        # Project through explicit out_proj (hooks fire, LoF quantizes)
         output = self.out_proj(attn_output)
 
         if need_weights:
@@ -639,7 +801,6 @@ def replace_mha_with_explicit(model):
     for name, module in list(model.named_modules()):
         if not isinstance(module, torch.nn.MultiheadAttention):
             continue
-        # Navigate to parent and replace
         parts = name.split('.')
         parent = model
         for p in parts[:-1]:

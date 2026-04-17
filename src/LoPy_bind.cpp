@@ -1,9 +1,10 @@
 #include <torch/extension.h>
 #include "lo_float.h"
+#include "Lof_kernels.h"
 #include <stdexcept>
 
 namespace py = pybind11;
-using namespace lo_float;
+
 
 #ifdef USE_CUDA
 namespace lo_float {
@@ -72,7 +73,7 @@ static DeviceNaNChecker make_device_nan(const FloatingPointParamsPy &p, const De
     return { inf.exp_mask, inf.mant_mask, p.IsNaN.attr("qNanBitPattern")().cast<uint64_t>(), p.IsNaN.attr("sNanBitPattern")().cast<uint64_t>() };
 }
 
-torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa_bits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa_bits, lo_float::Rounding_Mode round_mode = lo_float::Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     auto output = torch::empty_like(input);
     #ifdef USE_CUDA
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "virtual_round_mantissa", ([&] {
@@ -111,7 +112,7 @@ torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa
     return output;
 }
 
-torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPointParamsPy &params, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPointParamsPy &params, lo_float::Rounding_Mode round_mode = lo_float::Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
     auto output = torch::empty_like(input);
     if (input.is_cuda()) {
         #ifdef USE_CUDA
@@ -145,6 +146,7 @@ torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPoi
     }
     return output;
 }
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "Runtime float format converter with custom quantization";
@@ -198,4 +200,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("virtual_round", &virtual_round_params,
           py::arg("input"), py::arg("params"),
           py::arg("round_mode") = Rounding_Mode::RoundToNearestEven, py::arg("stoch_len") = 0);
+
+    #ifdef USE_CUDA
+    m.def("lof_gemm",
+        &LoF_gemm,
+        py::arg("A"),
+        py::arg("B"),
+        py::arg("accum_mant_bits"),
+        py::arg("round_mode")              = Rounding_Mode::RoundToNearestEven,
+        py::arg("stochastic_rounding_bits") = 0,
+        "Low-precision GEMM (float32 only). Returns output tensor D.");
+    #endif
 }

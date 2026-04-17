@@ -86,17 +86,26 @@ struct Mma<Shape_, float, LayoutA_, float, LayoutB_,
     void operator()(FragmentC& D, FragmentA const& A,
                     FragmentB const& B, FragmentC const& C, int accum_mant_bits, lo_float::Rounding_Mode rounding_mode, int stochastic_bits) const {
         D = C;
-        CUTLASS_PRAGMA_UNROLL
-        for (int k = 0; k < Shape::kK; ++k) {
-        CUTLASS_PRAGMA_UNROLL
-        for (int n = 0; n < Shape::kN; n++) {
-            CUTLASS_PRAGMA_UNROLL
-            for (int m = 0; m < Shape::kM; m++) {
-            float p = A[m * Shape::kK + k] * B[n * Shape::kK + k];
-            D[m * Shape::kN + n] +=  lo_float::virtual_round(p, accum_mant_bits, rounding_mode, stochastic_bits);
-            }
+         const int shift = 23 - accum_mant_bits;  // 13
+    const uint32_t half_ulp  = (shift > 0) ? (1u << (shift - 1)) : 0u;
+    const uint32_t mask      = (shift > 0) ? ~((1u << shift) - 1) : 0xFFFFFFFFu;
+    const uint32_t sign_mask = 0x80000000u;
+    const uint32_t neg_sign_mask = !sign_mask;
+
+
+CUTLASS_PRAGMA_UNROLL
+for (int k = 0; k < Shape::kK; ++k) {
+    CUTLASS_PRAGMA_UNROLL
+    for (int n = 0; n < Shape::kN; ++n) {
+    CUTLASS_PRAGMA_UNROLL
+    for (int m = 0; m < Shape::kM; ++m) {
+           float p =  A[m * Shape::kK + k] * B[k * Shape::kN + n];
+           D[m * Shape::kN + n] =  lo_float::virtual_round(D[m*Shape::kN + n] + p, accum_mant_bits);
+            
         }
-        }
+    }
+}
+
     }
     };
 
@@ -139,11 +148,7 @@ public:
   using LayoutB = LayoutB_;
   using ElementC = ElementC_;
   using LayoutC = LayoutC_;
-  using Policy = cutlass::gemm::warp::MmaSimtPolicy<
-    cutlass::MatrixShape<4, 8>,   // WarpShape in threads (M, N)
-    cutlass::layout::RowMajorInterleaved<2>,
-    cutlass::gemm::GemmShape<4, 1, 1>  // LaneMmaShape
->;
+  using Policy = Policy_;
   using OperatorClass = arch::OpClassSimt;
   using ArchTag = arch::Sm80;
 
@@ -360,46 +365,19 @@ struct LoFMmaCore {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  GEMM runners
+//  All four DefaultMmaCore layout specializations for OpLoFMultiplyAdd
+//
+//  Paste these into your cutlass_gemms.cuh AFTER your LoFMma warp class
+//  and BEFORE the GEMM runners.
+//
+//  Replaces your existing RowMajor×ColumnMajor multistage specialization
+//  (reverts kElementsPerAccess back to 1).
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Stages == 2: device::Gemm works (our DefaultMmaCore spec is picked up)
-template<int TbM,int TbN,int TbK, int WpM,int WpN,int WpK>
-float run_lof_gemm_2stg(int M,int N,int K,float alpha,float beta,
-    const float* dA,const float* dB,const float* dC,float* dD,int reps=20)
-{
-  using Gemm = cutlass::gemm::device::Gemm<
-    float, cutlass::layout::RowMajor,
-    float, cutlass::layout::ColumnMajor,
-    float, cutlass::layout::RowMajor,
-    float,
-    cutlass::arch::OpClassSimt,
-    cutlass::arch::Sm80,
-    cutlass::gemm::GemmShape<TbM,TbN,TbK>,
-    cutlass::gemm::GemmShape<WpM,WpN,WpK>,
-    cutlass::gemm::GemmShape<1,1,1>,
-    cutlass::epilogue::thread::LinearCombination<float,1,float,float>,
-    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
-    2, 1, 1, false,
-    cutlass::arch::OpLoFMultiplyAdd>;
 
-  typename Gemm::Arguments args({M,N,K},{dA,K},{dB,K},{dC,N},{dD,N},{alpha,beta});
-  Gemm op;
-  if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
-  size_t ws = Gemm::get_workspace_size(args);
-  void* dw = nullptr;
-  if (ws) CUDA_CHECK(cudaMalloc(&dw, ws));
-  if (op.initialize(args, dw) != cutlass::Status::kSuccess){ if(dw)cudaFree(dw); return -1.f; }
-  op(); CUDA_CHECK(cudaDeviceSynchronize());
-  // Timer t; t.start();
-  // for(int i=0;i<reps;i++) op();
-  // float ms = t.stop() / reps;
-  // if(dw) cudaFree(dw);
-  return 0.0f;
-}
-
-
-
+// ─────────────────────────────────────────────────────────────────────────
+//  Multistage: RowMajor A × ColumnMajor B  (scalar — both need transpose)
+// ─────────────────────────────────────────────────────────────────────────
 
 namespace cutlass {
 namespace gemm {
@@ -439,7 +417,6 @@ struct DefaultMmaCore<
   static cutlass::arch::CacheOperation::Kind const kCacheOpB =
       cutlass::arch::CacheOperation::Always;
 
-  /// Number of warps present
   using WarpCount = GemmShape<
       Shape::kM / WarpShape::kM,
       Shape::kN / WarpShape::kN,
@@ -454,17 +431,10 @@ struct DefaultMmaCore<
 
   static int const kElementsPerAccess = 1;
 
-  //
-  // Shared memory layouts (same as upstream SM80 SIMT RowMajor×ColumnMajor)
-  //
-
   using SmemLayoutA = layout::ColumnMajor;
   using SmemLayoutB = layout::RowMajor;
 
-  //
-  // Iterators to write to shared memory
-  //
-
+  // A: K contiguous in global, transpose to M-contiguous smem
   using IteratorThreadMapA = transform::PitchLinearStripminedThreadMap<
       layout::PitchLinearShape<Shape::kK, Shape::kM>,
       kThreads,
@@ -477,6 +447,7 @@ struct DefaultMmaCore<
       MatrixShape<Shape::kM, Shape::kK>, ElementA, SmemLayoutA, 0,
       SmemThreadMapA>;
 
+  // B: K contiguous in global, transpose to N-contiguous smem
   using IteratorThreadMapB = transform::PitchLinearStripminedThreadMap<
       layout::PitchLinearShape<Shape::kK, Shape::kN>,
       kThreads,
@@ -488,10 +459,6 @@ struct DefaultMmaCore<
   using SmemIteratorB = transform::threadblock::RegularTileAccessIterator<
       MatrixShape<Shape::kK, Shape::kN>, ElementB, SmemLayoutB, 1,
       SmemThreadMapB>;
-
-  //
-  // Warp-level matrix multiply operator — LoFMma instead of MmaSimt
-  //
 
   static const int WarpNumThreadsM = 4;
   static const int WarpNumThreadsN = 8;
@@ -519,7 +486,6 @@ struct DefaultMmaCore<
       cutlass::layout::RowMajorInterleaved<LaneLayout>,
       LaneMmaShape>;
 
-  // ** This is the key difference: LoFMma instead of MmaSimt **
   using MmaWarpSimt = warp::LoFMma<
       WarpShape,
       ElementA, SmemLayoutA,
@@ -537,6 +503,924 @@ struct DefaultMmaCore<
 }  // namespace threadblock
 }  // namespace gemm
 }  // namespace cutlass
+
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Multistage: ColumnMajor A × RowMajor B  ★ FASTEST — vec4, no transpose
+// ─────────────────────────────────────────────────────────────────────────
+
+namespace cutlass {
+namespace gemm {
+namespace threadblock {
+
+template <
+    typename Shape_,
+    typename WarpShape_,
+    typename LayoutC_,
+    int Stages,
+    cutlass::arch::CacheOperation::Kind CacheOpA,
+    cutlass::arch::CacheOperation::Kind CacheOpB>
+struct DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::ColumnMajor,
+    float, layout::RowMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, Stages,
+    arch::OpLoFMultiplyAdd,
+    false, CacheOpA, CacheOpB> {
+
+  using Shape = Shape_;
+  using WarpShape = WarpShape_;
+  using InstructionShape = gemm::GemmShape<1,1,1>;
+  using ElementA = float;
+  using LayoutA = layout::ColumnMajor;
+  using ElementB = float;
+  using LayoutB = layout::RowMajor;
+  using ElementC = float;
+  using LayoutC = LayoutC_;
+  using OperatorClass = arch::OpClassSimt;
+  static int const kStages = Stages;
+  using Operator = arch::OpLoFMultiplyAdd;
+
+  static cutlass::arch::CacheOperation::Kind const kCacheOpA =
+      cutlass::arch::CacheOperation::Always;
+  static cutlass::arch::CacheOperation::Kind const kCacheOpB =
+      cutlass::arch::CacheOperation::Always;
+
+  using WarpCount = GemmShape<
+      Shape::kM / WarpShape::kM,
+      Shape::kN / WarpShape::kN,
+      Shape::kK / WarpShape::kK>;
+
+  static_assert(
+      !(Shape::kM % WarpShape::kM) && !(Shape::kN % WarpShape::kN),
+      "Threadblock-scoped GEMM should be divisible by warp-scoped GEMM size.");
+
+  static int const kWarpSize = warp::WarpSize<arch::OpClassSimt>::value;
+  static int const kThreads = WarpCount::kCount * kWarpSize;
+
+  // ★ vec4 — no transpose needed for this layout combo
+  static int const kElementsPerAccess = 4;
+
+  using SmemLayoutA = layout::ColumnMajor;
+  using SmemLayoutB = layout::RowMajor;
+
+  // A: M contiguous in global, M contiguous in smem — direct copy
+  using IteratorThreadMapA = transform::PitchLinearStripminedThreadMap<
+      layout::PitchLinearShape<Shape::kM, Shape::kK>,
+      kThreads,
+      kElementsPerAccess>;
+
+  // NO TransposePitchLinearThreadMapSimt
+  using SmemIteratorA = transform::threadblock::RegularTileAccessIterator<
+      MatrixShape<Shape::kM, Shape::kK>, ElementA, SmemLayoutA, 0,
+      IteratorThreadMapA>;
+
+  // B: N contiguous in global, N contiguous in smem — direct copy
+  using IteratorThreadMapB = transform::PitchLinearStripminedThreadMap<
+      layout::PitchLinearShape<Shape::kN, Shape::kK>,
+      kThreads,
+      kElementsPerAccess>;
+
+  // NO TransposePitchLinearThreadMapSimt
+  using SmemIteratorB = transform::threadblock::RegularTileAccessIterator<
+      MatrixShape<Shape::kK, Shape::kN>, ElementB, SmemLayoutB, 1,
+      IteratorThreadMapB>;
+
+  static const int WarpNumThreadsM = 4;
+  static const int WarpNumThreadsN = 8;
+  static_assert(
+      !(WarpShape::kM % WarpNumThreadsM) &&
+      !(WarpShape::kN % WarpNumThreadsN),
+      "WarpShape must be divisible by ThreadTile shape.");
+  static const int ThreadTileM = WarpShape::kM / WarpNumThreadsM;
+  static const int ThreadTileN = WarpShape::kN / WarpNumThreadsN;
+  static const int LaneLayout =
+      ThreadTileM > 4 && ThreadTileN > 4 ? 2 : 1;
+  static const int numElementsA = 128 / sizeof_bits<ElementA>::value;
+  static const int numElementsB = 128 / sizeof_bits<ElementB>::value;
+  static const int LaneM = cutlass::const_min(numElementsA, ThreadTileM);
+  static const int LaneN = cutlass::const_min(numElementsB, ThreadTileN);
+
+  using LaneMmaShape = cutlass::gemm::GemmShape<LaneM, LaneN, 1>;
+
+  using Policy = cutlass::gemm::warp::MmaSimtPolicy<
+      cutlass::MatrixShape<WarpNumThreadsM, WarpNumThreadsN>,
+      cutlass::layout::RowMajorInterleaved<LaneLayout>,
+      LaneMmaShape>;
+
+  using MmaWarpSimt = warp::LoFMma<
+      WarpShape,
+      ElementA, SmemLayoutA,
+      ElementB, SmemLayoutB,
+      ElementC, LayoutC,
+      Policy>;
+
+  using MmaPolicy = MmaPolicy<
+      MmaWarpSimt,
+      MatrixShape<0, 0>,
+      MatrixShape<0, 0>,
+      WarpCount::kK>;
+};
+
+}  // namespace threadblock
+}  // namespace gemm
+}  // namespace cutlass
+
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Multistage: RowMajor A × RowMajor B  (scalar — A needs transpose)
+// ─────────────────────────────────────────────────────────────────────────
+
+namespace cutlass {
+namespace gemm {
+namespace threadblock {
+
+template <
+    typename Shape_,
+    typename WarpShape_,
+    typename LayoutC_,
+    int Stages,
+    cutlass::arch::CacheOperation::Kind CacheOpA,
+    cutlass::arch::CacheOperation::Kind CacheOpB>
+struct DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::RowMajor,
+    float, layout::RowMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, Stages,
+    arch::OpLoFMultiplyAdd,
+    false, CacheOpA, CacheOpB> {
+
+  using Shape = Shape_;
+  using WarpShape = WarpShape_;
+  using InstructionShape = gemm::GemmShape<1,1,1>;
+  using ElementA = float;
+  using LayoutA = layout::RowMajor;
+  using ElementB = float;
+  using LayoutB = layout::RowMajor;
+  using ElementC = float;
+  using LayoutC = LayoutC_;
+  using OperatorClass = arch::OpClassSimt;
+  static int const kStages = Stages;
+  using Operator = arch::OpLoFMultiplyAdd;
+
+  static cutlass::arch::CacheOperation::Kind const kCacheOpA =
+      cutlass::arch::CacheOperation::Always;
+  static cutlass::arch::CacheOperation::Kind const kCacheOpB =
+      cutlass::arch::CacheOperation::Always;
+
+  using WarpCount = GemmShape<
+      Shape::kM / WarpShape::kM,
+      Shape::kN / WarpShape::kN,
+      Shape::kK / WarpShape::kK>;
+
+  static_assert(
+      !(Shape::kM % WarpShape::kM) && !(Shape::kN % WarpShape::kN),
+      "Threadblock-scoped GEMM should be divisible by warp-scoped GEMM size.");
+
+  static int const kWarpSize = warp::WarpSize<arch::OpClassSimt>::value;
+  static int const kThreads = WarpCount::kCount * kWarpSize;
+
+  static int const kElementsPerAccess = 1;
+
+  using SmemLayoutA = layout::ColumnMajor;
+  using SmemLayoutB = layout::RowMajor;
+
+  // A: K contiguous in global, transpose to M-contiguous smem
+  using IteratorThreadMapA = transform::PitchLinearStripminedThreadMap<
+      layout::PitchLinearShape<Shape::kK, Shape::kM>,
+      kThreads,
+      kElementsPerAccess>;
+
+  using SmemThreadMapA =
+      transform::TransposePitchLinearThreadMapSimt<IteratorThreadMapA>;
+
+  using SmemIteratorA = transform::threadblock::RegularTileAccessIterator<
+      MatrixShape<Shape::kM, Shape::kK>, ElementA, SmemLayoutA, 0,
+      SmemThreadMapA>;
+
+  // B: N contiguous in global, N contiguous in smem — no transpose needed
+  // but still scalar for uniformity with A's thread map
+  using IteratorThreadMapB = transform::PitchLinearStripminedThreadMap<
+      layout::PitchLinearShape<Shape::kN, Shape::kK>,
+      kThreads,
+      kElementsPerAccess>;
+
+  using SmemThreadMapB =
+      transform::TransposePitchLinearThreadMapSimt<IteratorThreadMapB>;
+
+  using SmemIteratorB = transform::threadblock::RegularTileAccessIterator<
+      MatrixShape<Shape::kK, Shape::kN>, ElementB, SmemLayoutB, 1,
+      SmemThreadMapB>;
+
+  static const int WarpNumThreadsM = 4;
+  static const int WarpNumThreadsN = 8;
+  static_assert(
+      !(WarpShape::kM % WarpNumThreadsM) &&
+      !(WarpShape::kN % WarpNumThreadsN),
+      "WarpShape must be divisible by ThreadTile shape.");
+  static const int ThreadTileM = WarpShape::kM / WarpNumThreadsM;
+  static const int ThreadTileN = WarpShape::kN / WarpNumThreadsN;
+  static const int LaneLayout =
+      ThreadTileM > 4 && ThreadTileN > 4 ? 2 : 1;
+  static const int numElementsA = 128 / sizeof_bits<ElementA>::value;
+  static const int numElementsB = 128 / sizeof_bits<ElementB>::value;
+  static const int LaneM = cutlass::const_min(numElementsA, ThreadTileM);
+  static const int LaneN = cutlass::const_min(numElementsB, ThreadTileN);
+
+  static_assert(
+      !((Shape::kK / 32) % LaneM) && !((Shape::kK / 32) % LaneN),
+      "Padding must be divisible by Lane");
+
+  using LaneMmaShape = cutlass::gemm::GemmShape<LaneM, LaneN, 1>;
+
+  using Policy = cutlass::gemm::warp::MmaSimtPolicy<
+      cutlass::MatrixShape<WarpNumThreadsM, WarpNumThreadsN>,
+      cutlass::layout::RowMajorInterleaved<LaneLayout>,
+      LaneMmaShape>;
+
+  using MmaWarpSimt = warp::LoFMma<
+      WarpShape,
+      ElementA, SmemLayoutA,
+      ElementB, SmemLayoutB,
+      ElementC, LayoutC,
+      Policy>;
+
+  using MmaPolicy = MmaPolicy<
+      MmaWarpSimt,
+      MatrixShape<Shape::kK / 32, 0>,
+      MatrixShape<0, Shape::kK / 32>,
+      WarpCount::kK>;
+};
+
+}  // namespace threadblock
+}  // namespace gemm
+}  // namespace cutlass
+
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Multistage: ColumnMajor A × ColumnMajor B  (scalar — B needs transpose)
+// ─────────────────────────────────────────────────────────────────────────
+
+namespace cutlass {
+namespace gemm {
+namespace threadblock {
+
+template <
+    typename Shape_,
+    typename WarpShape_,
+    typename LayoutC_,
+    int Stages,
+    cutlass::arch::CacheOperation::Kind CacheOpA,
+    cutlass::arch::CacheOperation::Kind CacheOpB>
+struct DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::ColumnMajor,
+    float, layout::ColumnMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, Stages,
+    arch::OpLoFMultiplyAdd,
+    false, CacheOpA, CacheOpB> {
+
+  using Shape = Shape_;
+  using WarpShape = WarpShape_;
+  using InstructionShape = gemm::GemmShape<1,1,1>;
+  using ElementA = float;
+  using LayoutA = layout::ColumnMajor;
+  using ElementB = float;
+  using LayoutB = layout::ColumnMajor;
+  using ElementC = float;
+  using LayoutC = LayoutC_;
+  using OperatorClass = arch::OpClassSimt;
+  static int const kStages = Stages;
+  using Operator = arch::OpLoFMultiplyAdd;
+
+  static cutlass::arch::CacheOperation::Kind const kCacheOpA =
+      cutlass::arch::CacheOperation::Always;
+  static cutlass::arch::CacheOperation::Kind const kCacheOpB =
+      cutlass::arch::CacheOperation::Always;
+
+  using WarpCount = GemmShape<
+      Shape::kM / WarpShape::kM,
+      Shape::kN / WarpShape::kN,
+      Shape::kK / WarpShape::kK>;
+
+  static_assert(
+      !(Shape::kM % WarpShape::kM) && !(Shape::kN % WarpShape::kN),
+      "Threadblock-scoped GEMM should be divisible by warp-scoped GEMM size.");
+
+  static int const kWarpSize = warp::WarpSize<arch::OpClassSimt>::value;
+  static int const kThreads = WarpCount::kCount * kWarpSize;
+
+  static int const kElementsPerAccess = 1;
+
+  using SmemLayoutA = layout::ColumnMajor;
+  using SmemLayoutB = layout::RowMajor;
+
+  // A: M contiguous in global, M contiguous in smem — no transpose needed
+  // but still scalar for uniformity with B's thread map
+  using IteratorThreadMapA = transform::PitchLinearStripminedThreadMap<
+      layout::PitchLinearShape<Shape::kM, Shape::kK>,
+      kThreads,
+      kElementsPerAccess>;
+
+  using SmemThreadMapA =
+      transform::TransposePitchLinearThreadMapSimt<IteratorThreadMapA>;
+
+  using SmemIteratorA = transform::threadblock::RegularTileAccessIterator<
+      MatrixShape<Shape::kM, Shape::kK>, ElementA, SmemLayoutA, 0,
+      SmemThreadMapA>;
+
+  // B: K contiguous in global, transpose to N-contiguous smem
+  using IteratorThreadMapB = transform::PitchLinearStripminedThreadMap<
+      layout::PitchLinearShape<Shape::kK, Shape::kN>,
+      kThreads,
+      kElementsPerAccess>;
+
+  using SmemThreadMapB =
+      transform::TransposePitchLinearThreadMapSimt<IteratorThreadMapB>;
+
+  using SmemIteratorB = transform::threadblock::RegularTileAccessIterator<
+      MatrixShape<Shape::kK, Shape::kN>, ElementB, SmemLayoutB, 1,
+      SmemThreadMapB>;
+
+  static const int WarpNumThreadsM = 4;
+  static const int WarpNumThreadsN = 8;
+  static_assert(
+      !(WarpShape::kM % WarpNumThreadsM) &&
+      !(WarpShape::kN % WarpNumThreadsN),
+      "WarpShape must be divisible by ThreadTile shape.");
+  static const int ThreadTileM = WarpShape::kM / WarpNumThreadsM;
+  static const int ThreadTileN = WarpShape::kN / WarpNumThreadsN;
+  static const int LaneLayout =
+      ThreadTileM > 4 && ThreadTileN > 4 ? 2 : 1;
+  static const int numElementsA = 128 / sizeof_bits<ElementA>::value;
+  static const int numElementsB = 128 / sizeof_bits<ElementB>::value;
+  static const int LaneM = cutlass::const_min(numElementsA, ThreadTileM);
+  static const int LaneN = cutlass::const_min(numElementsB, ThreadTileN);
+
+  static_assert(
+      !((Shape::kK / 32) % LaneM) && !((Shape::kK / 32) % LaneN),
+      "Padding must be divisible by Lane");
+
+  using LaneMmaShape = cutlass::gemm::GemmShape<LaneM, LaneN, 1>;
+
+  using Policy = cutlass::gemm::warp::MmaSimtPolicy<
+      cutlass::MatrixShape<WarpNumThreadsM, WarpNumThreadsN>,
+      cutlass::layout::RowMajorInterleaved<LaneLayout>,
+      LaneMmaShape>;
+
+  using MmaWarpSimt = warp::LoFMma<
+      WarpShape,
+      ElementA, SmemLayoutA,
+      ElementB, SmemLayoutB,
+      ElementC, LayoutC,
+      Policy>;
+
+  using MmaPolicy = MmaPolicy<
+      MmaWarpSimt,
+      MatrixShape<Shape::kK / 32, 0>,
+      MatrixShape<0, Shape::kK / 32>,
+      WarpCount::kK>;
+};
+
+}  // namespace threadblock
+}  // namespace gemm
+}  // namespace cutlass
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  2-stage specializations for ALL FOUR combos
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  GEMM runners for ALL FOUR layout combos
+//
+//  All preserve accum_mant_bits, rounding_mode, stochastic_rounding_bits.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Runner: RowMajor A × ColumnMajor B (scalar, alignment 1)
+template<int TbM, int TbN, int TbK,
+         int WpM, int WpN, int WpK,
+         int Stages>
+float run_lof_gemm_multistage_rc(
+    int M, int N, int K,
+    float alpha, float beta,
+    const float* dA, const float* dB, const float* dC, float* dD,
+    int accum_mant_bits = 0,
+    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
+    int stochastic_rounding_bits = 0,
+    int reps = 20)
+{
+  using Gemm = cutlass::gemm::device::Gemm<
+      float, cutlass::layout::RowMajor,
+      float, cutlass::layout::ColumnMajor,
+      float, cutlass::layout::RowMajor,
+      float,
+      cutlass::arch::OpClassSimt,
+      cutlass::arch::Sm80,
+      cutlass::gemm::GemmShape<TbM, TbN, TbK>,
+      cutlass::gemm::GemmShape<WpM, WpN, WpK>,
+      cutlass::gemm::GemmShape<1, 1, 1>,
+      cutlass::epilogue::thread::LinearCombination<float, 1, float, float>,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+      Stages,
+      1, 1, false,
+      cutlass::arch::OpLoFMultiplyAdd>;
+
+  typename Gemm::Arguments args(
+      {M, N, K},
+      {dA, K}, {dB, K}, {dC, N}, {dD, N},
+      {alpha, beta},
+      1,
+      nullptr, nullptr, nullptr,
+      accum_mant_bits,
+      rounding_mode,
+      stochastic_rounding_bits);
+
+  Gemm op;
+  if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
+
+  size_t ws = Gemm::get_workspace_size(args);
+  void* dw = nullptr;
+  if (ws) CUDA_CHECK(cudaMalloc(&dw, ws));
+
+  if (op.initialize(args, dw) != cutlass::Status::kSuccess) {
+    if (dw) cudaFree(dw);
+    return -1.f;
+  }
+
+  op();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+  }
+  cudaDeviceSynchronize();
+  err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("Kernel execution failed: %s\n", cudaGetErrorString(err));
+  }
+
+  if (dw) cudaFree(dw);
+  return 0.0;
+}
+
+
+// Runner: ColumnMajor A × RowMajor B  ★ FASTEST (vec4, alignment 4)
+template<int TbM, int TbN, int TbK,
+         int WpM, int WpN, int WpK,
+         int Stages>
+float run_lof_gemm_multistage_cr(
+    int M, int N, int K,
+    float alpha, float beta,
+    const float* dA, const float* dB, const float* dC, float* dD,
+    int accum_mant_bits = 0,
+    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
+    int stochastic_rounding_bits = 0,
+    int reps = 20)
+{
+  using Gemm = cutlass::gemm::device::Gemm<
+      float, cutlass::layout::ColumnMajor,
+      float, cutlass::layout::RowMajor,
+      float, cutlass::layout::RowMajor,
+      float,
+      cutlass::arch::OpClassSimt,
+      cutlass::arch::Sm80,
+      cutlass::gemm::GemmShape<TbM, TbN, TbK>,
+      cutlass::gemm::GemmShape<WpM, WpN, WpK>,
+      cutlass::gemm::GemmShape<1, 1, 1>,
+      cutlass::epilogue::thread::LinearCombination<float, 1, float, float>,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+      Stages,
+      4, 4, false,
+      cutlass::arch::OpLoFMultiplyAdd>;
+
+  typename Gemm::Arguments args(
+      {M, N, K},
+      {dA, M}, {dB, N}, {dC, N}, {dD, N},
+      {alpha, beta},
+      1,
+      nullptr, nullptr, nullptr,
+      accum_mant_bits,
+      rounding_mode,
+      stochastic_rounding_bits);
+
+  Gemm op;
+  if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
+
+  size_t ws = Gemm::get_workspace_size(args);
+  void* dw = nullptr;
+  if (ws) CUDA_CHECK(cudaMalloc(&dw, ws));
+
+  if (op.initialize(args, dw) != cutlass::Status::kSuccess) {
+    if (dw) cudaFree(dw);
+    return -1.f;
+  }
+
+  op();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+  }
+  cudaDeviceSynchronize();
+  err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("Kernel execution failed: %s\n", cudaGetErrorString(err));
+  }
+
+  if (dw) cudaFree(dw);
+  return 0.0;
+}
+
+
+// Runner: RowMajor A × RowMajor B (scalar, alignment 1)
+template<int TbM, int TbN, int TbK,
+         int WpM, int WpN, int WpK,
+         int Stages>
+float run_lof_gemm_multistage_rr(
+    int M, int N, int K,
+    float alpha, float beta,
+    const float* dA, const float* dB, const float* dC, float* dD,
+    int accum_mant_bits = 0,
+    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
+    int stochastic_rounding_bits = 0,
+    int reps = 20)
+{
+  using Gemm = cutlass::gemm::device::Gemm<
+      float, cutlass::layout::RowMajor,
+      float, cutlass::layout::RowMajor,
+      float, cutlass::layout::RowMajor,
+      float,
+      cutlass::arch::OpClassSimt,
+      cutlass::arch::Sm80,
+      cutlass::gemm::GemmShape<TbM, TbN, TbK>,
+      cutlass::gemm::GemmShape<WpM, WpN, WpK>,
+      cutlass::gemm::GemmShape<1, 1, 1>,
+      cutlass::epilogue::thread::LinearCombination<float, 4, float, float>,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+      Stages,
+      1, 1, false,
+      cutlass::arch::OpLoFMultiplyAdd>;
+
+  typename Gemm::Arguments args(
+      {M, N, K},
+      {dA, K}, {dB, N}, {dC, N}, {dD, N},
+      {alpha, beta},
+      1,
+      nullptr, nullptr, nullptr,
+      accum_mant_bits,
+      rounding_mode,
+      stochastic_rounding_bits);
+
+  Gemm op;
+  if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
+
+  size_t ws = Gemm::get_workspace_size(args);
+  void* dw = nullptr;
+  if (ws) CUDA_CHECK(cudaMalloc(&dw, ws));
+
+  if (op.initialize(args, dw) != cutlass::Status::kSuccess) {
+    if (dw) cudaFree(dw);
+    return -1.f;
+  }
+
+  op();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+  }
+  cudaDeviceSynchronize();
+  err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("Kernel execution failed: %s\n", cudaGetErrorString(err));
+  }
+
+  if (dw) cudaFree(dw);
+  return 0.0;
+}
+
+
+// Runner: ColumnMajor A × ColumnMajor B (scalar, alignment 1)
+template<int TbM, int TbN, int TbK,
+         int WpM, int WpN, int WpK,
+         int Stages>
+float run_lof_gemm_multistage_cc(
+    int M, int N, int K,
+    float alpha, float beta,
+    const float* dA, const float* dB, const float* dC, float* dD,
+    int accum_mant_bits = 0,
+    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
+    int stochastic_rounding_bits = 0,
+    int reps = 20)
+{
+  using Gemm = cutlass::gemm::device::Gemm<
+      float, cutlass::layout::ColumnMajor,
+      float, cutlass::layout::ColumnMajor,
+      float, cutlass::layout::RowMajor,
+      float,
+      cutlass::arch::OpClassSimt,
+      cutlass::arch::Sm80,
+      cutlass::gemm::GemmShape<TbM, TbN, TbK>,
+      cutlass::gemm::GemmShape<WpM, WpN, WpK>,
+      cutlass::gemm::GemmShape<1, 1, 1>,
+      cutlass::epilogue::thread::LinearCombination<float, 4, float, float>,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+      Stages,
+      1, 1, false,
+      cutlass::arch::OpLoFMultiplyAdd>;
+
+  typename Gemm::Arguments args(
+      {M, N, K},
+      {dA, M}, {dB, K}, {dC, N}, {dD, N},
+      {alpha, beta},
+      1,
+      nullptr, nullptr, nullptr,
+      accum_mant_bits,
+      rounding_mode,
+      stochastic_rounding_bits);
+
+  Gemm op;
+  if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
+
+  size_t ws = Gemm::get_workspace_size(args);
+  void* dw = nullptr;
+  if (ws) CUDA_CHECK(cudaMalloc(&dw, ws));
+
+  if (op.initialize(args, dw) != cutlass::Status::kSuccess) {
+    if (dw) cudaFree(dw);
+    return -1.f;
+  }
+
+  op();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+  }
+  cudaDeviceSynchronize();
+  err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      printf("Kernel execution failed: %s\n", cudaGetErrorString(err));
+  }
+
+  if (dw) cudaFree(dw);
+  return 0.0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  2-stage specializations — use Base typedef, NOT public inheritance
+//
+//  Replace your three broken 2-stage specializations with these.
+//  Same pattern as your original 2-stage RowMajor×ColumnMajor.
+// ═══════════════════════════════════════════════════════════════════════════
+
+namespace cutlass {
+namespace gemm {
+namespace threadblock {
+
+// ─────────────────────────────────────────────────────────────────────────
+//  2-stage: ColumnMajor A × RowMajor B
+// ─────────────────────────────────────────────────────────────────────────
+template <
+  typename Shape_,
+  typename WarpShape_,
+  typename LayoutC_>
+struct DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::ColumnMajor,
+    float, layout::RowMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, 2,
+    arch::OpLoFMultiplyAdd,
+    false,
+    cutlass::arch::CacheOperation::Global,
+    cutlass::arch::CacheOperation::Global,
+    ComplexTransform::kNone,
+    ComplexTransform::kNone,
+    false> {
+
+  using Shape = Shape_;
+  using WarpShape = WarpShape_;
+  using InstructionShape = gemm::GemmShape<1,1,1>;
+  using ElementA = float;
+  using LayoutA = layout::ColumnMajor;
+  using ElementB = float;
+  using LayoutB = layout::RowMajor;
+  using ElementC = float;
+  using LayoutC = LayoutC_;
+  using OperatorClass = arch::OpClassSimt;
+  static int const kStages = 2;
+  using Operator = arch::OpLoFMultiplyAdd;
+
+  using Base = DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::ColumnMajor,
+    float, layout::RowMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, 2,
+    arch::OpLoFMultiplyAdd>;
+
+  using WarpCount = typename Base::WarpCount;
+  using SmemLayoutA = typename Base::SmemLayoutA;
+  using SmemLayoutB = typename Base::SmemLayoutB;
+  using IteratorThreadMapA = typename Base::IteratorThreadMapA;
+  using IteratorThreadMapB = typename Base::IteratorThreadMapB;
+  using SmemIteratorA = typename Base::SmemIteratorA;
+  using SmemIteratorB = typename Base::SmemIteratorB;
+  static int const kThreads = Base::kThreads;
+
+  using MmaWarpSimt = warp::LoFMma<
+    WarpShape, ElementA, SmemLayoutA,
+    ElementB, SmemLayoutB, ElementC, LayoutC,
+    typename Base::MmaWarpSimt::Policy
+  >;
+
+  using MmaPolicy = MmaPolicy<
+    MmaWarpSimt,
+    MatrixShape<0, 0>,
+    MatrixShape<0, 0>,
+    WarpCount::kK>;
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────
+//  2-stage: RowMajor A × RowMajor B
+// ─────────────────────────────────────────────────────────────────────────
+template <
+  typename Shape_,
+  typename WarpShape_,
+  typename LayoutC_>
+struct DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::RowMajor,
+    float, layout::RowMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, 2,
+    arch::OpLoFMultiplyAdd,
+    false,
+    cutlass::arch::CacheOperation::Global,
+    cutlass::arch::CacheOperation::Global,
+    ComplexTransform::kNone,
+    ComplexTransform::kNone,
+    false> {
+
+  using Shape = Shape_;
+  using WarpShape = WarpShape_;
+  using InstructionShape = gemm::GemmShape<1,1,1>;
+  using ElementA = float;
+  using LayoutA = layout::RowMajor;
+  using ElementB = float;
+  using LayoutB = layout::RowMajor;
+  using ElementC = float;
+  using LayoutC = LayoutC_;
+  using OperatorClass = arch::OpClassSimt;
+  static int const kStages = 2;
+  using Operator = arch::OpLoFMultiplyAdd;
+
+  using Base = DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::RowMajor,
+    float, layout::RowMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, 2,
+    arch::OpLoFMultiplyAdd>;
+
+  using WarpCount = typename Base::WarpCount;
+  using SmemLayoutA = typename Base::SmemLayoutA;
+  using SmemLayoutB = typename Base::SmemLayoutB;
+  using IteratorThreadMapA = typename Base::IteratorThreadMapA;
+  using IteratorThreadMapB = typename Base::IteratorThreadMapB;
+  using SmemIteratorA = typename Base::SmemIteratorA;
+  using SmemIteratorB = typename Base::SmemIteratorB;
+  static int const kThreads = Base::kThreads;
+
+  using MmaWarpSimt = warp::LoFMma<
+    WarpShape, ElementA, SmemLayoutA,
+    ElementB, SmemLayoutB, ElementC, LayoutC,
+    typename Base::MmaWarpSimt::Policy
+  >;
+
+  using MmaPolicy = MmaPolicy<
+    MmaWarpSimt,
+    MatrixShape<0, 0>,
+    MatrixShape<0, 0>,
+    WarpCount::kK>;
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────
+//  2-stage: ColumnMajor A × ColumnMajor B
+// ─────────────────────────────────────────────────────────────────────────
+template <
+  typename Shape_,
+  typename WarpShape_,
+  typename LayoutC_>
+struct DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::ColumnMajor,
+    float, layout::ColumnMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, 2,
+    arch::OpLoFMultiplyAdd,
+    false,
+    cutlass::arch::CacheOperation::Global,
+    cutlass::arch::CacheOperation::Global,
+    ComplexTransform::kNone,
+    ComplexTransform::kNone,
+    false> {
+
+  using Shape = Shape_;
+  using WarpShape = WarpShape_;
+  using InstructionShape = gemm::GemmShape<1,1,1>;
+  using ElementA = float;
+  using LayoutA = layout::ColumnMajor;
+  using ElementB = float;
+  using LayoutB = layout::ColumnMajor;
+  using ElementC = float;
+  using LayoutC = LayoutC_;
+  using OperatorClass = arch::OpClassSimt;
+  static int const kStages = 2;
+  using Operator = arch::OpLoFMultiplyAdd;
+
+  using Base = DefaultMmaCore<
+    Shape_, WarpShape_, gemm::GemmShape<1,1,1>,
+    float, layout::ColumnMajor,
+    float, layout::ColumnMajor,
+    float, LayoutC_,
+    arch::OpClassSimt, 2,
+    arch::OpLoFMultiplyAdd>;
+
+  using WarpCount = typename Base::WarpCount;
+  using SmemLayoutA = typename Base::SmemLayoutA;
+  using SmemLayoutB = typename Base::SmemLayoutB;
+  using IteratorThreadMapA = typename Base::IteratorThreadMapA;
+  using IteratorThreadMapB = typename Base::IteratorThreadMapB;
+  using SmemIteratorA = typename Base::SmemIteratorA;
+  using SmemIteratorB = typename Base::SmemIteratorB;
+  static int const kThreads = Base::kThreads;
+
+  using MmaWarpSimt = warp::LoFMma<
+    WarpShape, ElementA, SmemLayoutA,
+    ElementB, SmemLayoutB, ElementC, LayoutC,
+    typename Base::MmaWarpSimt::Policy
+  >;
+
+  using MmaPolicy = MmaPolicy<
+    MmaWarpSimt,
+    MatrixShape<0, 0>,
+    MatrixShape<0, 0>,
+    WarpCount::kK>;
+};
+
+}  // namespace threadblock
+}  // namespace gemm
+}  // namespace cutlass
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  GEMM runners
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Stages == 2: device::Gemm works (our DefaultMmaCore spec is picked up)
+template<int TbM,int TbN,int TbK, int WpM,int WpN,int WpK>
+float run_lof_gemm_2stg(int M,int N,int K,float alpha,float beta,
+    const float* dA,const float* dB,const float* dC,float* dD,int reps=20)
+{
+  using Gemm = cutlass::gemm::device::Gemm<
+    float, cutlass::layout::RowMajor,
+    float, cutlass::layout::ColumnMajor,
+    float, cutlass::layout::RowMajor,
+    float,
+    cutlass::arch::OpClassSimt,
+    cutlass::arch::Sm80,
+    cutlass::gemm::GemmShape<TbM,TbN,TbK>,
+    cutlass::gemm::GemmShape<WpM,WpN,WpK>,
+    cutlass::gemm::GemmShape<1,1,1>,
+    cutlass::epilogue::thread::LinearCombination<float,4,float,float>,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+    2, 1, 1, false,
+    cutlass::arch::OpLoFMultiplyAdd>;
+
+  typename Gemm::Arguments args({M,N,K},{dA,K},{dB,K},{dC,N},{dD,N},{alpha,beta});
+  Gemm op;
+  if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
+  size_t ws = Gemm::get_workspace_size(args);
+  void* dw = nullptr;
+  if (ws) CUDA_CHECK(cudaMalloc(&dw, ws));
+  if (op.initialize(args, dw) != cutlass::Status::kSuccess){ if(dw)cudaFree(dw); return -1.f; }
+  op(); CUDA_CHECK(cudaDeviceSynchronize());
+  // Timer t; t.start();
+  // for(int i=0;i<reps;i++) op();
+  // float ms = t.stop() / reps;
+  // if(dw) cudaFree(dw);
+  return 0.0f;
+}
+
+
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -565,8 +1449,8 @@ float run_lof_gemm_multistage(
       cutlass::gemm::GemmShape<TbM, TbN, TbK>,
       cutlass::gemm::GemmShape<WpM, WpN, WpK>,
       cutlass::gemm::GemmShape<1, 1, 1>,
-      cutlass::epilogue::thread::LinearCombination<float, 1, float, float>,
-      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+      cutlass::epilogue::thread::LinearCombination<float, 4, float, float>,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
       Stages,                                   // <-- multistage!
       1, 1, false,
       cutlass::arch::OpLoFMultiplyAdd>;
@@ -700,13 +1584,13 @@ template <
     typename MatrixD_,
     int TbM = 128,
     int TbN = 128,
-    int TbK = 8,
+    int TbK = 16,
     int WpM = 32,
-    int WpN = 64,
-    int WpK = 8,
+    int WpN = 32,
+    int WpK = 16,
     int Stages = 3,
     bool SplitKSerial = false,
-    typename Swizzle = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>>
+    typename Swizzle = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>>
 class Gemm {
 public:
 

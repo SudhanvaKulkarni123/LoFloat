@@ -3,8 +3,8 @@ set -e
 
 # ---- 1. C++ headers via CMake ----
 echo "==> Installing C++ headers..."
-cmake -B build
-cmake --build build   
+cmake -B build -DCUDAToolkit_ROOT=/usr/local/cuda-13.2
+cmake --build build
 
 # ---- 2. Python/Torch extension ----
 echo "==> Installing Python/Torch extension..."
