@@ -63,7 +63,7 @@ def create_p3109_params(k, p, is_signed=True, saturating=True, bias=None):
         mantissa_bits,
         bias,
         inf_behavior=inf_behavior,
-        nan_behavior=lof.NaNBehavior.QuietNaN,
+        nan_behavior=lof.NaNBehavior._3109,
         signedness=lof.Signedness.Signed if is_signed else lof.Signedness.Unsigned,
         is_inf_checker=P3109_InfChecker(k, is_signed, saturating),
         is_nan_checker=P3109_NaNChecker(k, is_signed)
@@ -102,7 +102,7 @@ def create_half_params():
         10,
         15,
         inf_behavior=lof.InfBehavior.Extended,
-        nan_behavior=lof.NaNBehavior.QuietNaN,
+        nan_behavior=lof.NaNBehavior._3109,
         signedness=lof.Signedness.Signed,
         is_inf_checker=HalfPrecisionInfChecker(),
         is_nan_checker=HalfPrecisionNaNChecker()
@@ -140,7 +140,7 @@ def create_single_params():
         23,          
         127,          
         inf_behavior=lof.InfBehavior.Extended,
-        nan_behavior=lof.NaNBehavior.QuietNaN,
+        nan_behavior=lof.NaNBehavior._3109,
         signedness=lof.Signedness.Signed,
         is_inf_checker=SinglePrecisionInfChecker(),
         is_nan_checker=SinglePrecisionNaNChecker()

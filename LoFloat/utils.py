@@ -109,6 +109,18 @@ def set_saturation_modes(model, activation_sat: dict, weight_sat: dict, bias_sat
 
         module.set_saturation_mode(act_sat, w_sat, b_sat)
 
+def set_accumulation_precisions(model, accum_dict : dict):
+
+    for name, module in model.named_modules():
+        accum_bits = accum_dict.get(name)
+        if not isinstance(module, (lof.LoF_Linear, lof.LoF_Conv2d)):
+            continue
+        if accum_bits <= 0 or accum_bits > 23 :
+            print(f"[set_accumulation_precisions] skipping '{name}': invalid mantissa bits {accum_bits}")
+            continue
+        
+        module.set_accumulation_precision(accum_bits)
+
 def set_all_to_half(model):
     half_params = lof.create_half_params()
     for name, module in model.named_children():
@@ -199,6 +211,7 @@ def record_formats(model):
             act_format = name_type(module.act_params.total_bits, module.act_params.mantissa_bits)
             weight_format = name_type(module.weight_params.total_bits, module.weight_params.mantissa_bits)
             bias_format = name_type(module.bias_params.total_bits, module.bias_params.mantissa_bits)
+            accum_format = name_type(9 + module.accum_mant_bits, 1 + module.accum_mant_bits)
 
             if isinstance(module, lof.LoF_Linear):
                 num_flops_of_layer = 2 * module.in_features * module.out_features
@@ -210,7 +223,7 @@ def record_formats(model):
                     * out_h * out_w // module.groups
                 )
 
-            format_key = (act_format, weight_format, bias_format)
+            format_key = (act_format, weight_format, bias_format, accum_format)
             if format_key not in formats_flops:
                 formats_flops[format_key] = 0
             formats_flops[format_key] += num_flops_of_layer
@@ -288,7 +301,7 @@ def record_formats(model):
                 num_flops_of_layer = 0  # No FLOPs at inference
 
             if num_flops_of_layer > 0:
-                fp32_key = ("fp32", "fp32", "fp32")
+                fp32_key = ("fp32", "fp32", "fp32", "fp32")
                 if fp32_key not in formats_flops:
                     formats_flops[fp32_key] = 0
                 formats_flops[fp32_key] += num_flops_of_layer

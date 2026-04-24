@@ -5,6 +5,7 @@
 #include "lo_float.h"
 #include "Lof_kernels.h"
 #include "cutlass_gemms.cuh"
+#include "LUT_apprx.h"
 
 
 namespace cg = cooperative_groups;
@@ -32,8 +33,8 @@ torch::Tensor LoF_gemm(
     torch::Tensor A,
     torch::Tensor B,
     int accum_mant_bits,
-    Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven,
-    int stochastic_rounding_bits = 0)
+    Rounding_Mode round_mode,
+    int stochastic_rounding_bits)
 {
     // ── Dimension checks ────────────────────────────────────────────────
     TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "LoF_gemm: A and B must be 2-D");
@@ -41,6 +42,9 @@ torch::Tensor LoF_gemm(
         "LoF_gemm: A.cols (", A.size(1), ") != B.rows (", B.size(0), ")");
     TORCH_CHECK(A.scalar_type() == torch::kFloat32 && B.scalar_type() == torch::kFloat32,
         "LoF_gemm: only float32 inputs are supported");
+    TORCH_CHECK(A.is_cuda() && B.is_cuda(),
+            "LoF_gemm requires CUDA tensors (A on ", A.device(),
+            ", B on ", B.device(), ")");
 
     const int M = static_cast<int>(A.size(0));
     const int K = static_cast<int>(A.size(1));
@@ -55,12 +59,12 @@ torch::Tensor LoF_gemm(
     float* d_D = C.data_ptr<float>();
 
     using MatA = lo_float::Matrix<float, int, lo_float::RowMajor>;
-    using MatB = lo_float::Matrix<float, int, lo_float::ColMajor>;
+    using MatB = lo_float::Matrix<float, int, lo_float::RowMajor>;
     using MatC = lo_float::Matrix<float, int, lo_float::RowMajor>;
     using MatD = lo_float::Matrix<float, int, lo_float::RowMajor>;
 
     MatA matA(d_A, M, K, /*ld=*/K);
-    MatB matB(d_B, K, N, /*ld=*/K);   // ColMajor: ld = number of rows
+    MatB matB(d_B, K, N, /*ld=*/N);   // RowMajor: ld = number of columns
     MatC matC(d_C, M, N, /*ld=*/N);
     MatD matD(d_D, M, N, /*ld=*/N);
 
@@ -74,11 +78,31 @@ torch::Tensor LoF_gemm(
     // TORCH_CHECK(status == lo_float::GemmStatus::Success,
     //     "LoF_gemm: kernel launch failed (status=", static_cast<int>(status), ")");
 
-    (cudaDeviceSynchronize());
+    cudaError_t sync_err = cudaDeviceSynchronize();
+    TORCH_CHECK(sync_err == cudaSuccess,
+    "LoF_gemm sync: ", cudaGetErrorString(sync_err));
 
     return C;
 }
 
+
+template <typename T, class Reducer, class ApproxFn>
+__global__ void silu_kernel(const T* __restrict__ in,
+                            T* __restrict__ out,
+                            int64_t n,
+                            FuncApprox<Reducer, ApproxFn> approx) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) out[idx] = approx(in[idx]);
+}
+
+template <typename T>
+void silu_lut(const T* in, T* out, int64_t n) {
+    silu_kernel<<<(n + 255) / 256, 256>>>(in, out, n, g_silu);
+}
+
+template void silu_lut<float>    (const float*,     float*,     int64_t);
+template void silu_lut<double>   (const double*,    double*,    int64_t);
+template void silu_lut<c10::Half>(const c10::Half*, c10::Half*, int64_t);
 
 
 template void round_mantissa<c10::Half>(const c10::Half*, c10::Half*, int64_t, int, Rounding_Mode, int);

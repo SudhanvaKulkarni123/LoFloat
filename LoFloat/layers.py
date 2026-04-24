@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,41 +47,45 @@ def exp_mant_quantize(tensor, exp_bits, mantissa_bits):
         return tensor
     return STERound.apply(tensor, lof.create_p3109_params(exp_bits + mantissa_bits + 1, mantissa_bits + 1, True, True))
 
-
-
-# ─── Helper: batched lof_gemm over leading dims ────────────────────────
 def _lof_gemm_2d(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits):
-    """Wrapper for 2-D inputs; reshapes (..., M, K) x (..., K, N) → (..., M, N)."""
-    if A.dim() == 2 and B.dim() == 2:
-        return lof.lof_gemm(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
+    """Wrapper for (..., M, K) x (..., K, N) -> (..., M, N).
 
-    # Batched case – flatten leading dims, loop, restack
+    Assumes the binary expects both A and B as contiguous RowMajor.
+    """
+    if A.dim() == 2 and B.dim() == 2:
+        return lof.lof_gemm(
+            A.contiguous(), B.contiguous(),
+            accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+        )
+
     batch_shape = A.shape[:-2]
     M, K = A.shape[-2], A.shape[-1]
     N = B.shape[-1]
-    A_flat = A.reshape(-1, M, K)
-    B_flat = B.reshape(-1, K, N)
+    A_flat = A.reshape(-1, M, K).contiguous()
+    B_flat = B.reshape(-1, K, N).contiguous()
+
     out = torch.stack([
-        lof.lof_gemm(A_flat[i], B_flat[i],
-                      accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
+        lof.lof_gemm(
+            A_flat[i], B_flat[i],         # already contiguous, indexing preserves that
+            accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+        )
         for i in range(A_flat.shape[0])
     ])
     return out.reshape(*batch_shape, M, N)
 
 
 def _lof_linear(x, weight, bias, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits):
-    """Drop-in for F.linear using lof_gemm.  x: (..., K), weight: (N, K) → (..., N)."""
+    """Drop-in for F.linear using lof_gemm.  x: (..., K), weight: (N, K) -> (..., N)."""
     leading = x.shape[:-1]
     K = x.shape[-1]
-    x_2d = x.reshape(-1, K)                          # (B, K)
-    wt = weight.t().contiguous()                      # (K, N)
+    x_2d = x.reshape(-1, K).contiguous()            # (B, K) RowMajor
+    wt   = weight.t().contiguous()                   # (K, N) RowMajor (actual copy)
     out = lof.lof_gemm(x_2d, wt,
-                        accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
-    out = out.reshape(*leading, weight.shape[0])      # (..., N)
+                       accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
+    out = out.reshape(*leading, weight.shape[0])     # (..., N)
     if bias is not None:
         out = out + bias
     return out
-
 
 # ═══════════════════════════════════════════════════════════════════════
 #  LoF_Linear
@@ -230,6 +235,9 @@ class LoF_Linear(nn.Module):
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
         self.bias_params = lof.create_p3109_params(self.bias_params.total_bits, self.bias_params.mantissa_bits, True, bias_sat)
+    
+    def set_accumulation_precision(self, accum_mant_bits):
+        self.accum_mant_bits = accum_mant_bits
 
     def extra_repr(self):
         return (
@@ -460,6 +468,9 @@ class LoF_Conv2d(nn.Module):
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
         self.bias_params = lof.create_p3109_params(self.bias_params.total_bits, self.bias_params.mantissa_bits, True, bias_sat)
+    
+    def set_accumulation_precision(self, accum_mant_bits):
+        self.accum_mant_bits = accum_mant_bits
 
     def extra_repr(self):
         return (
@@ -476,6 +487,115 @@ class LoF_Conv2d(nn.Module):
         )
 
 
+
+def _make_scale_buffer(scale, num_features):
+    if isinstance(scale, torch.Tensor):
+        s = scale.detach().float().reshape(-1)
+        if s.numel() == 1:
+            return torch.full((num_features,), s.item())
+        if s.numel() != num_features:
+            raise ValueError(
+                f"scale tensor must have 1 or {num_features} elements; got {s.numel()}"
+            )
+        return s.clone()
+    return torch.full((num_features,), float(scale))
+
+
+class L1BatchNorm(nn.Module):
+    """BatchNorm variant using mean absolute deviation (L1) instead of std dev (L2).
+
+    scale is a per-channel buffer of shape [num_features]. Default sqrt(2/pi)
+    broadcasts to all channels (the Gaussian-assumption constant). Passing a
+    calibrated per-channel MAD/std ratio makes pre-affine output match BN2d's
+    (x-mean)/std regardless of input distribution.
+    """
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True,
+                 scale=math.sqrt(2 / math.pi)):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        if affine:
+            self.weight = nn.Parameter(torch.ones(num_features))
+            self.bias = nn.Parameter(torch.zeros(num_features))
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_mad", torch.ones(num_features))
+        self.register_buffer("scale", _make_scale_buffer(scale, num_features))
+
+    def forward(self, x):
+        reduce_dims = [0] + list(range(2, x.dim()))
+        view_shape  = [1, -1] + [1] * (x.dim() - 2)
+
+        if self.training:
+            mean = x.mean(dim=reduce_dims)
+            x_centered = x - mean.view(view_shape)
+            mad = x_centered.abs().mean(dim=reduce_dims)
+            with torch.no_grad():
+                self.running_mean.mul_(1 - self.momentum).add_(mean.detach(), alpha=self.momentum)
+                self.running_mad.mul_(1 - self.momentum).add_(mad.detach(),  alpha=self.momentum)
+        else:
+            mean = self.running_mean
+            mad  = self.running_mad
+            x_centered = x - mean.view(view_shape)
+
+        out = x_centered / (mad.view(view_shape) + self.eps)
+        out = out * self.scale.view(view_shape)
+        if self.affine:
+            out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
+        return out
+
+
+class LinfBatchNorm(nn.Module):
+    """BatchNorm variant using max absolute deviation (L-infinity) instead of std.
+
+    scale is a per-channel buffer of shape [num_features]. Default 1.0 recovers
+    the previous behavior (no scale). Passing a calibrated maxdev/std ratio
+    makes pre-affine output match BN2d's (x-mean)/std. There is no distribution-
+    invariant constant default (E[max|X_i - mu|] grows with n), so when scale
+    is left at 1.0 the affine weight absorbs the magnitude difference.
+    """
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True,
+                 scale=1.0):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        if affine:
+            self.weight = nn.Parameter(torch.ones(num_features))
+            self.bias = nn.Parameter(torch.zeros(num_features))
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_maxdev", torch.ones(num_features))
+        self.register_buffer("scale", _make_scale_buffer(scale, num_features))
+
+    def forward(self, x):
+        reduce_dims = [0] + list(range(2, x.dim()))
+        view_shape  = [1, -1] + [1] * (x.dim() - 2)
+
+        if self.training:
+            mean = x.mean(dim=reduce_dims)
+            x_centered = x - mean.view(view_shape)
+            maxdev = x_centered.abs().amax(dim=reduce_dims)
+            with torch.no_grad():
+                self.running_mean.mul_(1 - self.momentum).add_(mean.detach(),   alpha=self.momentum)
+                self.running_maxdev.mul_(1 - self.momentum).add_(maxdev.detach(), alpha=self.momentum)
+        else:
+            mean   = self.running_mean
+            maxdev = self.running_maxdev
+            x_centered = x - mean.view(view_shape)
+
+        out = x_centered / (maxdev.view(view_shape) + self.eps)
+        out = out * self.scale.view(view_shape)
+        if self.affine:
+            out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
+        return out
 # ═══════════════════════════════════════════════════════════════════════
 #  LoF_MultiHeadAttention
 # ═══════════════════════════════════════════════════════════════════════
@@ -694,6 +814,9 @@ class LoF_MultiHeadAttention(nn.Module):
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
         self.bias_params = lof.create_p3109_params(self.bias_params.total_bits, self.bias_params.mantissa_bits, True, bias_sat)
+    
+    def set_accumulation_precision(self, accum_mant_bits):
+        self.accum_mant_bits = accum_mant_bits
 
     def extra_repr(self):
         return (

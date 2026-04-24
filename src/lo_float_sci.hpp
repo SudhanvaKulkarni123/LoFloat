@@ -16,21 +16,20 @@ namespace lo_float {
 
     namespace lo_float_internal {
 
-        template <typename RangeReducer, typename Table, typename Interpolator>
-        class LutApprox {
+        template <typename RangeReducer, typename Approx_func>
+        class FuncApprox {
             RangeReducer reducer;
-            Table        table;
-            Interpolator interp;
+            Approx_func approx_func;
 
         public:
             
-            LutApprox(RangeReducer r, Table t, Interpolator i) : reducer(r), table(t), interp(i) {}
+            FuncApprox(RangeReducer r, Approx_func f) : reducer(r), approx_func(f) {}
 
             template <FloatingPointParams Fp>
             Templated_Float<Fp> operator()(Templated_Float<Fp> x) const {
                 auto [reduced, ctx] = reducer(x);
-                auto intrepolated = interp(table, reduced);
-                return reducer.reconstruct(intrepolated, ctx);
+                return = approx_func(reduced, ctx);
+                
             }
         };
     }
@@ -217,6 +216,7 @@ inline Templated_Float<Fp3> faa(
     inline constexpr bool func_get_sign_bit(Templated_Float<Fp>& x) {
         return x < Templated_Float<Fp>(0.0f);
     }
+
 
 
 

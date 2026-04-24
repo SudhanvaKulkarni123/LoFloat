@@ -83,31 +83,58 @@ struct Mma<Shape_, float, LayoutA_, float, LayoutB_,
     using FragmentC = Array<float, Shape::kMN>;
 
     CUTLASS_DEVICE
-    void operator()(FragmentC& D, FragmentA const& A,
-                    FragmentB const& B, FragmentC const& C, int accum_mant_bits, lo_float::Rounding_Mode rounding_mode, int stochastic_bits) const {
-        D = C;
-         const int shift = 23 - accum_mant_bits;  // 13
-    const uint32_t half_ulp  = (shift > 0) ? (1u << (shift - 1)) : 0u;
-    const uint32_t mask      = (shift > 0) ? ~((1u << shift) - 1) : 0xFFFFFFFFu;
-    const uint32_t sign_mask = 0x80000000u;
-    const uint32_t neg_sign_mask = !sign_mask;
+void operator()(FragmentC& D, FragmentA const& A,
+                FragmentB const& B, FragmentC const& C,
+                int accum_mant_bits,
+                lo_float::Rounding_Mode rounding_mode,
+                int stochastic_bits) const {
+    D = C;
 
+    // Compile-time layout dispatch.
+    constexpr bool kARowMajor =
+        std::is_same<LayoutA_, cutlass::layout::RowMajor>::value;
+    constexpr bool kBRowMajor =
+        std::is_same<LayoutB_, cutlass::layout::RowMajor>::value;
 
-CUTLASS_PRAGMA_UNROLL
-for (int k = 0; k < Shape::kK; ++k) {
+    static_assert(
+        kARowMajor || std::is_same<LayoutA_, cutlass::layout::ColumnMajor>::value,
+        "thread::Mma<OpLoFMultiplyAdd>: LayoutA must be RowMajor or ColumnMajor");
+    static_assert(
+        kBRowMajor || std::is_same<LayoutB_, cutlass::layout::ColumnMajor>::value,
+        "thread::Mma<OpLoFMultiplyAdd>: LayoutB must be RowMajor or ColumnMajor");
+
     CUTLASS_PRAGMA_UNROLL
-    for (int n = 0; n < Shape::kN; ++n) {
-    CUTLASS_PRAGMA_UNROLL
-    for (int m = 0; m < Shape::kM; ++m) {
-           float p =  A[m * Shape::kK + k] * B[k * Shape::kN + n];
-           D[m * Shape::kN + n] =  lo_float::virtual_round(D[m*Shape::kN + n] + p, accum_mant_bits);
-            
+    for (int k = 0; k < Shape::kK; ++k) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int n = 0; n < Shape::kN; ++n) {
+            CUTLASS_PRAGMA_UNROLL
+            for (int m = 0; m < Shape::kM; ++m) {
+
+                // A: (M, K)
+                float a;
+                if constexpr (kARowMajor) {
+                    a = A[m * Shape::kK + k];   // offset = m * K + k
+                } else {
+                    a = A[k * Shape::kM + m];   // offset = k * M + m  (ColumnMajor)
+                }
+
+                // B: (K, N)
+                float b;
+                if constexpr (kBRowMajor) {
+                    b = B[k * Shape::kN + n];   // offset = k * N + n
+                } else {
+                    b = B[n * Shape::kK + k];   // offset = n * K + k  (ColumnMajor)
+                }
+
+                // D: RowMajor (M, N) — fixed by the partial specialization.
+                float p = a * b;
+                D[m * Shape::kN + n] = lo_float::virtual_round(
+                    D[m * Shape::kN + n] + p, accum_mant_bits);
+            }
         }
     }
 }
-
-    }
-    };
+   };
 
 
 }  // namespace thread
@@ -703,16 +730,15 @@ struct DefaultMmaCore<
   // B: N contiguous in global, N contiguous in smem — no transpose needed
   // but still scalar for uniformity with A's thread map
   using IteratorThreadMapB = transform::PitchLinearStripminedThreadMap<
-      layout::PitchLinearShape<Shape::kN, Shape::kK>,
-      kThreads,
-      kElementsPerAccess>;
+    layout::PitchLinearShape<Shape::kN, Shape::kK>,
+    kThreads, kElementsPerAccess>;
 
   using SmemThreadMapB =
       transform::TransposePitchLinearThreadMapSimt<IteratorThreadMapB>;
 
   using SmemIteratorB = transform::threadblock::RegularTileAccessIterator<
-      MatrixShape<Shape::kK, Shape::kN>, ElementB, SmemLayoutB, 1,
-      SmemThreadMapB>;
+    MatrixShape<Shape::kK, Shape::kN>, ElementB, SmemLayoutB, 1,
+    IteratorThreadMapB>;   // raw — no transpose
 
   static const int WarpNumThreadsM = 4;
   static const int WarpNumThreadsN = 8;

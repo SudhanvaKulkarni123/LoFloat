@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 namespace py = pybind11;
+using namespace lo_float;
 
 
 #ifdef USE_CUDA
@@ -203,7 +204,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     #ifdef USE_CUDA
     m.def("lof_gemm",
-        &LoF_gemm,
+        &lo_float::LoF_gemm,
         py::arg("A"),
         py::arg("B"),
         py::arg("accum_mant_bits"),
