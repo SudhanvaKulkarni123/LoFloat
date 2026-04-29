@@ -1,56 +1,14 @@
-# Object files, static & shared libs
-*.o
-*.obj
-*.lo
-*.a
-*.lib
-*.dll
-*.so
-*.so.*
-*.dylib
+# Python cache
+LoFloat/__pycache__/
+*.py[cod]
+*.pyo
 
-# Executables (any name with no extension or common ones)
-*.exe
-*.out
-*.app
-*/*/a.out
+# Build directory
+build/
 
-# macOS debug symbol bundles
-*.dSYM/
-*.dSYM/**
-
-# Linker & dependency files
-*.map
-*.dep
-*.d
-*.gsym
-*.lld
-
-# Visual Studio / MSBuild
-*.vscode/*
-*.vcxproj*
-*.user
-*.suo
-*.opensdf
-*.psess
-*.vspx?
-*.cache
-*.pdb
-*.ipch
-*.vcxproj.*
-
-# Xcode
-*.xcworkspace
-*.xcuserstate
-*.xccheckout
-*.xcodeproj/*
-!*.xcodeproj/project.pbxproj
-
-# Logs / temporary
-*.log
-*.csv
-*~
-
-
-.DS_Store
-Thumbs.db
+# Binaries/ncu-rep in test/
+test/*
+!test/*.cpp
+!test/*.cu
+!test/*.py
+LoFloat/*.so
