@@ -127,9 +127,9 @@ void operator()(FragmentC& D, FragmentA const& A,
                 }
 
                 // D: RowMajor (M, N) — fixed by the partial specialization.
-                float p = a * b;
-                D[m * Shape::kN + n] = lo_float::virtual_round(
-                    D[m * Shape::kN + n] + p, accum_mant_bits);
+                float p = (a * b);
+                D[m * Shape::kN + n] = float(lo_float::virtual_round(
+                    D[m * Shape::kN + n] + p, accum_mant_bits));
             }
         }
     }

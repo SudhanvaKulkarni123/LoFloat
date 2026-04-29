@@ -3,58 +3,89 @@ import torch
 import torch.nn as nn
 import LoFloat as lof
 
-
-def lofloatify(model: nn.Module, rounding_mode: lof.RoundingMode = lof.RoundingMode.RoundToNearestEven, device="cuda", debug=False) -> nn.Module:
+def lofloatify(
+    model: nn.Module,
+    rounding_mode: lof.RoundingMode = lof.RoundingMode.RoundToNearestEven,
+    device="cuda",
+    debug=False,
+    skip_layer_names: set | None = None,   # full dotted names to leave unconverted
+    _prefix: str = "",                      # internal – tracks current path during recursion
+) -> nn.Module:
     model = copy.deepcopy(model)
     lof.replace_mha_with_explicit(model)
     single_params = lof.create_single_params()
+
     for name, module in model.named_children():
+        full_name = f"{_prefix}.{name}" if _prefix else name
+
         if isinstance(module, nn.Linear):
-            new_layer = lof.LoF_Linear.from_linear(
-                module,
-                weight_params=single_params,
-                act_params=single_params,
-                bias_params=single_params,
-                rounding_mode=rounding_mode
-            )
-            if debug:
-                print(f"  orig dtype: {module.weight.dtype}")
-                print(f"  new dtype:  {new_layer.weight.dtype}")
-                diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
-                print(f"{name} (Linear)")
-                print(f"  diff mean: {diff.mean():.10f}")
-                print(f"  diff max:  {diff.abs().max():.10f}")
-                print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
-                print(f"  has NaN:   {torch.isnan(diff).any()}")
-            if isinstance(model, nn.Sequential):
-                model[int(name)] = new_layer
+            if skip_layer_names and full_name in skip_layer_names:
+                # Keep the original nn.Linear untouched
+                pass
             else:
-                setattr(model, name, new_layer)
+                new_layer = lof.LoF_Linear.from_linear(
+                    module,
+                    weight_params=single_params,
+                    act_params=single_params,
+                    bias_params=single_params,
+                    rounding_mode=rounding_mode,
+                )
+                if debug:
+                    print(f"  orig dtype: {module.weight.dtype}")
+                    print(f"  new dtype:  {new_layer.weight.dtype}")
+                    diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
+                    print(f"{full_name} (Linear)")
+                    print(f"  diff mean: {diff.mean():.10f}")
+                    print(f"  diff max:  {diff.abs().max():.10f}")
+                    print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
+                    print(f"  has NaN:   {torch.isnan(diff).any()}")
+                if isinstance(model, nn.Sequential):
+                    model[int(name)] = new_layer
+                else:
+                    setattr(model, name, new_layer)
+
         elif isinstance(module, nn.Conv2d):
-            new_layer = lof.LoF_Conv2d.from_conv2d(
-                module,
-                weight_params=single_params,
-                act_params=single_params,
-                bias_params=single_params,
-                rounding_mode=rounding_mode
-            )
-            if debug:
-                print(f"  orig dtype: {module.weight.dtype}")
-                print(f"  new dtype:  {new_layer.weight.dtype}")
-                diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
-                print(f"{name} (Conv2d)")
-                print(f"  diff mean: {diff.mean():.10f}")
-                print(f"  diff max:  {diff.abs().max():.10f}")
-                print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
-                print(f"  has NaN:   {torch.isnan(diff).any()}")
-            if isinstance(model, nn.Sequential):
-                model[int(name)] = new_layer
+            if skip_layer_names and full_name in skip_layer_names:
+                # Keep the original nn.Conv2d untouched
+                pass
             else:
-                setattr(model, name, new_layer)
+                new_layer = lof.LoF_Conv2d.from_conv2d(
+                    module,
+                    weight_params=single_params,
+                    act_params=single_params,
+                    bias_params=single_params,
+                    rounding_mode=rounding_mode,
+                )
+                if debug:
+                    print(f"  orig dtype: {module.weight.dtype}")
+                    print(f"  new dtype:  {new_layer.weight.dtype}")
+                    diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
+                    print(f"{full_name} (Conv2d)")
+                    print(f"  diff mean: {diff.mean():.10f}")
+                    print(f"  diff max:  {diff.abs().max():.10f}")
+                    print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
+                    print(f"  has NaN:   {torch.isnan(diff).any()}")
+                if isinstance(model, nn.Sequential):
+                    model[int(name)] = new_layer
+                else:
+                    setattr(model, name, new_layer)
+
         else:
-            setattr(model, name, lofloatify(module, rounding_mode=rounding_mode, debug=debug))
+            setattr(
+                model,
+                name,
+                lofloatify(
+                    module,
+                    rounding_mode=rounding_mode,
+                    debug=debug,
+                    skip_layer_names=skip_layer_names,
+                    _prefix=full_name,        # propagate the growing path
+                ),
+            )
+
     return model
 
+    
 #set mantissa_bits for activation, weight or bias of all layers
 def set_mantissa_fields(model, activation_mantissa_bits: dict, weight_mantissa_bits: dict, bias_mantissa_bits: dict):
     for name, module in model.named_modules():

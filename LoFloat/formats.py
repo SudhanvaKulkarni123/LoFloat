@@ -57,6 +57,7 @@ def create_p3109_params(k, p, is_signed=True, saturating=True, bias=None):
     if bias is None:
         bias = 1 << (k - p - 1)
     inf_behavior = lof.InfBehavior.Saturating if saturating else lof.InfBehavior.Extended
+   
     
     return lof.FloatFormatDescriptor(
         k,

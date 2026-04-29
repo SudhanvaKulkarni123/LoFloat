@@ -51,8 +51,8 @@ ALL_EXEC = test_lo_float test_lo_int test_expectation \
 
 # ── CUDA settings ────────────────────────────────────────────────
 NVCC      ?= nvcc
-NVCCFLAGS += -std=c++20 -O3 -w
-CUDA_ARCH ?= sm_80    # RTX 3070; change as needed
+NVCCFLAGS += -std=c++20 -O3 -w -lineinfo
+CUDA_ARCH ?= sm_86    # RTX 3070; change as needed
 
 
 # Add to ALL_EXEC conditionally
