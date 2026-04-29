@@ -90,6 +90,54 @@ def _lof_linear(x, weight, bias, accum_mant_bits, gemm_round_mode, stochastic_ro
 # ═══════════════════════════════════════════════════════════════════════
 #  LoF_Linear
 # ═══════════════════════════════════════════════════════════════════════
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ───────────────────────────────────────────────────────────────────────
+#  Fast Walsh-Hadamard Transform (orthonormal, O(n log n))
+# ───────────────────────────────────────────────────────────────────────
+def _fwht(x: torch.Tensor, block_size=None) -> torch.Tensor:
+    """Orthonormal Walsh-Hadamard transform along the last dim.
+
+    If `block_size` is None, transforms the entire last dim (requires last
+    dim to be a power of 2). Otherwise the last dim is reshaped into
+    contiguous blocks of size `block_size` (must be a power of 2 dividing
+    the last dim) and the transform is applied within each block. The
+    block-diagonal rotation diag(H_B, H_B, ...) is still orthonormal and
+    self-inverse.
+    """
+    n = x.shape[-1]
+    if block_size is None:
+        block_size = n
+    if block_size <= 0 or (block_size & (block_size - 1)) != 0:
+        raise ValueError(f"block_size must be a power of 2, got {block_size}")
+    if n % block_size != 0:
+        raise ValueError(f"block_size {block_size} must divide last dim {n}")
+
+    orig_shape = x.shape
+    nb = n // block_size                     # number of blocks
+    x = x.reshape(-1, nb, block_size)        # (B, nb, block_size)
+    flat = x.reshape(-1, block_size)         # (B*nb, block_size)
+    M = flat.shape[0]
+
+    h = 1
+    while h < block_size:
+        flat = flat.view(M, block_size // (2 * h), 2, h)
+        a = flat[:, :, 0, :]
+        b = flat[:, :, 1, :]
+        flat = torch.stack([a + b, a - b], dim=2)
+        flat = flat.reshape(M, block_size)
+        h *= 2
+
+    flat = flat * (1.0 / math.sqrt(block_size))
+    return flat.view(*orig_shape[:-1], n)
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LoF_Linear
+# ═══════════════════════════════════════════════════════════════════════
 class LoF_Linear(nn.Module):
 
     @staticmethod
@@ -110,7 +158,8 @@ class LoF_Linear(nn.Module):
                  act_scale_factor=1.0, w_scale_factor=1.0, b_scale_factor=1.0,
                  accum_mant_bits=23,
                  gemm_round_mode=None,
-                 stochastic_rounding_bits=0):
+                 stochastic_rounding_bits=0,
+                 hadamard_transform=False, hadamard_block_size=None):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -119,10 +168,13 @@ class LoF_Linear(nn.Module):
         self.w_scale_factor = w_scale_factor
         self.b_scale_factor = b_scale_factor
 
-        # lof_gemm parameters
         self.accum_mant_bits = accum_mant_bits
         self.gemm_round_mode = gemm_round_mode if gemm_round_mode is not None else lof.RoundingMode.RoundToNearestEven
         self.stochastic_rounding_bits = stochastic_rounding_bits
+
+        # Hadamard rotation of activations before GEMM
+        self.hadamard_transform = hadamard_transform
+        self.hadamard_block_size = hadamard_block_size
 
         if act_params is None:
             self.act_params = lof.create_p3109_params(act_exp + act_mant + 1, act_mant + 1, True, True)
@@ -150,7 +202,8 @@ class LoF_Linear(nn.Module):
     @classmethod
     def from_linear(cls, linear: nn.Linear, act_params, weight_params, bias_params=None,
                     rounding_mode=None,
-                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0):
+                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0,
+                    hadamard_transform=False, hadamard_block_size=None):
         layer = cls(
             linear.in_features,
             linear.out_features,
@@ -162,6 +215,8 @@ class LoF_Linear(nn.Module):
             accum_mant_bits=accum_mant_bits,
             gemm_round_mode=gemm_round_mode,
             stochastic_rounding_bits=stochastic_rounding_bits,
+            hadamard_transform=hadamard_transform,
+            hadamard_block_size=hadamard_block_size,
         )
         layer.weight = nn.Parameter(linear.weight.clone())
         if linear.bias is not None:
@@ -182,6 +237,8 @@ class LoF_Linear(nn.Module):
             accum_mant_bits=self.accum_mant_bits,
             gemm_round_mode=self.gemm_round_mode,
             stochastic_rounding_bits=self.stochastic_rounding_bits,
+            hadamard_transform=self.hadamard_transform,
+            hadamard_block_size=self.hadamard_block_size,
         )
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
@@ -193,10 +250,13 @@ class LoF_Linear(nn.Module):
         return STERound.apply(tensor, params, self.rounding_mode)
 
     def forward(self, x):
+        # Optional Hadamard rotation of activations along the in_features axis.
+        if self.hadamard_transform:
+            x = _fwht(x, block_size=self.hadamard_block_size)
+
         x_q = self._quantize(x * self.act_scale_factor, self.act_params)
         w_q = self._quantize(self.weight * self.w_scale_factor, self.weight_params)
 
-        # ── lof_gemm replaces torch.matmul(x_q, w_q.t()) ──
         out = _lof_linear(x_q, w_q, None,
                           self.accum_mant_bits, self.gemm_round_mode,
                           self.stochastic_rounding_bits)
@@ -206,7 +266,7 @@ class LoF_Linear(nn.Module):
             out = out + b_q
         return out
 
-    # ── set_* and extra_repr unchanged ──────────────────────────────────
+    # ── set_* unchanged ────────────────────────────────────────────────
     def set_mantissa(self, activ_mant, weight_mant, bias_mant):
         act_exp = self.act_params.total_bits - self.act_params.mantissa_bits - 1
         weight_exp = self.weight_params.total_bits - self.weight_params.mantissa_bits - 1
@@ -235,7 +295,7 @@ class LoF_Linear(nn.Module):
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
         self.bias_params = lof.create_p3109_params(self.bias_params.total_bits, self.bias_params.mantissa_bits, True, bias_sat)
-    
+
     def set_accumulation_precision(self, accum_mant_bits):
         self.accum_mant_bits = accum_mant_bits
 
@@ -249,7 +309,9 @@ class LoF_Linear(nn.Module):
             f'weight_exponent={self.weight_params.total_bits - self.weight_params.mantissa_bits - 1}, '
             f'bias_mantissa={self.bias_params.mantissa_bits}, '
             f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}, '
-            f'accum_mant_bits={self.accum_mant_bits}'
+            f'accum_mant_bits={self.accum_mant_bits}, '
+            f'hadamard_transform={self.hadamard_transform}, '
+            f'hadamard_block_size={self.hadamard_block_size}'
         )
 
 
@@ -277,7 +339,8 @@ class LoF_Conv2d(nn.Module):
                  act_scale_factor=1.0, w_scale_factor=1.0, b_scale_factor=1.0,
                  accum_mant_bits=23,
                  gemm_round_mode=None,
-                 stochastic_rounding_bits=0):
+                 stochastic_rounding_bits=0,
+                 hadamard_transform=False, hadamard_block_size=None):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -291,10 +354,26 @@ class LoF_Conv2d(nn.Module):
         self.w_scale_factor = w_scale_factor
         self.b_scale_factor = b_scale_factor
 
-        # lof_gemm parameters
         self.accum_mant_bits = accum_mant_bits
         self.gemm_round_mode = gemm_round_mode if gemm_round_mode is not None else lof.RoundingMode.RoundToNearestEven
         self.stochastic_rounding_bits = stochastic_rounding_bits
+
+        # Hadamard rotation along the C_in axis (per spatial position) before im2col.
+        self.hadamard_transform = hadamard_transform
+        self.hadamard_block_size = hadamard_block_size
+        if hadamard_transform:
+            c_per_group_in = in_channels // groups
+            eff = hadamard_block_size if hadamard_block_size is not None else c_per_group_in
+            if eff <= 0 or (eff & (eff - 1)) != 0:
+                raise ValueError(
+                    f"hadamard_transform=True requires (hadamard_block_size or "
+                    f"in_channels//groups) to be a power of 2, got {eff}"
+                )
+            if c_per_group_in % eff != 0:
+                raise ValueError(
+                    f"hadamard_block_size={eff} must divide in_channels//groups="
+                    f"{c_per_group_in}"
+                )
 
         if act_params is None:
             self.act_params = lof.create_p3109_params(act_exp + act_mant + 1, act_mant + 1, True, True)
@@ -322,7 +401,8 @@ class LoF_Conv2d(nn.Module):
     @classmethod
     def from_conv2d(cls, conv: nn.Conv2d, act_params, weight_params, bias_params=None,
                     rounding_mode=None,
-                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0):
+                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0,
+                    hadamard_transform=False, hadamard_block_size=None):
         layer = cls(
             conv.in_channels,
             conv.out_channels,
@@ -339,6 +419,8 @@ class LoF_Conv2d(nn.Module):
             accum_mant_bits=accum_mant_bits,
             gemm_round_mode=gemm_round_mode,
             stochastic_rounding_bits=stochastic_rounding_bits,
+            hadamard_transform=hadamard_transform,
+            hadamard_block_size=hadamard_block_size,
         )
         layer.weight = nn.Parameter(conv.weight.clone())
         if conv.bias is not None:
@@ -361,6 +443,8 @@ class LoF_Conv2d(nn.Module):
             accum_mant_bits=self.accum_mant_bits,
             gemm_round_mode=self.gemm_round_mode,
             stochastic_rounding_bits=self.stochastic_rounding_bits,
+            hadamard_transform=self.hadamard_transform,
+            hadamard_block_size=self.hadamard_block_size,
         )
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
@@ -372,6 +456,22 @@ class LoF_Conv2d(nn.Module):
         return STERound.apply(tensor, params, self.rounding_mode)
 
     def forward(self, x):
+        # Optional Hadamard rotation along the channel axis (before im2col).
+        # Move C to last dim, transform, then move back.
+        if self.hadamard_transform:
+            if self.groups == 1:
+                x = x.movedim(1, -1).contiguous()       # (B, H, W, C_in)
+                x = _fwht(x, block_size=self.hadamard_block_size)
+                x = x.movedim(-1, 1).contiguous()       # (B, C_in, H, W)
+            else:
+                # Apply Hadamard within each group's channel slab
+                B, C_in, H_in, W_in = x.shape
+                x = x.view(B, self.groups, C_in // self.groups, H_in, W_in)
+                x = x.movedim(2, -1).contiguous()       # (B, G, H, W, C/G)
+                x = _fwht(x, block_size=self.hadamard_block_size)
+                x = x.movedim(-1, 2).contiguous()       # (B, G, C/G, H, W)
+                x = x.view(B, C_in, H_in, W_in)
+
         x_q = self._quantize(x * self.act_scale_factor, self.act_params)
         w_q = self._quantize(self.weight * self.w_scale_factor, self.weight_params)
 
@@ -379,58 +479,44 @@ class LoF_Conv2d(nn.Module):
         C_out = self.out_channels
         kH, kW = self.kernel_size
 
-        # ── Compute output spatial dimensions ──
         H_out = (H_in + 2 * self.padding[0] - self.dilation[0] * (kH - 1) - 1) // self.stride[0] + 1
         W_out = (W_in + 2 * self.padding[1] - self.dilation[1] * (kW - 1) - 1) // self.stride[1] + 1
-        L = H_out * W_out  # number of output spatial positions
+        L = H_out * W_out
 
         if self.groups == 1:
-            # ── im2col: unfold input → (B, C_in*kH*kW, L) ──
             x_col = F.unfold(x_q, kernel_size=self.kernel_size,
                              dilation=self.dilation, padding=self.padding,
-                             stride=self.stride)                         # (B, C_in*kH*kW, L)
+                             stride=self.stride)
+            w_col = w_q.view(C_out, -1)
 
-            # Weight as 2-D: (C_out, C_in*kH*kW)
-            w_col = w_q.view(C_out, -1)                                  # (C_out, C_in*kH*kW)
-
-            # Per-sample GEMM: w_col @ x_col[b] → (C_out, L)
             out = torch.stack([
                 lof.lof_gemm(w_col, x_col[b].contiguous(),
                              self.accum_mant_bits, self.gemm_round_mode,
                              self.stochastic_rounding_bits)
                 for b in range(B)
-            ])                                                           # (B, C_out, L)
-
+            ])
         else:
-            # ── Grouped convolution via im2col ──
-            # Split input channels per group
             c_per_group_in = C_in // self.groups
             c_per_group_out = C_out // self.groups
 
             x_col = F.unfold(x_q, kernel_size=self.kernel_size,
                              dilation=self.dilation, padding=self.padding,
-                             stride=self.stride)                         # (B, C_in*kH*kW, L)
-
-            # Reshape for groups: (B, groups, c_per_group_in*kH*kW, L)
+                             stride=self.stride)
             x_col = x_col.view(B, self.groups, c_per_group_in * kH * kW, L)
-
-            # Weight per group: (groups, c_per_group_out, c_per_group_in*kH*kW)
             w_col = w_q.view(self.groups, c_per_group_out, -1)
 
             results = []
             for b in range(B):
                 group_outs = []
                 for g in range(self.groups):
-                    # (c_per_group_out, c_per_group_in*kH*kW) @ (c_per_group_in*kH*kW, L)
                     group_outs.append(
                         lof.lof_gemm(w_col[g], x_col[b, g].contiguous(),
                                      self.accum_mant_bits, self.gemm_round_mode,
                                      self.stochastic_rounding_bits)
                     )
-                results.append(torch.cat(group_outs, dim=0))             # (C_out, L)
-            out = torch.stack(results)                                   # (B, C_out, L)
+                results.append(torch.cat(group_outs, dim=0))
+            out = torch.stack(results)
 
-        # ── Fold back to spatial layout ──
         out = out.view(B, C_out, H_out, W_out)
 
         if self.bias is not None:
@@ -439,7 +525,7 @@ class LoF_Conv2d(nn.Module):
 
         return out
 
-    # ── set_* and extra_repr unchanged ──────────────────────────────────
+    # ── set_* unchanged ────────────────────────────────────────────────
     def set_mantissa(self, activ_mant, weight_mant, bias_mant):
         act_exp = self.act_params.total_bits - self.act_params.mantissa_bits - 1
         weight_exp = self.weight_params.total_bits - self.weight_params.mantissa_bits - 1
@@ -468,7 +554,7 @@ class LoF_Conv2d(nn.Module):
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
         self.bias_params = lof.create_p3109_params(self.bias_params.total_bits, self.bias_params.mantissa_bits, True, bias_sat)
-    
+
     def set_accumulation_precision(self, accum_mant_bits):
         self.accum_mant_bits = accum_mant_bits
 
@@ -483,10 +569,10 @@ class LoF_Conv2d(nn.Module):
             f'weight_exponent={self.weight_params.total_bits - self.weight_params.mantissa_bits - 1}, '
             f'bias_mantissa={self.bias_params.mantissa_bits}, '
             f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}, '
-            f'accum_mant_bits={self.accum_mant_bits}'
+            f'accum_mant_bits={self.accum_mant_bits}, '
+            f'hadamard_transform={self.hadamard_transform}, '
+            f'hadamard_block_size={self.hadamard_block_size}'
         )
-
-
 
 def _make_scale_buffer(scale, num_features):
     if isinstance(scale, torch.Tensor):
@@ -500,15 +586,7 @@ def _make_scale_buffer(scale, num_features):
         return s.clone()
     return torch.full((num_features,), float(scale))
 
-
 class L1BatchNorm(nn.Module):
-    """BatchNorm variant using mean absolute deviation (L1) instead of std dev (L2).
-
-    scale is a per-channel buffer of shape [num_features]. Default sqrt(2/pi)
-    broadcasts to all channels (the Gaussian-assumption constant). Passing a
-    calibrated per-channel MAD/std ratio makes pre-affine output match BN2d's
-    (x-mean)/std regardless of input distribution.
-    """
     def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True,
                  scale=math.sqrt(2 / math.pi)):
         super().__init__()
@@ -524,22 +602,24 @@ class L1BatchNorm(nn.Module):
             self.register_parameter("bias", None)
         self.register_buffer("running_mean", torch.zeros(num_features))
         self.register_buffer("running_mad", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
         self.register_buffer("scale", _make_scale_buffer(scale, num_features))
 
     def forward(self, x):
         reduce_dims = [0] + list(range(2, x.dim()))
-        view_shape  = [1, -1] + [1] * (x.dim() - 2)
+        view_shape = [1, -1] + [1] * (x.dim() - 2)
 
         if self.training:
             mean = x.mean(dim=reduce_dims)
             x_centered = x - mean.view(view_shape)
             mad = x_centered.abs().mean(dim=reduce_dims)
             with torch.no_grad():
+                self.num_batches_tracked += 1
                 self.running_mean.mul_(1 - self.momentum).add_(mean.detach(), alpha=self.momentum)
-                self.running_mad.mul_(1 - self.momentum).add_(mad.detach(),  alpha=self.momentum)
+                self.running_mad.mul_(1 - self.momentum).add_(mad.detach(), alpha=self.momentum)
         else:
             mean = self.running_mean
-            mad  = self.running_mad
+            mad = self.running_mad
             x_centered = x - mean.view(view_shape)
 
         out = x_centered / (mad.view(view_shape) + self.eps)
@@ -547,7 +627,6 @@ class L1BatchNorm(nn.Module):
         if self.affine:
             out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
         return out
-
 
 class LinfBatchNorm(nn.Module):
     """BatchNorm variant using max absolute deviation (L-infinity) instead of std.
@@ -596,6 +675,213 @@ class LinfBatchNorm(nn.Module):
         if self.affine:
             out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
         return out
+
+class FISRBatchNorm(nn.Module):
+    """BatchNorm variant using Quake III fast inverse square root + 1 Newton-Raphson step
+    in place of 1/sqrt(var + eps). FP32 only (bit-hack assumes IEEE 754 single precision).
+    """
+    MAGIC = 0x5F3759DF
+
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        if affine:
+            self.weight = nn.Parameter(torch.ones(num_features))
+            self.bias = nn.Parameter(torch.zeros(num_features))
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+
+    @staticmethod
+    def _fast_rsqrt(x):
+        x32 = x.to(torch.float32).contiguous()
+        x_half = x32 * 0.5
+        i = x32.view(torch.int32)
+        i = FISRBatchNorm.MAGIC - (i >> 1)
+        y = i.view(torch.float32).clone()
+        y = y * (1.5 - x_half * y * y)   # one Newton-Raphson step
+        y = y * (1.5 - x_half * y * y)   # second Newton-Raphson step for improved accuracy
+        return y.to(x.dtype)
+
+    def forward(self, x):
+        reduce_dims = [0] + list(range(2, x.dim()))
+        view_shape = [1, -1] + [1] * (x.dim() - 2)
+        if self.training:
+            mean = x.mean(dim=reduce_dims)
+            var = x.var(dim=reduce_dims, unbiased=False)
+            with torch.no_grad():
+                self.num_batches_tracked += 1
+                self.running_mean.mul_(1 - self.momentum).add_(mean.detach(), alpha=self.momentum)
+                self.running_var.mul_(1 - self.momentum).add_(var.detach(), alpha=self.momentum)
+        else:
+            mean = self.running_mean
+            var = self.running_var
+        rsqrt = self._fast_rsqrt(var + self.eps)
+        out = (x - mean.view(view_shape)) * rsqrt.view(view_shape)
+        if self.affine:
+            out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
+        return out
+
+
+class PWLBatchNorm(nn.Module):
+    """BatchNorm variant using a piecewise-linear LUT for 1/sqrt(var + eps).
+    Range-reduces var+eps via frexp to mantissa m in [1, 2), looks up 1/sqrt(m)
+    by linear interpolation over 2^lut_bits segments, then applies the exponent
+    correction.
+
+    lut_method: 'uniform' | 'midpoint' | 'minimax'.
+    """
+    INV_SQRT2 = 0.7071067811865476
+
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True,
+                 lut_bits=4, lut_method="minimax"):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        self.lut_bits = lut_bits
+        self.lut_size = 1 << lut_bits
+        if affine:
+            self.weight = nn.Parameter(torch.ones(num_features))
+            self.bias = nn.Parameter(torch.zeros(num_features))
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+        self.register_buffer("lut", torch.empty(self.lut_size + 1))
+        self.init_lut(lut_method)
+
+    def init_lut(self, method="minimax"):
+        N = self.lut_size
+        knots = torch.linspace(1.0, 2.0, N + 1, dtype=self.lut.dtype)
+        f_at_knots = 1.0 / knots.sqrt()
+        if method == "uniform":
+            lut = f_at_knots.clone()
+        elif method == "midpoint":
+            mids = 0.5 * (knots[:-1] + knots[1:])
+            f_at_mids = 1.0 / mids.sqrt()
+            lut = f_at_knots.clone()
+            lut[1:-1] = f_at_mids[:-1]
+        elif method == "minimax":
+            mids = 0.5 * (knots[:-1] + knots[1:])
+            delta = 1.0 / mids.sqrt() - 0.5 * (f_at_knots[:-1] + f_at_knots[1:])
+            c = torch.empty_like(f_at_knots)
+            c[0] = delta[0] / 2
+            c[1:-1] = (delta[:-1] + delta[1:]) / 4
+            c[-1] = delta[-1] / 2
+            lut = f_at_knots + c
+        else:
+            raise ValueError(f"Unknown lut_method {method!r}")
+        self.lut.copy_(lut)
+        self.lut_method = method
+
+    def _rsqrt_pwl(self, x):
+        m, e = torch.frexp(x)             # m in [0.5, 1)
+        m = m * 2.0                        # m in [1, 2)
+        e = e - 1
+        u = (m - 1.0) * self.lut_size
+        idx = u.floor().long().clamp(0, self.lut_size - 1)
+        frac = u - idx.to(x.dtype)
+        f = self.lut[idx]
+        g = self.lut[idx + 1]
+        rsqrt_m = f + frac * (g - f)
+        e_half = e // 2
+        odd = (e % 2 != 0)
+        scale = torch.ldexp(torch.ones_like(x), -e_half)
+        scale = torch.where(odd, scale * self.INV_SQRT2, scale)
+        return rsqrt_m * scale
+
+    def forward(self, x):
+        reduce_dims = [0] + list(range(2, x.dim()))
+        view_shape = [1, -1] + [1] * (x.dim() - 2)
+        if self.training:
+            mean = x.mean(dim=reduce_dims)
+            var = x.var(dim=reduce_dims, unbiased=False)
+            with torch.no_grad():
+                self.num_batches_tracked += 1
+                self.running_mean.mul_(1 - self.momentum).add_(mean.detach(), alpha=self.momentum)
+                self.running_var.mul_(1 - self.momentum).add_(var.detach(), alpha=self.momentum)
+        else:
+            mean = self.running_mean
+            var = self.running_var
+        rsqrt = self._rsqrt_pwl(var + self.eps)
+        out = (x - mean.view(view_shape)) * rsqrt.view(view_shape)
+        if self.affine:
+            out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
+        return out
+
+class PWLSiLU(nn.Module):
+    """SiLU(x) = x * sigmoid(x) approximated via a piecewise-linear LUT on [-R, R].
+    Outside the range, falls back to the asymptotes: 0 for x < -R, x for x > R.
+    Uniform knot spacing; lut_size must be even so x=0 lands on a knot.
+    lut_method: 'uniform' | 'midpoint' | 'minimax'.
+    """
+
+    def __init__(self, R=8.0, lut_bits=4, lut_method="minimax"):
+        super().__init__()
+        self.R = float(R)
+        self.lut_bits = lut_bits
+        self.lut_size = 1 << lut_bits
+        if self.lut_size % 2 != 0:
+            raise ValueError("lut_size must be even so x=0 is a knot.")
+        self.register_buffer("lut", torch.empty(self.lut_size + 1))
+        self.init_lut(lut_method)
+
+    @staticmethod
+    def _silu(x):
+        return x * torch.sigmoid(x)
+
+    def init_lut(self, method="minimax"):
+        N = self.lut_size
+        knots = torch.linspace(-self.R, self.R, N + 1, dtype=self.lut.dtype)
+        f_at_knots = self._silu(knots)
+        if method == "uniform":
+            lut = f_at_knots.clone()
+        elif method == "midpoint":
+            mids = 0.5 * (knots[:-1] + knots[1:])
+            f_at_mids = self._silu(mids)
+            lut = f_at_knots.clone()
+            lut[1:-1] = f_at_mids[:-1]
+        elif method == "minimax":
+            mids = 0.5 * (knots[:-1] + knots[1:])
+            delta = self._silu(mids) - 0.5 * (f_at_knots[:-1] + f_at_knots[1:])
+            c = torch.empty_like(f_at_knots)
+            c[0] = delta[0] / 2
+            c[1:-1] = (delta[:-1] + delta[1:]) / 4
+            c[-1] = delta[-1] / 2
+            lut = f_at_knots + c
+        else:
+            raise ValueError(f"Unknown lut_method {method!r}")
+        self.lut.copy_(lut)
+        self.lut_method = method
+
+    
+    def forward(self, x):
+        N = self.lut_size
+        R = self.R
+
+        # Clamp once so the LUT index is always in range — avoids wild extrapolation
+        # for out-of-range x and removes the need for a separate "below -R" branch.
+        u = (x.clamp(-R, R) + R) * (N / (2 * R))
+        idx = u.long().clamp_(max=N - 1)          # in-place clamp
+        frac = u - idx.to(x.dtype)
+
+        # lerp = f + frac*(g - f), but as one fused op
+        out = torch.lerp(self.lut[idx], self.lut[idx + 1], frac)
+
+        # Single asymptote fix: F.relu(x) is x for x>R and 0 for x<-R,
+        # which is exactly the asymptote you want. One where, no zeros_like.
+        return torch.where(x.abs() > R, F.relu(x), out)
+
 # ═══════════════════════════════════════════════════════════════════════
 #  LoF_MultiHeadAttention
 # ═══════════════════════════════════════════════════════════════════════
