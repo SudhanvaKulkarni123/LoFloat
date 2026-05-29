@@ -37,7 +37,7 @@ if use_cuda:
     
     # --- Paths and flags ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    cutlass_path = os.path.join(script_dir, '../cutlass')
+    cutlass_path = os.path.join(script_dir, 'third_party/cutlass')
     include_dirs = [
         os.path.join(script_dir, 'src/'),
         os.path.join(script_dir, 'third_party/xsimd/include'),

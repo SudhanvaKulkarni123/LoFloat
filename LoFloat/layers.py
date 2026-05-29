@@ -6,12 +6,20 @@ import LoFloat as lof
 
 class STERound(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, tensor, params, rounding_mode=lof.RoundingMode.RoundToNearestEven):
-        return lof.virtual_round(tensor, params, round_mode=rounding_mode, stoch_len=0)
+    def forward(ctx, tensor, params, rounding_mode=lof.RoundingMode.RoundToNearestEven, scale=1.0):
+        # Fused scale-then-round: returns round(scale * tensor, params).
+        # Output is in the *scaled* domain — callers that want the original
+        # numeric range must divide by `scale` afterwards (or rely on the
+        # GEMM's scale_a/scale_b output rescale).
+        ctx.scale = float(scale)
+        return lof.virtual_round(tensor, params, round_mode=rounding_mode, stoch_len=0, scale=float(scale))
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None, None
+        # STE: round(scale * x) ≈ scale * x in backward, so ∂/∂x = scale.
+        if ctx.scale == 1.0:
+            return grad_output, None, None, None
+        return grad_output * ctx.scale, None, None, None
 
     
 class LoF_Quantize(nn.Module):
@@ -47,15 +55,19 @@ def exp_mant_quantize(tensor, exp_bits, mantissa_bits):
         return tensor
     return STERound.apply(tensor, lof.create_p3109_params(exp_bits + mantissa_bits + 1, mantissa_bits + 1, True, True))
 
-def _lof_gemm_2d(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits):
+def _lof_gemm_2d(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+                 scale_a=1.0, scale_b=1.0):
     """Wrapper for (..., M, K) x (..., K, N) -> (..., M, N).
 
     Assumes the binary expects both A and B as contiguous RowMajor.
+    `scale_a`/`scale_b` rescale the output by 1/(scale_a*scale_b) — pass the same
+    scales used for scale-then-quantize on A and B to recover the original domain.
     """
     if A.dim() == 2 and B.dim() == 2:
         return lof.lof_gemm(
             A.contiguous(), B.contiguous(),
             accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+            scale_a, scale_b,
         )
 
     batch_shape = A.shape[:-2]
@@ -68,20 +80,25 @@ def _lof_gemm_2d(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bit
         lof.lof_gemm(
             A_flat[i], B_flat[i],         # already contiguous, indexing preserves that
             accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+            scale_a, scale_b,
         )
         for i in range(A_flat.shape[0])
     ])
     return out.reshape(*batch_shape, M, N)
 
 
-def _lof_linear(x, weight, bias, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits):
-    """Drop-in for F.linear using lof_gemm.  x: (..., K), weight: (N, K) -> (..., N)."""
+def _lof_linear(x, weight, bias, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+                scale_a=1.0, scale_b=1.0):
+    """Drop-in for F.linear using lof_gemm.  x: (..., K), weight: (N, K) -> (..., N).
+    `scale_a`/`scale_b` are forwarded to the GEMM for output rescale.
+    """
     leading = x.shape[:-1]
     K = x.shape[-1]
     x_2d = x.reshape(-1, K).contiguous()            # (B, K) RowMajor
     wt   = weight.t().contiguous()                   # (K, N) RowMajor (actual copy)
     out = lof.lof_gemm(x_2d, wt,
-                       accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
+                       accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+                       scale_a, scale_b)
     out = out.reshape(*leading, weight.shape[0])     # (..., N)
     if bias is not None:
         out = out + bias
@@ -254,15 +271,25 @@ class LoF_Linear(nn.Module):
         if self.hadamard_transform:
             x = _fwht(x, block_size=self.hadamard_block_size)
 
-        x_q = self._quantize(x * self.act_scale_factor, self.act_params)
-        w_q = self._quantize(self.weight * self.w_scale_factor, self.weight_params)
+        # Scale-then-quantize is fused inside the CUDA round kernel — no
+        # intermediate scaled tensor materialized on GPU.
+        x_q = STERound.apply(x, self.act_params, self.rounding_mode, self.act_scale_factor)
+        w_q = STERound.apply(self.weight, self.weight_params, self.rounding_mode, self.w_scale_factor)
 
+        # GEMM divides output by (act_scale * w_scale) to rescale back to the
+        # original (unscaled) domain.
         out = _lof_linear(x_q, w_q, None,
                           self.accum_mant_bits, self.gemm_round_mode,
-                          self.stochastic_rounding_bits)
+                          self.stochastic_rounding_bits,
+                          scale_a=float(self.act_scale_factor),
+                          scale_b=float(self.w_scale_factor))
 
         if self.bias is not None:
-            b_q = self._quantize(self.bias * self.b_scale_factor, self.bias_params)
+            # Quantize bias in its scaled domain, then descale to match the
+            # rescaled GEMM output.
+            b_q = STERound.apply(self.bias, self.bias_params, self.rounding_mode, self.b_scale_factor)
+            if self.b_scale_factor != 1.0:
+                b_q = b_q / self.b_scale_factor
             out = out + b_q
         return out
 
@@ -472,8 +499,9 @@ class LoF_Conv2d(nn.Module):
                 x = x.movedim(-1, 2).contiguous()       # (B, G, C/G, H, W)
                 x = x.view(B, C_in, H_in, W_in)
 
-        x_q = self._quantize(x * self.act_scale_factor, self.act_params)
-        w_q = self._quantize(self.weight * self.w_scale_factor, self.weight_params)
+        # Fused scale-then-quantize on GPU; no intermediate scaled tensor.
+        x_q = STERound.apply(x, self.act_params, self.rounding_mode, self.act_scale_factor)
+        w_q = STERound.apply(self.weight, self.weight_params, self.rounding_mode, self.w_scale_factor)
 
         B, C_in, H_in, W_in = x_q.shape
         C_out = self.out_channels
@@ -482,6 +510,12 @@ class LoF_Conv2d(nn.Module):
         H_out = (H_in + 2 * self.padding[0] - self.dilation[0] * (kH - 1) - 1) // self.stride[0] + 1
         W_out = (W_in + 2 * self.padding[1] - self.dilation[1] * (kW - 1) - 1) // self.stride[1] + 1
         L = H_out * W_out
+
+        # GEMM divides output by (act_scale * w_scale) — note the conv im2col
+        # GEMM is W @ X_col, so scale_a corresponds to the weight scale and
+        # scale_b to the activation scale.
+        s_w = float(self.w_scale_factor)
+        s_a = float(self.act_scale_factor)
 
         if self.groups == 1:
             x_col = F.unfold(x_q, kernel_size=self.kernel_size,
@@ -492,7 +526,8 @@ class LoF_Conv2d(nn.Module):
             out = torch.stack([
                 lof.lof_gemm(w_col, x_col[b].contiguous(),
                              self.accum_mant_bits, self.gemm_round_mode,
-                             self.stochastic_rounding_bits)
+                             self.stochastic_rounding_bits,
+                             s_w, s_a)
                 for b in range(B)
             ])
         else:
@@ -512,7 +547,8 @@ class LoF_Conv2d(nn.Module):
                     group_outs.append(
                         lof.lof_gemm(w_col[g], x_col[b, g].contiguous(),
                                      self.accum_mant_bits, self.gemm_round_mode,
-                                     self.stochastic_rounding_bits)
+                                     self.stochastic_rounding_bits,
+                                     s_w, s_a)
                     )
                 results.append(torch.cat(group_outs, dim=0))
             out = torch.stack(results)
@@ -520,7 +556,9 @@ class LoF_Conv2d(nn.Module):
         out = out.view(B, C_out, H_out, W_out)
 
         if self.bias is not None:
-            b_q = self._quantize(self.bias * self.b_scale_factor, self.bias_params)
+            b_q = STERound.apply(self.bias, self.bias_params, self.rounding_mode, self.b_scale_factor)
+            if self.b_scale_factor != 1.0:
+                b_q = b_q / self.b_scale_factor
             out = out + b_q.view(1, -1, 1, 1)
 
         return out

@@ -9,6 +9,8 @@ torch::Tensor LoF_gemm(
     torch::Tensor B,
     int accum_mant_bits,
     Rounding_Mode round_mode = lo_float::Rounding_Mode::RoundToNearestEven,
-    int stochastic_rounding_bits = 0);
+    int stochastic_rounding_bits = 0,
+    double scale_a = 1.0,
+    double scale_b = 1.0);
 }
 #endif

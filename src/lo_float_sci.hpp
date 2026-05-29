@@ -28,7 +28,7 @@ namespace lo_float {
             template <FloatingPointParams Fp>
             Templated_Float<Fp> operator()(Templated_Float<Fp> x) const {
                 auto [reduced, ctx] = reducer(x);
-                return = approx_func(reduced, ctx);
+                return approx_func(reduced, ctx);
                 
             }
         };

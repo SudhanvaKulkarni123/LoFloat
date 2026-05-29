@@ -5,6 +5,8 @@ CDBG      += -w
 
 OPENMP_FLAG := -fopenmp -funroll-loops -fprefetch-loop-arrays -frename-register 
 
+USE_CUDA_VAR := $(if $(USE_CUDA),$(USE_CUDA),0)
+
 OPENMP_AVAILABLE := $(shell \
   echo "int main(){return 0;}" | \
   $(CC) $(OPENMP_FLAG) -x c - -o /dev/null 2>/dev/null && echo yes)
@@ -28,14 +30,6 @@ INCLUDE_PATH += -I$(LOFLOAT_ROOT)
 INCLUDE_PATH += -I$(LOFLOAT_ROOT)/src
 INCLUDE_PATH += -I$(LOFLOAT_ROOT)/test
 
-ifeq ($(CUDA_AVAILABLE),yes)
-	INCLUDE_PATH += -I../../cutlass/include
-	INCLUDE_PATH += -I../../cutlass/tools/util/include
-	INCLUDE_PATH += -I/home/spuser/agents/lib/python3.13/site-packages/torch/include
-else 
-	INCLUDE_PATH += -I$(LOFLOAT_ROOT)/third_party/xsimd/include
-endif
-
 
 # LLVM IR flags
 LLVM_FLAGS = -S -emit-llvm
@@ -54,6 +48,16 @@ NVCC      ?= nvcc
 NVCCFLAGS += -std=c++20 -O3 -w -lineinfo
 CUDA_ARCH ?= sm_86    # RTX 3070; change as needed
 
+ifeq ($(USE_CUDA_VAR),1)
+	ifeq ($(CUDA_AVAILABLE),yes)
+		INCLUDE_PATH += -I../../cutlass/include
+		INCLUDE_PATH += -I../../cutlass/tools/util/include
+		INCLUDE_PATH += -I/home/spuser/agents/lib/python3.13/site-packages/torch/include
+		NVCCFLAGS += -DUSE_CUDA
+	endif
+else 
+	INCLUDE_PATH += -I$(LOFLOAT_ROOT)/third_party/xsimd/include
+endif
 
 # Add to ALL_EXEC conditionally
 ifeq ($(CUDA_AVAILABLE),yes)
@@ -64,6 +68,12 @@ endif
 ifeq ($(CUDA_AVAILABLE),yes)
 test_gemm_cuda: gemm_test.cu
 	$(NVCC) $(NVCCFLAGS) -w -Xcompiler -w -v -arch=$(CUDA_ARCH) $(INCLUDE_PATH) $< -o $@ -lcublas > build_log.txt 2>&1
+
+test_round_to_odd: round_to_odd.cu
+	$(NVCC) $(NVCCFLAGS) -w -Xcompiler -w -v -arch=$(CUDA_ARCH) $(INCLUDE_PATH) $< -o $@ -lcublas > build_log.txt 2>&1
+
+test_virtual_round_cuda: test_virtual_round.cu
+	$(NVCC) $(NVCCFLAGS) -DUSE_CUDA -w -Xcompiler -w -arch=$(CUDA_ARCH) $(INCLUDE_PATH) $< -o $@
 endif
 # Default / "all" option
 all: $(ALL_EXEC)
