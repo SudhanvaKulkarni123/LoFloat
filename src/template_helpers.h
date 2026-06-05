@@ -86,7 +86,7 @@ inline constexpr lo_float::Unsigned_behavior get_unsigned_behavior_v =
 template <class T, class = void>
 struct get_NaN_Behavior {                        // default: quiet NaN
     static constexpr lo_float::NaN_Behaviors value =
-        lo_float::NaN_Behaviors::QuietNaN;
+        lo_float::NaN_Behaviors::_3109;
 };
 
 template <class T>

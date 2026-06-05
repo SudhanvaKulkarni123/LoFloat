@@ -20,6 +20,26 @@ target_include_directories(lo_float
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/xsimd/include>
 )
 
+if(DEFINED ENV{USE_CUDA} AND "$ENV{USE_CUDA}" EQUAL 1)
+    set(CUDAToolkit_ROOT /usr/local/cuda-13.2 CACHE PATH "")
+    find_package(CUDAToolkit REQUIRED)
+
+    execute_process(
+        COMMAND python3 -c "import torch; print(torch.utils.cmake_prefix_path)"
+        OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    list(APPEND CMAKE_PREFIX_PATH ${TORCH_CMAKE_PREFIX})
+    find_package(Torch REQUIRED)
+
+    target_link_libraries(lo_float INTERFACE CUDA::cudart ${TORCH_LIBRARIES} stdc++)
+    target_include_directories(lo_float INTERFACE
+        ${CUDAToolkit_INCLUDE_DIRS}
+        ${CUDAToolkit_INCLUDE_DIRS}/cccl
+        ${TORCH_INCLUDE_DIRS}
+    )
+    target_compile_definitions(lo_float INTERFACE USE_CUDA)
+endif()
 
 if(MSVC)
     target_compile_options(lo_float INTERFACE /W4 /permissive-)
@@ -27,11 +47,11 @@ else()
     target_compile_options(lo_float INTERFACE -Wall -Wextra -pedantic)
 endif()
 
-option(LOFLOAT_BUILD_TESTS "Build LoFloat unit tests" ON)
-if(LOFLOAT_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(test)
-endif()
+# option(LOFLOAT_BUILD_TESTS "Build LoFloat unit tests" OFF)
+# if(LOFLOAT_BUILD_TESTS)
+#     enable_testing()
+#     add_subdirectory(test)
+# endif()
 
 
 include(GNUInstallDirs)

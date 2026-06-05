@@ -86,18 +86,18 @@ size_t get_page_size() {
 // Stub for TLB size (platform-dependent)
 size_t get_TLB_size(int level) {
 #if defined(__linux__) && defined(__x86_64__)
-    unsigned int eax, ebx, ecx, edx;
-    __cpuid(2, eax, ebx, ecx, edx);
-    unsigned int descriptors[4] = {eax, ebx, ecx, edx};
-    printf("TLB descriptors (raw):\n");
-    for (int i = 0; i < 4; i++) {
-        if (descriptors[i] & (1 << 31)) continue; // invalid
-        for (int j = 0; j < 4; j++) {
-            unsigned char desc = (descriptors[i] >> (j * 8)) & 0xFF;
-            if (desc == 0) continue;
-            printf("  0x%X\n", desc);
-        }
-    }
+    // unsigned int eax, ebx, ecx, edx;
+    // __cpuid(2, eax, ebx, ecx, edx);
+    // unsigned int descriptors[4] = {eax, ebx, ecx, edx};
+    // printf("TLB descriptors (raw):\n");
+    // for (int i = 0; i < 4; i++) {
+    //     if (descriptors[i] & (1 << 31)) continue; // invalid
+    //     for (int j = 0; j < 4; j++) {
+    //         unsigned char desc = (descriptors[i] >> (j * 8)) & 0xFF;
+    //         if (desc == 0) continue;
+    //         printf("  0x%X\n", desc);
+    //     }
+    // }
     return 0; // actual size must be interpreted from descriptor tables
 #else
     return 0;
@@ -107,33 +107,33 @@ size_t get_TLB_size(int level) {
 
 
 //test function for rate of streaming from L2 cache
-double L2_streaming_rate() {
-constexpr size_t N = 8 * 1024 * 1024; // 8M floats = 32MB (fits in L2 cache for many CPUs)
-std::vector<float> data(N, 1.0f);
+// double L2_streaming_rate() {
+// constexpr size_t N = 8 * 1024 * 1024; // 8M floats = 32MB (fits in L2 cache for many CPUs)
+// std::vector<float> data(N, 1.0f);
 
-// Warm-up: read all the data to ensure it's in L2
-volatile float sink = 0.0f;
-for (size_t i = 0; i < N; ++i) {
-    sink += data[i];
-}
+// // Warm-up: read all the data to ensure it's in L2
+// volatile float sink = 0.0f;
+// for (size_t i = 0; i < N; ++i) {
+//     sink += data[i];
+// }
 
-// Real measurement
-uint64_t start_cycles = rdtsc();
+// // Real measurement
+// uint64_t start_cycles = rdtsc();
 
-float sum0 = 0, sum1 = 0, sum2 = 0, sum3 = 0;
-for (size_t i = 0; i < N; i += 4) {
-    sum0 += data[i + 0];
-    sum1 += data[i + 1];
-    sum2 += data[i + 2];
-    sum3 += data[i + 3];
-}
+// float sum0 = 0, sum1 = 0, sum2 = 0, sum3 = 0;
+// for (size_t i = 0; i < N; i += 4) {
+//     sum0 += data[i + 0];
+//     sum1 += data[i + 1];
+//     sum2 += data[i + 2];
+//     sum3 += data[i + 3];
+// }
 
-uint64_t end_cycles = rdtsc();
+// uint64_t end_cycles = rdtsc();
 
-float total = sum0 + sum1 + sum2 + sum3;
+// float total = sum0 + sum1 + sum2 + sum3;
 
-uint64_t elapsed_cycles = end_cycles - start_cycles;
-double cycles_per_element = static_cast<double>(elapsed_cycles) / N;
+// uint64_t elapsed_cycles = end_cycles - start_cycles;
+// double cycles_per_element = static_cast<double>(elapsed_cycles) / N;
 
-return cycles_per_element;
-}
+// return cycles_per_element;
+// }

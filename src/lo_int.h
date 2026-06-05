@@ -250,8 +250,8 @@ template <int len>
 using uint_n = lo_float_internal::i_n<len, Signedness::Unsigned>;
 
 
-using  int4 = int_n<4>;
-using uint4 = uint_n<4>;
+//ing  int4 = int_n<4>;
+//ing uint4 = uint_n<4>;
 
 
 

@@ -1,5 +1,6 @@
 /// @author Sudhanva Kulkarni
 /// Simplke implementation of Varying Layout dense matrix
+#pragma once
 #include <algorithm>
 #include <concepts>
 #include <type_traits>
@@ -12,7 +13,7 @@
 using namespace std;
 using namespace lo_float;
 
-namespace Lo_Gemm {
+namespace lo_float {
 
 
 

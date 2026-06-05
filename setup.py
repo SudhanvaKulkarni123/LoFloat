@@ -34,12 +34,17 @@ if use_cuda:
     if use_openmp:
         cxx_args.append('-fopenmp')
 
+    
     # --- Paths and flags ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    cutlass_path = os.path.join(script_dir, 'third_party/cutlass')
     include_dirs = [
         os.path.join(script_dir, 'src/'),
         os.path.join(script_dir, 'third_party/xsimd/include'),
         os.path.join(cuda_home, 'include'),
+        os.path.join(cuda_home, 'include/cccl'),
+        os.path.join(cutlass_path, 'include'),
+        os.path.join(cutlass_path, 'tools/util/include'),
     ]
 
     ext = CUDAExtension(

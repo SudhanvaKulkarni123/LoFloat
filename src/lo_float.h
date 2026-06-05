@@ -1,8 +1,5 @@
 /// @author Sudhanva Kulkarni
-#ifndef LO_FLOAT_H
-#define LO_FLOAT_H
-// #define ENABLE_EXCEPT
-
+#pragma once
 #define LEN 13
 #include <random>
 #include <algorithm>
@@ -28,6 +25,8 @@
 #include "simd_helpers.hpp"     //simd helpers
 #endif
 #ifdef USE_CUDA
+#include <cuda_runtime.h>
+#include <cuda/std/bit>
 #include <cuda_fp16.h>
 #include <c10/util/Half.h>
 #endif
@@ -56,9 +55,9 @@ namespace xs = xsimd;
 namespace lo_float
 {
 
-    unsigned int lof_seed = static_cast<unsigned int>(std::time(nullptr));
+    inline thread_local unsigned int lof_seed = 12345;
 
-    void set_seed(unsigned int seed) {
+    inline void set_seed(unsigned int seed) {
         lof_seed = seed;
     }
 
@@ -475,22 +474,23 @@ namespace lo_float
 // ----- RoundBitsToNearestEven (unchanged) -----------------------------------
 
 template <typename Bits, typename Roundoff>
-constexpr inline Bits RoundBitsToNearestEven(Bits bits, Roundoff roundoff)
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsToNearestEven(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
     Bits bias;
+    #ifndef USE_CUDA
     if constexpr (is_xsimd_batch<Roundoff>::value)
     {
-        #ifndef USE_CUDA
         bias = xsimd::select(Bits(roundoff) == Bits{},
             Bits(0),
             (xs::bitwise_rshift(bits, xs::batch_cast<value_type>(roundoff)) & Bits(1))
                 + xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff - 1))
                 - Bits(1));
-        #endif
+    
     }
     else
+    #endif
     {
         bias = roundoff == 0
             ? Bits(0)
@@ -769,7 +769,7 @@ inline Bits True_Stochastic_Round(Bits bits, const Roundoff roundoff)
 // ----- RoundBitsTowardsZero -------------------------------------------------
 
 template <typename Bits, typename Roundoff>
-inline Bits RoundBitsTowardsZero(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsTowardsZero(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -797,7 +797,7 @@ inline Bits RoundBitsTowardsZero(Bits bits, Roundoff roundoff)
 // midpoint exactly (the tie case), giving ties-towards-zero behaviour.
 
 template <typename Bits, typename Roundoff>
-inline Bits RoundTiedBitsTowardsZero(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundTiedBitsTowardsZero(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -823,7 +823,7 @@ inline Bits RoundTiedBitsTowardsZero(Bits bits, Roundoff roundoff)
 // ----- RoundBitsAwayFromZero ------------------------------------------------
 
 template <typename Bits, typename Roundoff>
-inline Bits RoundBitsAwayFromZero(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsAwayFromZero(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -847,7 +847,7 @@ inline Bits RoundBitsAwayFromZero(Bits bits, Roundoff roundoff)
 // ----- RoundBitsToNearestOdd ------------------------------------------------
 
 template <typename Bits, typename Roundoff>
-constexpr inline Bits RoundBitsToNearestOdd(Bits bits, Roundoff roundoff)
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsToNearestOdd(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -878,7 +878,7 @@ constexpr inline Bits RoundBitsToNearestOdd(Bits bits, Roundoff roundoff)
 // Negative lanes: truncate only.
 
 template <typename Bits, typename Roundoff, typename BoolT>
-inline Bits RoundUp(Bits bits, Roundoff roundoff, BoolT positive)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundUp(Bits bits, Roundoff roundoff, BoolT positive)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -910,14 +910,16 @@ inline Bits RoundUp(Bits bits, Roundoff roundoff, BoolT positive)
 
 // Convenience overload: default positive = true
 template <typename Bits, typename Roundoff>
-inline Bits RoundUp(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundUp(Bits bits, Roundoff roundoff)
 {
+    #ifndef USE_CUDA
     if constexpr (is_xsimd_batch<Bits>::value)
     {
         using value_type = pod_type_t<Bits>;
         return RoundUp(bits, roundoff, xsimd::batch_bool<value_type>(true));
     }
     else
+    #endif
     {
         return RoundUp(bits, roundoff, true);
     }
@@ -928,7 +930,7 @@ inline Bits RoundUp(Bits bits, Roundoff roundoff)
 // Negative lanes: truncate + round up (increase magnitude) if remainder.
 
 template <typename Bits, typename Roundoff, typename BoolT>
-inline Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -949,22 +951,24 @@ inline Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
     }
     else
     {
-        auto mask = ~((Bits{1} << roundoff) - 1);
-        Bits truncated = bits & mask;
-        return truncated + (!positive ? (bits > 0 ? Bits{1} << roundoff : 0) : 0);
+        const Bits low_mask = (Bits{1} << roundoff) - 1;
+        Bits truncated = bits & ~low_mask;
+        return truncated + ((!positive && (bits & low_mask) != 0) ? Bits{1} << roundoff : 0);
     }
 }
 
 // Convenience overload: default positive = true
 template <typename Bits, typename Roundoff>
-inline Bits RoundDown(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundDown(Bits bits, Roundoff roundoff)
 {
+    #ifndef USE_CUDA
     if constexpr (is_xsimd_batch<Bits>::value)
     {
         using value_type = pod_type_t<Bits>;
         return RoundDown(bits, roundoff, xsimd::batch_bool<value_type>(true));
     }
     else
+    #endif
     {
         return RoundDown(bits, roundoff, true);
     }
@@ -974,7 +978,7 @@ inline Bits RoundDown(Bits bits, Roundoff roundoff)
 // Round to nearest; break ties away from zero (if R==1, round up).
 
 template <typename Bits, typename Roundoff>
-inline Bits RoundTiesToAway(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundTiesToAway(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -1029,8 +1033,10 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
 }
         //#TODO: add sign to list of args for roundUp and RoundDown
         template <typename Bits>
-        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundMantissa(Bits bits, const int roundoff, const Rounding_Mode rm, const int len = 0)
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundMantissa(Bits bits, const int roundoff, const Rounding_Mode rm, const int len = 0, const bool pos = false)
         {
+
+    
             switch (rm)
             {
             case Rounding_Mode::RoundToNearestEven:
@@ -1042,9 +1048,9 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             case Rounding_Mode::RoundAwayFromZero:
                 return RoundBitsAwayFromZero(bits, roundoff);
             case Rounding_Mode::RoundUp:
-                return RoundUp(bits, roundoff);
+                return RoundUp(bits, roundoff, pos);
             case Rounding_Mode::RoundDown:
-                return RoundDown(bits, roundoff);
+                return RoundDown(bits, roundoff, pos);
             case Rounding_Mode::RoundTiesToAway:
                 return RoundTiesToAway(bits, roundoff);
             case Rounding_Mode::StochasticRoundingA:
@@ -1062,7 +1068,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
 
         #ifndef USE_CUDA
         template <typename Bits, typename Roundoff,  class arch = xsimd::default_arch>
-        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE xs::batch<Bits, arch> RoundMantissa(xs::batch<Bits, arch> bits, const xs::batch<Roundoff, arch> roundoff, const Rounding_Mode rm, const int len = 0)
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE xs::batch<Bits, arch> RoundMantissa(xs::batch<Bits, arch> bits, const xs::batch<Roundoff, arch> roundoff, const Rounding_Mode rm, const int len = 0, const bool pos = true)
         {
             switch (rm)
             {
@@ -1075,9 +1081,9 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             case Rounding_Mode::RoundAwayFromZero:
                 return RoundBitsAwayFromZero(bits, roundoff);
             case Rounding_Mode::RoundUp:
-                return RoundUp(bits, roundoff);
+                return RoundUp(bits, roundoff, pos);
             case Rounding_Mode::RoundDown:
-                return RoundDown(bits, roundoff);
+                return RoundDown(bits, roundoff, pos);
             case Rounding_Mode::RoundTiesToAway:
                 return RoundTiesToAway(bits, roundoff);
             case Rounding_Mode::StochasticRoundingA:
@@ -2355,20 +2361,40 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE c10::Half abs(c10::Half val) {
 template<typename From>
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
 
+   
     using FromBits = typename Traits<From>::BitsType;
-    static constexpr int kFromBits = Traits<From>::kBits;
-    int kDigitShift = ToMantissaBits - Traits<From>::kMantissaBits;
-    static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
-    FromBits from_bits =
-        bit_cast<FromBits>(abs(from));
-    {
-        from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
-        from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
-    }
+static constexpr int kFromBits = Traits<From>::kBits;
+int kDigitShift = ToMantissaBits - Traits<From>::kMantissaBits;
+static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
+     #ifdef USE_CUDA
+     const auto sign_bit = cuda::std::bit_cast<FromBits>(from) & (FromBits{1} << (kFromBits - 1));
+     #else
+     const auto sign_bit = std::bit_cast<FromBits>(from) & (FromBits{1} << (kFromBits - 1));
+     #endif
 
-    // from_bits += static_cast<FromBits>(kExponentOffset)
-    //                             << kFromMantissaBits;
-    return bit_cast<From>(from_bits);
+#ifdef USE_CUDA
+    FromBits from_bits = cuda::std::bit_cast<FromBits>(abs(from));
+#else 
+    FromBits from_bits = std::bit_cast<FromBits>(abs(from));
+#endif
+// {
+     from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len, sign_bit == 0);
+
+    
+     from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
+// }
+
+#ifdef USE_CUDA
+if constexpr (std::is_same_v<From, c10::Half>) {
+    c10::Half ret;
+    ret.x = static_cast<uint16_t>(from_bits | sign_bit);
+        return ret;
+} else {
+return cuda::std::bit_cast<From>(from_bits | sign_bit);
+}
+#else
+return std::bit_cast<From>(from_bits | sign_bit);
+#endif
     
 }
 
@@ -3811,4 +3837,4 @@ struct DeviceNaNChecker {
 
 } // namespace lo_float
 
-#endif // FLOAT_6_4
+

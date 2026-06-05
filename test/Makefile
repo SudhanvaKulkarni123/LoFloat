@@ -1,9 +1,11 @@
 # Compiler / flags
 CXX       ?= g++
-CXXFLAGS  += -std=c++20 -O3 -march=armv9-a+sve -msve-vector-bits=128
+CXXFLAGS  += -std=c++20 -O3
 CDBG      += -w
 
 OPENMP_FLAG := -fopenmp -funroll-loops -fprefetch-loop-arrays -frename-register 
+
+USE_CUDA_VAR := $(if $(USE_CUDA),$(USE_CUDA),0)
 
 OPENMP_AVAILABLE := $(shell \
   echo "int main(){return 0;}" | \
@@ -13,6 +15,12 @@ ifeq ($(OPENMP_AVAILABLE),yes)
   CXXFLAGS += $(OPENMP_FLAG) -D_LOFOPENMP
 endif
 
+CUDA_AVAILABLE := $(shell \
+  echo "int main(){return 0;}" | \
+  nvcc -x cu - -o /dev/null 2>/dev/null && echo yes)
+
+
+
 # LoFloat root: Makefile is in LoFloat/test, so root is one level up
 MAKEFILE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 LOFLOAT_ROOT ?= $(abspath $(MAKEFILE_DIR)/..)
@@ -21,7 +29,7 @@ LOFLOAT_ROOT ?= $(abspath $(MAKEFILE_DIR)/..)
 INCLUDE_PATH += -I$(LOFLOAT_ROOT)
 INCLUDE_PATH += -I$(LOFLOAT_ROOT)/src
 INCLUDE_PATH += -I$(LOFLOAT_ROOT)/test
-INCLUDE_PATH += -I$(LOFLOAT_ROOT)/third_party/xsimd/include
+
 
 # LLVM IR flags
 LLVM_FLAGS = -S -emit-llvm
@@ -33,6 +41,40 @@ ALL_EXEC = test_lo_float test_lo_int test_expectation \
            test_compare test_compare_int test_recip test_float_int \
            test_dot test_gemm
 
+
+
+# ── CUDA settings ────────────────────────────────────────────────
+NVCC      ?= nvcc
+NVCCFLAGS += -std=c++20 -O3 -w -lineinfo
+CUDA_ARCH ?= sm_86    # RTX 3070; change as needed
+
+ifeq ($(USE_CUDA_VAR),1)
+	ifeq ($(CUDA_AVAILABLE),yes)
+		INCLUDE_PATH += -I../../cutlass/include
+		INCLUDE_PATH += -I../../cutlass/tools/util/include
+		INCLUDE_PATH += -I/home/spuser/agents/lib/python3.13/site-packages/torch/include
+		NVCCFLAGS += -DUSE_CUDA
+	endif
+else 
+	INCLUDE_PATH += -I$(LOFLOAT_ROOT)/third_party/xsimd/include
+endif
+
+# Add to ALL_EXEC conditionally
+ifeq ($(CUDA_AVAILABLE),yes)
+  ALL_EXEC += test_gemm_cuda
+endif
+
+# Build rule
+ifeq ($(CUDA_AVAILABLE),yes)
+test_gemm_cuda: gemm_test.cu
+	$(NVCC) $(NVCCFLAGS) -w -Xcompiler -w -v -arch=$(CUDA_ARCH) $(INCLUDE_PATH) $< -o $@ -lcublas > build_log.txt 2>&1
+
+test_round_to_odd: round_to_odd.cu
+	$(NVCC) $(NVCCFLAGS) -w -Xcompiler -w -v -arch=$(CUDA_ARCH) $(INCLUDE_PATH) $< -o $@ -lcublas > build_log.txt 2>&1
+
+test_virtual_round_cuda: test_virtual_round.cu
+	$(NVCC) $(NVCCFLAGS) -DUSE_CUDA -w -Xcompiler -w -arch=$(CUDA_ARCH) $(INCLUDE_PATH) $< -o $@
+endif
 # Default / "all" option
 all: $(ALL_EXEC)
 
@@ -90,6 +132,7 @@ test_dot: dot_test.cpp
 
 test_gemm: gemm_test.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDE_PATH) $< -o $@
+
 
 # LLVM IR targets (optional)
 lo_float_test.ll: lo_float_test.cpp

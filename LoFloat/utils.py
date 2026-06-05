@@ -3,58 +3,89 @@ import torch
 import torch.nn as nn
 import LoFloat as lof
 
-
-def lofloatify(model: nn.Module, rounding_mode: lof.RoundingMode = lof.RoundingMode.RoundToNearestEven, device="cuda", debug=False) -> nn.Module:
+def lofloatify(
+    model: nn.Module,
+    rounding_mode: lof.RoundingMode = lof.RoundingMode.RoundToNearestEven,
+    device="cuda",
+    debug=False,
+    skip_layer_names: set | None = None,   # full dotted names to leave unconverted
+    _prefix: str = "",                      # internal – tracks current path during recursion
+) -> nn.Module:
     model = copy.deepcopy(model)
     lof.replace_mha_with_explicit(model)
     single_params = lof.create_single_params()
+
     for name, module in model.named_children():
+        full_name = f"{_prefix}.{name}" if _prefix else name
+
         if isinstance(module, nn.Linear):
-            new_layer = lof.LoF_Linear.from_linear(
-                module,
-                weight_params=single_params,
-                act_params=single_params,
-                bias_params=single_params,
-                rounding_mode=rounding_mode
-            )
-            if debug:
-                print(f"  orig dtype: {module.weight.dtype}")
-                print(f"  new dtype:  {new_layer.weight.dtype}")
-                diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
-                print(f"{name} (Linear)")
-                print(f"  diff mean: {diff.mean():.10f}")
-                print(f"  diff max:  {diff.abs().max():.10f}")
-                print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
-                print(f"  has NaN:   {torch.isnan(diff).any()}")
-            if isinstance(model, nn.Sequential):
-                model[int(name)] = new_layer
+            if skip_layer_names and full_name in skip_layer_names:
+                # Keep the original nn.Linear untouched
+                pass
             else:
-                setattr(model, name, new_layer)
+                new_layer = lof.LoF_Linear.from_linear(
+                    module,
+                    weight_params=single_params,
+                    act_params=single_params,
+                    bias_params=single_params,
+                    rounding_mode=rounding_mode,
+                )
+                if debug:
+                    print(f"  orig dtype: {module.weight.dtype}")
+                    print(f"  new dtype:  {new_layer.weight.dtype}")
+                    diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
+                    print(f"{full_name} (Linear)")
+                    print(f"  diff mean: {diff.mean():.10f}")
+                    print(f"  diff max:  {diff.abs().max():.10f}")
+                    print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
+                    print(f"  has NaN:   {torch.isnan(diff).any()}")
+                if isinstance(model, nn.Sequential):
+                    model[int(name)] = new_layer
+                else:
+                    setattr(model, name, new_layer)
+
         elif isinstance(module, nn.Conv2d):
-            new_layer = lof.LoF_Conv2d.from_conv2d(
-                module,
-                weight_params=single_params,
-                act_params=single_params,
-                bias_params=single_params,
-                rounding_mode=rounding_mode
-            )
-            if debug:
-                print(f"  orig dtype: {module.weight.dtype}")
-                print(f"  new dtype:  {new_layer.weight.dtype}")
-                diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
-                print(f"{name} (Conv2d)")
-                print(f"  diff mean: {diff.mean():.10f}")
-                print(f"  diff max:  {diff.abs().max():.10f}")
-                print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
-                print(f"  has NaN:   {torch.isnan(diff).any()}")
-            if isinstance(model, nn.Sequential):
-                model[int(name)] = new_layer
+            if skip_layer_names and full_name in skip_layer_names:
+                # Keep the original nn.Conv2d untouched
+                pass
             else:
-                setattr(model, name, new_layer)
+                new_layer = lof.LoF_Conv2d.from_conv2d(
+                    module,
+                    weight_params=single_params,
+                    act_params=single_params,
+                    bias_params=single_params,
+                    rounding_mode=rounding_mode,
+                )
+                if debug:
+                    print(f"  orig dtype: {module.weight.dtype}")
+                    print(f"  new dtype:  {new_layer.weight.dtype}")
+                    diff = new_layer.weight.data.cpu().float() - module.weight.data.cpu().float()
+                    print(f"{full_name} (Conv2d)")
+                    print(f"  diff mean: {diff.mean():.10f}")
+                    print(f"  diff max:  {diff.abs().max():.10f}")
+                    print(f"  diff rms:  {diff.pow(2).mean().sqrt():.10f}")
+                    print(f"  has NaN:   {torch.isnan(diff).any()}")
+                if isinstance(model, nn.Sequential):
+                    model[int(name)] = new_layer
+                else:
+                    setattr(model, name, new_layer)
+
         else:
-            setattr(model, name, lofloatify(module, rounding_mode=rounding_mode, debug=debug))
+            setattr(
+                model,
+                name,
+                lofloatify(
+                    module,
+                    rounding_mode=rounding_mode,
+                    debug=debug,
+                    skip_layer_names=skip_layer_names,
+                    _prefix=full_name,        # propagate the growing path
+                ),
+            )
+
     return model
 
+    
 #set mantissa_bits for activation, weight or bias of all layers
 def set_mantissa_fields(model, activation_mantissa_bits: dict, weight_mantissa_bits: dict, bias_mantissa_bits: dict):
     for name, module in model.named_modules():
@@ -108,6 +139,18 @@ def set_saturation_modes(model, activation_sat: dict, weight_sat: dict, bias_sat
             continue
 
         module.set_saturation_mode(act_sat, w_sat, b_sat)
+
+def set_accumulation_precisions(model, accum_dict : dict):
+
+    for name, module in model.named_modules():
+        accum_bits = accum_dict.get(name)
+        if not isinstance(module, (lof.LoF_Linear, lof.LoF_Conv2d)):
+            continue
+        if accum_bits <= 0 or accum_bits > 23 :
+            print(f"[set_accumulation_precisions] skipping '{name}': invalid mantissa bits {accum_bits}")
+            continue
+        
+        module.set_accumulation_precision(accum_bits)
 
 def set_all_to_half(model):
     half_params = lof.create_half_params()
@@ -190,73 +233,70 @@ def print_exp_mant(model):
 def name_type(total_bits, mantissa_bits):
     return f"binary{total_bits}p{mantissa_bits}"
 
-
-def record_formats(model):
+def record_formats(model, batch_size=1):
     formats_flops = {}
+    gemm_stats = {}  # {(M, N, K): {precision_tuple: count}}
 
     for name, module in model.named_modules():
         if isinstance(module, (lof.LoF_Linear, lof.LoF_Conv2d)):
             act_format = name_type(module.act_params.total_bits, module.act_params.mantissa_bits)
             weight_format = name_type(module.weight_params.total_bits, module.weight_params.mantissa_bits)
             bias_format = name_type(module.bias_params.total_bits, module.bias_params.mantissa_bits)
+            accum_format = name_type(9 + module.accum_mant_bits, 1 + module.accum_mant_bits)
+            format_key = (act_format, weight_format, bias_format, accum_format)
 
             if isinstance(module, lof.LoF_Linear):
-                num_flops_of_layer = 2 * module.in_features * module.out_features
+                M = batch_size
+                N = module.out_features
+                K = module.in_features
+                num_flops_of_layer = 2 * M * N * K
             elif isinstance(module, lof.LoF_Conv2d):
                 out_h, out_w = module.output_size if hasattr(module, 'output_size') else (1, 1)
-                num_flops_of_layer = (
-                    2 * module.in_channels * module.out_channels
-                    * module.kernel_size[0] * module.kernel_size[1]
-                    * out_h * out_w // module.groups
-                )
+                M = module.out_channels
+                N = batch_size * out_h * out_w
+                K = (module.in_channels // module.groups) * module.kernel_size[0] * module.kernel_size[1]
+                num_flops_of_layer = 2 * M * N * K
 
-            format_key = (act_format, weight_format, bias_format)
+            # --- existing formats_flops bookkeeping ---
             if format_key not in formats_flops:
                 formats_flops[format_key] = 0
             formats_flops[format_key] += num_flops_of_layer
+
+            # --- new GEMM shape bookkeeping ---
+            mnk_key = (M, N, K)
+            if mnk_key not in gemm_stats:
+                gemm_stats[mnk_key] = {}
+            if format_key not in gemm_stats[mnk_key]:
+                gemm_stats[mnk_key][format_key] = 0
+            gemm_stats[mnk_key][format_key] += 1
 
         else:
             # All non-LoF layers counted as fp32
             num_flops_of_layer = 0
 
             if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm1d)):
-                # Normalize: subtract mean, divide std -> 2 FLOPs per element
-                # Scale and shift (gamma, beta) -> 2 FLOPs per element
-                # Total: 4 * num_features * spatial_size
                 out_h, out_w = module.output_size if hasattr(module, 'output_size') else (1, 1)
                 spatial = out_h * out_w if isinstance(module, nn.BatchNorm2d) else 1
                 num_flops_of_layer = 4 * module.num_features * spatial
 
-            # elif isinstance(module, nn.ReLU) or isinstance(module, nn.ReLU6):
-            #     # 1 comparison per element
-            #     if hasattr(module, 'output_size'):
-            #         out_h, out_w = module.output_size
-            #         num_flops_of_layer = module.inplace * out_h * out_w  # approximate
-            #     # Often ignored or estimated from previous layer
-
             elif isinstance(module, nn.LeakyReLU):
-                # 1 comparison + 1 multiply per element
                 if hasattr(module, 'output_size') and hasattr(module, 'num_channels'):
                     out_h, out_w = module.output_size
                     num_flops_of_layer = 2 * module.num_channels * out_h * out_w
 
             elif isinstance(module, nn.SiLU):
-                # sigmoid (4 FLOPs) + multiply (1 FLOP) = ~5 per element
                 if hasattr(module, 'output_size') and hasattr(module, 'num_channels'):
                     out_h, out_w = module.output_size
                     num_flops_of_layer = 5 * module.num_channels * out_h * out_w
 
             elif isinstance(module, (nn.MaxPool2d, nn.AvgPool2d)):
-                # Comparisons/additions over the pooling window per output element
                 if hasattr(module, 'output_size') and hasattr(module, 'num_channels'):
                     k = module.kernel_size if isinstance(module.kernel_size, int) else module.kernel_size[0] * module.kernel_size[1]
                     k_area = k * k if isinstance(module.kernel_size, int) else k
                     out_h, out_w = module.output_size
-                    # (k_area - 1) comparisons or additions per output element
                     num_flops_of_layer = (k_area - 1) * module.num_channels * out_h * out_w
 
             elif isinstance(module, nn.AdaptiveAvgPool2d):
-                # Similar to AvgPool but kernel is inferred
                 if hasattr(module, 'output_size') and hasattr(module, 'input_size') and hasattr(module, 'num_channels'):
                     in_h, in_w = module.input_size
                     out_h, out_w = module.output_size
@@ -264,8 +304,6 @@ def record_formats(model):
                     num_flops_of_layer = (k_h * k_w - 1) * module.num_channels * out_h * out_w
 
             elif isinstance(module, nn.Upsample) or isinstance(module, nn.UpsamplingNearest2d):
-                # Nearest: ~0 FLOPs (just copy)
-                # Bilinear: ~4 multiplies + 3 adds per output element
                 if hasattr(module, 'output_size') and hasattr(module, 'num_channels'):
                     out_h, out_w = module.output_size
                     if module.mode == 'bilinear':
@@ -274,21 +312,19 @@ def record_formats(model):
                         num_flops_of_layer = 0
 
             elif isinstance(module, nn.Sigmoid):
-                # exp + add + div ~ 4 FLOPs per element
                 if hasattr(module, 'output_size') and hasattr(module, 'num_channels'):
                     out_h, out_w = module.output_size
                     num_flops_of_layer = 4 * module.num_channels * out_h * out_w
 
             elif isinstance(module, nn.Softmax):
-                # exp per element + sum + div per element ~ 3n
                 if hasattr(module, 'num_elements'):
                     num_flops_of_layer = 3 * module.num_elements
 
             elif isinstance(module, nn.Dropout):
-                num_flops_of_layer = 0  # No FLOPs at inference
+                num_flops_of_layer = 0
 
             if num_flops_of_layer > 0:
-                fp32_key = ("fp32", "fp32", "fp32")
+                fp32_key = ("fp32", "fp32", "fp32", "fp32")
                 if fp32_key not in formats_flops:
                     formats_flops[fp32_key] = 0
                 formats_flops[fp32_key] += num_flops_of_layer
@@ -296,9 +332,9 @@ def record_formats(model):
     total_flops = sum(formats_flops.values())
     for format_key, flops in formats_flops.items():
         percentage = (flops / total_flops) * 100 if total_flops > 0 else 0
-        formats_flops[format_key] = (percentage)
+        formats_flops[format_key] = percentage
 
-    return formats_flops
+    return formats_flops, gemm_stats
 
 def sparsity_in_weights(model):
     sparsity_dict = {}

@@ -1,17 +1,19 @@
 #include <torch/extension.h>
 #include "lo_float.h"
+#include "Lof_kernels.h"
 #include <stdexcept>
 
 namespace py = pybind11;
 using namespace lo_float;
 
+
 #ifdef USE_CUDA
 namespace lo_float {
 template <typename T>
-void round_mantissa(const T* in, T* out, int64_t n, int mantissa_bits, Rounding_Mode round_mode, int stoch_len);
+void round_mantissa(const T* in, T* out, int64_t n, int mantissa_bits, Rounding_Mode round_mode, int stoch_len, T scale);
 
 template <typename T>
-void round_fp_params(T* inout, int64_t n, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker> params, Rounding_Mode round_mode, int stoch_len);
+void round_fp_params(T* inout, int64_t n, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker> params, Rounding_Mode round_mode, int stoch_len, T scale);
 }
 #endif
 
@@ -72,7 +74,7 @@ static DeviceNaNChecker make_device_nan(const FloatingPointParamsPy &p, const De
     return { inf.exp_mask, inf.mant_mask, p.IsNaN.attr("qNanBitPattern")().cast<uint64_t>(), p.IsNaN.attr("sNanBitPattern")().cast<uint64_t>() };
 }
 
-torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa_bits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa_bits, lo_float::Rounding_Mode round_mode = lo_float::Rounding_Mode::RoundToNearestEven, int stoch_len = 0, double scale = 1.0) {
     auto output = torch::empty_like(input);
     #ifdef USE_CUDA
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "virtual_round_mantissa", ([&] {
@@ -80,29 +82,32 @@ torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa
         auto* out_ptr = output.data_ptr<scalar_t>();
         if (input.is_cuda()) {
 #ifdef USE_CUDA
-            round_mantissa(in_ptr, out_ptr, input.numel(), to_mantissa_bits, round_mode, stoch_len);
+            round_mantissa(in_ptr, out_ptr, input.numel(), to_mantissa_bits, round_mode, stoch_len, static_cast<scalar_t>(scale));
 #else
             throw std::runtime_error("CUDA not available in this build");
 #endif
         } else {
 #ifndef USE_CUDA
-            virtual_round(in_ptr, out_ptr, to_mantissa_bits, input.numel(), round_mode, stoch_len);
+            // CPU path: pre-multiply the input by scale (less perf-critical than GPU).
+            auto scaled = (scale == 1.0) ? input : input.mul(scale);
+            virtual_round(scaled.data_ptr<scalar_t>(), out_ptr, to_mantissa_bits, input.numel(), round_mode, stoch_len);
 #endif
         }
     }));
-    #else 
+    #else
     AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "virtual_round_mantissa", ([&] {
         auto* in_ptr  = input.data_ptr<scalar_t>();
         auto* out_ptr = output.data_ptr<scalar_t>();
         if (input.is_cuda()) {
 #ifdef USE_CUDA
-            round_mantissa(in_ptr, out_ptr, input.numel(), to_mantissa_bits, round_mode, stoch_len);
+            round_mantissa(in_ptr, out_ptr, input.numel(), to_mantissa_bits, round_mode, stoch_len, static_cast<scalar_t>(scale));
 #else
             throw std::runtime_error("CUDA not available in this build");
 #endif
         } else {
 #ifndef USE_CUDA
-            virtual_round(in_ptr, out_ptr, to_mantissa_bits, input.numel(), round_mode, stoch_len);
+            auto scaled = (scale == 1.0) ? input : input.mul(scale);
+            virtual_round(scaled.data_ptr<scalar_t>(), out_ptr, to_mantissa_bits, input.numel(), round_mode, stoch_len);
 #endif
         }
     }));
@@ -111,7 +116,7 @@ torch::Tensor virtual_round_mantissa(const torch::Tensor &input, int to_mantissa
     return output;
 }
 
-torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPointParamsPy &params, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPointParamsPy &params, lo_float::Rounding_Mode round_mode = lo_float::Rounding_Mode::RoundToNearestEven, int stoch_len = 0, double scale = 1.0) {
     auto output = torch::empty_like(input);
     if (input.is_cuda()) {
         #ifdef USE_CUDA
@@ -124,13 +129,15 @@ torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPoi
         };
         AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "virtual_round_params_cuda", ([&] {
             output = input.clone();
-            round_fp_params(output.data_ptr<scalar_t>(), output.numel(), cpp_params, round_mode, stoch_len);
+            round_fp_params(output.data_ptr<scalar_t>(), output.numel(), cpp_params, round_mode, stoch_len, static_cast<scalar_t>(scale));
         }));
-        #else 
+        #else
         throw std::runtime_error("CUDA not available in this build");
         #endif
     } else {
         #ifndef USE_CUDA
+        // CPU path: pre-multiply the input by scale (less perf-critical than GPU).
+        auto scaled = (scale == 1.0) ? input : input.mul(scale);
         PyInfCheckerAdapter inf_adapter{params.IsInf};
         PyNaNCheckerAdapter nan_adapter{params.IsNaN};
         auto cpp_params = FloatingPointParams<PyInfCheckerAdapter, PyNaNCheckerAdapter>{
@@ -139,12 +146,13 @@ torch::Tensor virtual_round_params(const torch::Tensor &input, const FloatingPoi
             inf_adapter, nan_adapter, Unsigned_behavior::NegtoZero
         };
         AT_DISPATCH_FLOATING_TYPES(input.scalar_type(), "virtual_round_params_cpu", ([&] {
-            virtual_round(input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), input.numel(), cpp_params, round_mode, stoch_len);
+            virtual_round(scaled.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), input.numel(), cpp_params, round_mode, stoch_len);
         }));
         #endif
     }
     return output;
 }
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "Runtime float format converter with custom quantization";
@@ -193,9 +201,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("virtual_round", &virtual_round_mantissa,
           py::arg("input"), py::arg("to_mantissa_bits"),
-          py::arg("round_mode") = Rounding_Mode::RoundToNearestEven, py::arg("stoch_len") = 0);
+          py::arg("round_mode") = Rounding_Mode::RoundToNearestEven, py::arg("stoch_len") = 0,
+          py::arg("scale") = 1.0,
+          "Round to a target mantissa bitwidth. If scale != 1, computes round(scale * input) (fused on CUDA).");
 
     m.def("virtual_round", &virtual_round_params,
           py::arg("input"), py::arg("params"),
-          py::arg("round_mode") = Rounding_Mode::RoundToNearestEven, py::arg("stoch_len") = 0);
+          py::arg("round_mode") = Rounding_Mode::RoundToNearestEven, py::arg("stoch_len") = 0,
+          py::arg("scale") = 1.0,
+          "Round to a custom float format. If scale != 1, computes round(scale * input) (fused on CUDA).");
+
+    #ifdef USE_CUDA
+    m.def("lof_gemm",
+        &lo_float::LoF_gemm,
+        py::arg("A"),
+        py::arg("B"),
+        py::arg("accum_mant_bits"),
+        py::arg("round_mode")              = Rounding_Mode::RoundToNearestEven,
+        py::arg("stochastic_rounding_bits") = 0,
+        py::arg("scale_a")                 = 1.0,
+        py::arg("scale_b")                 = 1.0,
+        "Low-precision GEMM (float32 only). Output is divided by (scale_a * scale_b) "
+        "to rescale back to the original (unscaled) domain when A, B were obtained by "
+        "scale-then-quantize. Returns output tensor D.");
+    #endif
 }
