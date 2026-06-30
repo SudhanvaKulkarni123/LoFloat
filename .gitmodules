@@ -7,3 +7,6 @@
 [submodule "third_party/cutlass"]
 	path = third_party/cutlass
 	url = git@github.com:SudhanvaKulkarni123/cutlass.git
+[submodule "third_party/blis"]
+	path = third_party/blis
+	url = https://github.com/flame/blis.git
