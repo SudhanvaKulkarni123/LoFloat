@@ -55,7 +55,7 @@ __global__ void vr_mantissa_kernel(const float* __restrict__ in,
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float v = in[idx];
-        out[idx] = lo_float::virtual_round(v, ToMantissaBits, mode, stoch_len);
+        out[idx] = lo_float::virtual_round(v, ToMantissaBits, lo_float::ProjSpec{mode, lo_float::Saturation_Mode::OvfInf, stoch_len});
     }
 }
 
@@ -70,7 +70,7 @@ __global__ void vr_fp_params_kernel(const float* __restrict__ in,
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float v = in[idx];
-        out[idx] = lo_float::virtual_round(v, params, mode, stoch_len);
+        out[idx] = lo_float::virtual_round(v, params, lo_float::ProjSpec{mode, lo_float::Saturation_Mode::OvfInf, stoch_len});
     }
 }
 

@@ -108,7 +108,14 @@ public:
   constexpr i_n(i_n&&)                 noexcept = default;
   constexpr i_n& operator=(const i_n&) noexcept = default;
 
-  template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+  // Accept the standard integer types AND the 128-bit extended integers. The
+  // binary operators below build results via `i_n(int_value() op ...)`, and
+  // int_value() is __int128_t -- which std::is_integral_v rejects under strict
+  // -std=c++20, so it must be admitted explicitly or i_n arithmetic won't compile.
+  template <typename T,
+            std::enable_if_t<std::is_integral_v<T>
+                             || std::is_same_v<std::remove_cv_t<T>, __int128_t>
+                             || std::is_same_v<std::remove_cv_t<T>, __uint128_t>, int> = 0>
   explicit constexpr i_n(T x) : v_(clamp_to_storage(__int128_t(x))) {}
 
   // ------------------------------------------------------------------------
@@ -296,6 +303,153 @@ struct intn_numeric_limits_base {
   static constexpr lo_float_internal::i_n<len, Sign> denorm_min() noexcept { return lo_float_internal::i_n<len, Sign>(0); }
 };
 
+// -----------------------------------------------------------------------------
+//  fixed_point<IntBits, FracBits, Sign>  – Q(IntBits.FracBits) fixed-point
+// -----------------------------------------------------------------------------
+//  A bitstring of W = IntBits + FracBits bits split into an integer part (top
+//  IntBits bits) and a fractional part (bottom FracBits bits).  The real value
+//  is   int_part + 2^{-FracBits} * frac_part   =   raw * 2^{-FracBits},
+//  where `raw` is the W-bit two's-complement (Signed) or unsigned integer.
+//
+//  Storage holds the *native* (sign-extended, range-clamped) integer value, so
+//  the field decomposition reads back exactly:
+//      int_part()  = raw >> FracBits        (arithmetic shift for Signed)
+//      frac_part() = raw & (2^FracBits - 1)
+//
+//  All arithmetic is saturating; from-double rounds to nearest, ties away from
+//  zero; mul/div truncate toward zero (the surplus low fractional bits are
+//  dropped).  W is capped at 32 so every intermediate fits a 64-bit integer,
+//  which keeps the type usable on both host and CUDA device.
+// -----------------------------------------------------------------------------
+template <int IntBits, int FracBits, lo_float::Signedness Sign = Signedness::Signed>
+class fixed_point {
+  static_assert(IntBits  >= 1, "IntBits must be >= 1");
+  static_assert(FracBits >= 1, "FracBits must be >= 1");
+  static constexpr int W = IntBits + FracBits;
+  static_assert(W >= 2 && W <= 32, "IntBits + FracBits must be in [2,32]");
+
+  static constexpr bool kSigned = (Sign == Signedness::Signed);
+
+  using Storage = std::conditional_t< kSigned,
+                                      get_signed_type_t<W>,
+                                      get_unsigned_type_t<W> >;
+  // 64-bit intermediates: every product / shifted value for W<=32 fits.
+  using SC = long long;            // signed compute type (add/sub/signed mul/div)
+  using UC = unsigned long long;   // unsigned compute type (unsigned mul/div)
+
+  static constexpr SC ONE       = SC(1) << FracBits;           // 2^FracBits
+  static constexpr SC FRAC_MASK = ONE - 1;                     // low FracBits set
+  static constexpr SC HIGHEST_RAW = kSigned ? ((SC(1) << (W - 1)) - 1)
+                                            : ((SC(1) << W) - 1);
+  static constexpr SC LOWEST_RAW  = kSigned ? -(SC(1) << (W - 1)) : SC(0);
+
+  template <typename C>
+  static constexpr LOFLOAT_HOST_DEVICE Storage clamp_c(C r) noexcept {
+    if (r > C(HIGHEST_RAW)) return Storage(HIGHEST_RAW);
+    if (r < C(LOWEST_RAW))  return Storage(LOWEST_RAW);
+    return Storage(r);
+  }
+
+  static LOFLOAT_HOST_DEVICE Storage raw_from_double(double x) noexcept {
+    if (!(x == x)) return Storage(0);                          // NaN -> 0
+    const double maxv = double(HIGHEST_RAW) / double(ONE);
+    const double minv = double(LOWEST_RAW)  / double(ONE);
+    if (x >= maxv) return Storage(HIGHEST_RAW);                // saturate up
+    if (x <= minv) return Storage(LOWEST_RAW);                 // saturate down
+    const double scaled  = x * double(ONE);
+    // round to nearest, ties away from zero (cast truncates toward zero)
+    const double rounded = scaled + (scaled >= 0.0 ? 0.5 : -0.5);
+    return clamp_c<SC>(SC(rounded));
+  }
+
+  Storage raw_{};  // native, range-clamped value (== value * 2^FracBits)
+
+public:
+  // ---- ctors ----
+  constexpr fixed_point() noexcept : raw_(0) {}
+  constexpr fixed_point(const fixed_point&) noexcept = default;
+  constexpr fixed_point& operator=(const fixed_point&) noexcept = default;
+
+  LOFLOAT_HOST_DEVICE explicit fixed_point(double x) noexcept : raw_(raw_from_double(x)) {}
+  LOFLOAT_HOST_DEVICE explicit fixed_point(float  x) noexcept : raw_(raw_from_double(double(x))) {}
+
+  // Integer value v -> fixed value v.0 (NOT a raw bit pattern; use FromRaw for that).
+  template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+  LOFLOAT_HOST_DEVICE explicit constexpr fixed_point(T v) noexcept
+      : raw_(clamp_c<SC>(SC(v) << FracBits)) {}
+
+  // ---- raw access ----
+  static constexpr LOFLOAT_HOST_DEVICE fixed_point FromRaw(Storage r) noexcept {
+    fixed_point f; f.raw_ = r; return f;
+  }
+  constexpr LOFLOAT_HOST_DEVICE Storage raw() const noexcept { return raw_; }
+
+  // ---- field decomposition: value = int_part + 2^{-FracBits} * frac_part ----
+  constexpr LOFLOAT_HOST_DEVICE SC int_part()  const noexcept { return SC(raw_) >> FracBits; }
+  constexpr LOFLOAT_HOST_DEVICE UC frac_part() const noexcept { return UC(SC(raw_) & FRAC_MASK); }
+
+  // ---- limits ----
+  static constexpr LOFLOAT_HOST_DEVICE fixed_point highest() noexcept { return FromRaw(Storage(HIGHEST_RAW)); }
+  static constexpr LOFLOAT_HOST_DEVICE fixed_point lowest()  noexcept { return FromRaw(Storage(LOWEST_RAW)); }
+  // smallest representable step = 2^{-FracBits}
+  static constexpr LOFLOAT_HOST_DEVICE fixed_point epsilon() noexcept { return FromRaw(Storage(1)); }
+
+  // ---- conversions ----
+  LOFLOAT_HOST_DEVICE double to_double() const noexcept { return double(SC(raw_)) / double(ONE); }
+  LOFLOAT_HOST_DEVICE explicit operator double() const noexcept { return to_double(); }
+  LOFLOAT_HOST_DEVICE explicit operator float()  const noexcept { return float(to_double()); }
+  LOFLOAT_HOST_DEVICE explicit operator int()    const noexcept { return int(int_part()); }
+
+  // ---- arithmetic (saturating) ----
+  LOFLOAT_HOST_DEVICE fixed_point operator+(const fixed_point& o) const noexcept {
+    return FromRaw(clamp_c<SC>(SC(raw_) + SC(o.raw_)));
+  }
+  LOFLOAT_HOST_DEVICE fixed_point operator-(const fixed_point& o) const noexcept {
+    return FromRaw(clamp_c<SC>(SC(raw_) - SC(o.raw_)));
+  }
+  LOFLOAT_HOST_DEVICE fixed_point operator-() const noexcept {
+    return FromRaw(clamp_c<SC>(-SC(raw_)));
+  }
+  LOFLOAT_HOST_DEVICE fixed_point operator*(const fixed_point& o) const noexcept {
+    if constexpr (kSigned) {
+      // product is at scale 2*FracBits; shift back by FracBits (trunc toward 0)
+      return FromRaw(clamp_c<SC>((SC(raw_) * SC(o.raw_)) / ONE));
+    } else {
+      return FromRaw(clamp_c<UC>((UC(raw_) * UC(o.raw_)) / UC(ONE)));
+    }
+  }
+  LOFLOAT_HOST_DEVICE fixed_point operator/(const fixed_point& o) const noexcept {
+    if (o.raw_ == Storage(0)) {                               // guard div-by-zero
+      return (raw_ >= Storage(0)) ? highest() : lowest();
+    }
+    if constexpr (kSigned) {
+      return FromRaw(clamp_c<SC>((SC(raw_) << FracBits) / SC(o.raw_)));
+    } else {
+      return FromRaw(clamp_c<UC>((UC(raw_) << FracBits) / UC(o.raw_)));
+    }
+  }
+
+  LOFLOAT_HOST_DEVICE fixed_point& operator+=(const fixed_point& o) noexcept { *this = *this + o; return *this; }
+  LOFLOAT_HOST_DEVICE fixed_point& operator-=(const fixed_point& o) noexcept { *this = *this - o; return *this; }
+  LOFLOAT_HOST_DEVICE fixed_point& operator*=(const fixed_point& o) noexcept { *this = *this * o; return *this; }
+  LOFLOAT_HOST_DEVICE fixed_point& operator/=(const fixed_point& o) noexcept { *this = *this / o; return *this; }
+
+  // ---- comparisons (raw_ shares scale + signedness) ----
+  LOFLOAT_HOST_DEVICE bool operator==(const fixed_point& o) const noexcept { return raw_ == o.raw_; }
+  LOFLOAT_HOST_DEVICE bool operator!=(const fixed_point& o) const noexcept { return raw_ != o.raw_; }
+  LOFLOAT_HOST_DEVICE bool operator< (const fixed_point& o) const noexcept { return raw_ <  o.raw_; }
+  LOFLOAT_HOST_DEVICE bool operator> (const fixed_point& o) const noexcept { return raw_ >  o.raw_; }
+  LOFLOAT_HOST_DEVICE bool operator<=(const fixed_point& o) const noexcept { return raw_ <= o.raw_; }
+  LOFLOAT_HOST_DEVICE bool operator>=(const fixed_point& o) const noexcept { return raw_ >= o.raw_; }
+
+  // ---- stream / string ----
+  friend std::ostream& operator<<(std::ostream& os, const fixed_point& x) {
+    os << x.to_double();
+    return os;
+  }
+  std::string ToString() const { std::ostringstream ss; ss << *this; return ss.str(); }
+}; // class fixed_point
+
 } // namespace internal
 
 
@@ -317,6 +471,17 @@ inline constexpr bool is_integral_v = is_integral<T>::val || std::is_integral_v<
 
 template<int len, Signedness sign>
 using i_n = lo_float_internal::i_n<len, sign>;
+
+// Fixed-point: value = int_part + 2^{-FracBits} * frac_part.
+template<int IntBits, int FracBits, Signedness sign = Signedness::Signed>
+using fixed_point = lo_float_internal::fixed_point<IntBits, FracBits, sign>;
+
+// Q-format convenience aliases (Q<I,F> signed, UQ<I,F> unsigned).
+template<int IntBits, int FracBits>
+using Q  = lo_float_internal::fixed_point<IntBits, FracBits, Signedness::Signed>;
+
+template<int IntBits, int FracBits>
+using UQ = lo_float_internal::fixed_point<IntBits, FracBits, Signedness::Unsigned>;
 
 
 template<typename T>
@@ -353,6 +518,24 @@ namespace std {
 template <int len, lo_float::Signedness Sign>
 struct numeric_limits<lo_float::lo_float_internal::i_n<len, Sign>>
     : public lo_float::lo_float_internal::intn_numeric_limits_base<len, Sign> {};
+
+template <int IntBits, int FracBits, lo_float::Signedness Sign>
+struct numeric_limits<lo_float::lo_float_internal::fixed_point<IntBits, FracBits, Sign>> {
+  using T = lo_float::lo_float_internal::fixed_point<IntBits, FracBits, Sign>;
+  static constexpr bool is_specialized = true;
+  static constexpr bool is_signed      = (Sign == lo_float::Signedness::Signed);
+  static constexpr bool is_integer     = false;
+  static constexpr bool is_exact       = false;
+  static constexpr bool has_infinity   = false;
+  static constexpr bool has_quiet_NaN  = false;
+  static constexpr bool is_bounded     = true;
+  static constexpr int  radix          = 2;
+  static constexpr int  digits         = IntBits + FracBits - (is_signed ? 1 : 0);
+  static constexpr T min()     noexcept { return T::epsilon(); }   // smallest positive step
+  static constexpr T lowest()  noexcept { return T::lowest();  }
+  static constexpr T max()     noexcept { return T::highest(); }
+  static constexpr T epsilon() noexcept { return T::epsilon(); }
+};
 
 // template<int len>
 // struct make_signed<lo_float::i_n<len, lo_float::Signedness::Unsigned>> {

@@ -118,8 +118,8 @@ struct Mma<Shape_, float, LayoutA_, float, LayoutB_,
 void operator()(FragmentC& D, FragmentA const& A,
                 FragmentB const& B, FragmentC const& C,
                 int accum_mant_bits,
-                lo_float::Rounding_Mode rounding_mode,
-                int stochastic_bits) const {
+                lo_float::ProjSpec ps) const {
+    (void)ps;  // leaf rounds to accum_mant_bits with the format's default mode
     D = C;
 
     // Compile-time layout dispatch.
@@ -273,25 +273,22 @@ public:
   using FragmentC = typename ThreadMma::FragmentC;
 
   int accum_mant_bits;
-  lo_float::Rounding_Mode rounding_mode;
-  int stochastic_bits;
+  lo_float::ProjSpec ps;
 
 
   CUTLASS_DEVICE
-  LoFMma(int accum_mant_bits, lo_float::Rounding_Mode rounding_mode, int stochastic_bits) : accum_mant_bits(accum_mant_bits), rounding_mode(rounding_mode), stochastic_bits(stochastic_bits) {}
+  LoFMma(int accum_mant_bits, lo_float::ProjSpec ps) : accum_mant_bits(accum_mant_bits), ps(ps) {}
 
   CUTLASS_HOST_DEVICE void set_accum_bits(int bits) { accum_mant_bits = bits; }
-  CUTLASS_HOST_DEVICE void set_rounding_mode(lo_float::Rounding_Mode mode) { rounding_mode = mode; }
-  CUTLASS_HOST_DEVICE void set_stochastic_bits(int bits) { stochastic_bits = bits; }
+  CUTLASS_HOST_DEVICE void set_proj_spec(lo_float::ProjSpec spec) { ps = spec; }
   CUTLASS_HOST_DEVICE int get_accum_bits() const { return accum_mant_bits; }
-  CUTLASS_HOST_DEVICE lo_float::Rounding_Mode get_rounding_mode() const { return rounding_mode; }
-  CUTLASS_HOST_DEVICE int get_stochastic_bits() const { return stochastic_bits; }
+  CUTLASS_HOST_DEVICE lo_float::ProjSpec get_proj_spec() const { return ps; }
   CUTLASS_DEVICE
   void operator()(
     FragmentC &d, FragmentA a, FragmentB b,
     FragmentC const &c, int group_idx = 0) const {
     ThreadMma mma;
-    mma(d, a, b, c, accum_mant_bits, rounding_mode, stochastic_bits);
+    mma(d, a, b, c, accum_mant_bits, ps);
   }
 
   CUTLASS_DEVICE
@@ -967,8 +964,7 @@ float run_lof_gemm_multistage_rc(
     float alpha, float beta,
     const float* dA, const float* dB, const float* dC, float* dD,
     int accum_mant_bits = 0,
-    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
-    int stochastic_rounding_bits = 0,
+    lo_float::ProjSpec ps = lo_float::ProjSpec{},
     int reps = 20)
 {
   using Gemm = cutlass::gemm::device::Gemm<
@@ -994,8 +990,8 @@ float run_lof_gemm_multistage_rc(
       1,
       nullptr, nullptr, nullptr,
       accum_mant_bits,
-      rounding_mode,
-      stochastic_rounding_bits);
+      ps.rounding_mode,
+      ps.stoch_length);
 
   Gemm op;
   if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
@@ -1035,8 +1031,7 @@ float run_lof_gemm_multistage_cr(
     float alpha, float beta,
     const float* dA, const float* dB, const float* dC, float* dD,
     int accum_mant_bits = 0,
-    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
-    int stochastic_rounding_bits = 0,
+    lo_float::ProjSpec ps = lo_float::ProjSpec{},
     int reps = 20)
 {
   using Gemm = cutlass::gemm::device::Gemm<
@@ -1062,8 +1057,8 @@ float run_lof_gemm_multistage_cr(
       1,
       nullptr, nullptr, nullptr,
       accum_mant_bits,
-      rounding_mode,
-      stochastic_rounding_bits);
+      ps.rounding_mode,
+      ps.stoch_length);
 
   Gemm op;
   if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
@@ -1103,8 +1098,7 @@ float run_lof_gemm_multistage_rr(
     float alpha, float beta,
     const float* dA, const float* dB, const float* dC, float* dD,
     int accum_mant_bits = 0,
-    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
-    int stochastic_rounding_bits = 0,
+    lo_float::ProjSpec ps = lo_float::ProjSpec{},
     int reps = 20)
 {
   using Gemm = cutlass::gemm::device::Gemm<
@@ -1130,8 +1124,8 @@ float run_lof_gemm_multistage_rr(
       1,
       nullptr, nullptr, nullptr,
       accum_mant_bits,
-      rounding_mode,
-      stochastic_rounding_bits);
+      ps.rounding_mode,
+      ps.stoch_length);
 
   Gemm op;
   if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
@@ -1171,8 +1165,7 @@ float run_lof_gemm_multistage_cc(
     float alpha, float beta,
     const float* dA, const float* dB, const float* dC, float* dD,
     int accum_mant_bits = 0,
-    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
-    int stochastic_rounding_bits = 0,
+    lo_float::ProjSpec ps = lo_float::ProjSpec{},
     int reps = 20)
 {
   using Gemm = cutlass::gemm::device::Gemm<
@@ -1198,8 +1191,8 @@ float run_lof_gemm_multistage_cc(
       1,
       nullptr, nullptr, nullptr,
       accum_mant_bits,
-      rounding_mode,
-      stochastic_rounding_bits);
+      ps.rounding_mode,
+      ps.stoch_length);
 
   Gemm op;
   if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
@@ -1492,8 +1485,7 @@ float run_lof_gemm_multistage(
     float alpha, float beta,
     const float* dA, const float* dB, const float* dC, float* dD,
     int accum_mant_bits = 0,
-    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
-    int stochastic_rounding_bits = 0,
+    lo_float::ProjSpec ps = lo_float::ProjSpec{},
     int reps = 20)
 {
   using Gemm = cutlass::gemm::device::Gemm<
@@ -1521,8 +1513,8 @@ float run_lof_gemm_multistage(
       nullptr,       // gather_B_indices
       nullptr,       // scatter_D_indices
       accum_mant_bits,
-      rounding_mode,
-      stochastic_rounding_bits);
+      ps.rounding_mode,
+      ps.stoch_length);
 
   Gemm op;
   if (op.can_implement(args) != cutlass::Status::kSuccess) return -1.f;
@@ -1730,30 +1722,25 @@ public:
 private:
 
   int          accum_mantissa_bits_;
-  Rounding_Mode rounding_mode_;
-  int          stochastic_rounding_bits_;
+  lo_float::ProjSpec proj_spec_;
 
 public:
 
   // ── Construction ──────────────────────────────────────────────────────
 
   Gemm(int accum_mantissa_bits         = 23,
-       Rounding_Mode rounding_mode      = Rounding_Mode::RoundToNearestEven,
-       int stochastic_rounding_bits    = 0)
+       lo_float::ProjSpec proj_spec     = lo_float::ProjSpec{})
     : accum_mantissa_bits_(accum_mantissa_bits)
-    , rounding_mode_(rounding_mode)
-    , stochastic_rounding_bits_(stochastic_rounding_bits)
+    , proj_spec_(proj_spec)
   {}
 
   // ── Accessors ─────────────────────────────────────────────────────────
 
   void set_accum_mantissa_bits(int bits)        { accum_mantissa_bits_    = bits; }
-  void set_rounding_mode(Rounding_Mode mode)     { rounding_mode_         = mode; }
-  void set_stochastic_rounding_bits(int bits)   { stochastic_rounding_bits_ = bits; }
+  void set_proj_spec(lo_float::ProjSpec spec)    { proj_spec_             = spec; }
 
   int          get_accum_mantissa_bits()    const { return accum_mantissa_bits_; }
-  Rounding_Mode get_rounding_mode()          const { return rounding_mode_; }
-  int          get_stochastic_rounding_bits() const { return stochastic_rounding_bits_; }
+  lo_float::ProjSpec get_proj_spec()         const { return proj_spec_; }
 
   // ── Query ─────────────────────────────────────────────────────────────
 
@@ -1903,8 +1890,8 @@ private:
         nullptr,                     // gather_B_indices
         nullptr,                     // scatter_D_indices
         accum_mantissa_bits_,
-        rounding_mode_,
-        stochastic_rounding_bits_);
+        proj_spec_.rounding_mode,
+        proj_spec_.stoch_length);
   }
 };
 

@@ -6,10 +6,15 @@ CXXFLAGS += $(CDBG) -v
 CXXFLAGS += -g -O3
 
 
-INCLUDE_PATH += -I$(HOME)
-INCLUDE_PATH += -I$(HOME)/Documents/LoFloat/src
+# LoFloat root: Makefile is in LoFloat/examples, so root is one level up
+MAKEFILE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+LOFLOAT_ROOT ?= $(abspath $(MAKEFILE_DIR)/..)
 
-INCLUDE_PATH += -I$(HOME)/Documents/LoFloat/test
+# Include paths (relative to LOFLOAT_ROOT so it works anywhere)
+INCLUDE_PATH += -I$(LOFLOAT_ROOT)
+INCLUDE_PATH += -I$(LOFLOAT_ROOT)/src
+INCLUDE_PATH += -I$(LOFLOAT_ROOT)/test
+INCLUDE_PATH += -I$(LOFLOAT_ROOT)/third_party/xsimd/include
 
 
 OSCILLATOR:

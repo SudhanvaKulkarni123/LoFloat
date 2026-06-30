@@ -71,6 +71,23 @@ def create_p3109_params(k, p, is_signed=True, saturating=True, bias=None):
     )
 
 
+def create_e8m0_params():
+    """E8M0 shared-scale format for microscaling (MX): 8-bit unsigned, 0 mantissa
+    bits (power-of-two), bias 127 -> range 2^-127 .. 2^128. This is the standard
+    MX scale format; pass it as the `scale_format` of virtual_mx_round. (The MX
+    path ignores the inf/nan checkers, so the P3109 ones below are placeholders.)"""
+    return lof.FloatFormatDescriptor(
+        8,
+        0,
+        127,
+        inf_behavior=lof.InfBehavior.Extended,
+        nan_behavior=lof.NaNBehavior._3109,
+        signedness=lof.Signedness.Unsigned,
+        is_inf_checker=P3109_InfChecker(8, False, False),
+        is_nan_checker=P3109_NaNChecker(8, False),
+    )
+
+
 
 class HalfPrecisionInfChecker:
     def __call__(self, bits):

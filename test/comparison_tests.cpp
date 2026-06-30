@@ -131,12 +131,12 @@ int test_comparisons_exhaustive()
 }
 
 template<int l, int... Ps>
-void instantiate_for_l(std::integer_sequence<int, Ps...>) {
-    (test_comparisons_exhaustive<l, Ps+1>(), ...);
+int instantiate_for_l(std::integer_sequence<int, Ps...>) {
+    return (test_comparisons_exhaustive<l, Ps+1>() + ...);
 }
 template<int... Ls>
-void instantiate_all_l(std::integer_sequence<int, Ls...>) {
-    (instantiate_for_l<Ls>(std::make_integer_sequence<int, Ls-1 >{}), ...);
+int instantiate_all_l(std::integer_sequence<int, Ls...>) {
+    return (instantiate_for_l<Ls>(std::make_integer_sequence<int, Ls-1 >{}) + ...);
 }
 
 // Offset sequence helper: converts [0,1,2,...,N-1] to [Offset, Offset+1, ..., Offset+N-1]
@@ -145,19 +145,19 @@ constexpr auto offset_sequence(std::integer_sequence<int, Is...>) {
     return std::integer_sequence<int, (Is + Offset)...>{};
 }
 
-void instantiate_all() {
+int instantiate_all() {
     // For l from 2 to 8
-    instantiate_all_l(offset_sequence<2>(std::make_integer_sequence<int, 6>{}));
+    return instantiate_all_l(offset_sequence<2>(std::make_integer_sequence<int, 6>{}));
 }
 
 //used to test comparisons for binary16, bf16 and tf32
 int test_comparisons_random(int num_tests)
 {
 
-    using bf16 = Templated_Float<bfloatPrecisionParams>;
-    using tf32 = Templated_Float<tf32PrecisionParams>;
-
-    using binary16 =  Templated_Float<halfPrecisionParams>;
+    // F4 format-preset aliases (exercises the new public aliases too)
+    using bf16     = bfloat16;
+    using binary16 = half;
+    // tf32 resolves to the global lo_float::tf32 alias
 
     for(int i = 0; i < num_tests; i++) {
         float a = static_cast<float>(((double) rand()) / (double) RAND_MAX * 1000.0);
@@ -253,21 +253,179 @@ int test_comparisons_random(int num_tests)
 }
 
 
+// ---------------------------------------------------------------------------
+// T3 — special-value comparison edge cases (NaN / ±Inf / ±0).
+// Reference-vs-lo idiom: float already encodes correct IEEE semantics
+// (NaN unordered, Inf ordering, ±0 equality), and Compare is built the same
+// way, so we compare each of the six operators on (float)a,(float)b against
+// a,b and assert agreement. Only Inf/NaN-capable formats belong here.
+// ---------------------------------------------------------------------------
+// Reference-vs-lo all-pairs sweep over the special-value set. This is robust
+// for ANY format: it never hard-codes a truth table — it asserts the six
+// operators agree between the float reference and the lo_float value. It is
+// self-consistent even when a format lacks a given special value (e.g. P3109's
+// signbit pattern is NaN, tf32's infinity() encodes a finite value): the same
+// (float)v is compared against the same lo v, so Compare's actual path for that
+// encoding is validated against float either way.
+template <typename T>
+int edge_pairs_sweep(const char* name)
+{
+    int errors = 0;
+
+    T plus0    = T::FromRep(0);
+    T minus0   = T::FromRep(1u << (T::bitwidth - 1));
+    T plusInf  = std::numeric_limits<T>::infinity();
+    T minusInf = T::FromRep(T::IsInfFunctor.minNegInf());
+    T nanv     = std::numeric_limits<T>::quiet_NaN();
+    T one      = T(1.0f);
+    T negtwo   = T(-2.0f);
+
+    T vals[]            = { plus0, minus0, plusInf, minusInf, nanv, one, negtwo };
+    const char* lbls[]  = { "+0", "-0", "+Inf", "-Inf", "NaN", "1.0", "-2.0" };
+    const int N = 7;
+
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            float fa = (float)vals[i];
+            float fb = (float)vals[j];
+            #define CHECK_OP(op, opname) \
+                if ((fa op fb) != (vals[i] op vals[j])) { \
+                    std::cout << "Error: " << name << " " << lbls[i] << " " opname " " << lbls[j] \
+                              << "  ref=" << (fa op fb) << " lo=" << (vals[i] op vals[j]) << "\n"; \
+                    errors++; }
+            CHECK_OP(==, "==")
+            CHECK_OP(!=, "!=")
+            CHECK_OP(<,  "<")
+            CHECK_OP(<=, "<=")
+            CHECK_OP(>,  ">")
+            CHECK_OP(>=, ">=")
+            #undef CHECK_OP
+        }
+    }
+
+    if (errors) std::cout << name << ": " << errors << " edge-pair errors\n";
+    return errors;
+}
+
+// Explicit headline invariants (self-describing). Only valid for formats with
+// full IEEE special-value encodings (real -0, real ±Inf, real NaN). See the
+// probe in PROGRESS/NOTES: half + bfloat16 qualify; tf32 has a broken inf
+// encoding and P3109 reserves the signbit pattern for NaN (no -0).
+template <typename T>
+int ieee_invariants(const char* name)
+{
+    int errors = 0;
+
+    T plus0    = T::FromRep(0);
+    T minus0   = T::FromRep(1u << (T::bitwidth - 1));
+    T plusInf  = std::numeric_limits<T>::infinity();
+    T minusInf = T::FromRep(T::IsInfFunctor.minNegInf());
+    T nanv     = std::numeric_limits<T>::quiet_NaN();
+    T one      = T(1.0f);
+
+    // sanity: the special values really are special in this format
+    if (!isinf(plusInf))  { std::cout << "Error: " << name << " +Inf not isinf\n"; errors++; }
+    if (!isinf(minusInf)) { std::cout << "Error: " << name << " -Inf not isinf\n"; errors++; }
+    if (!isnan(nanv))     { std::cout << "Error: " << name << " NaN not isnan\n";  errors++; }
+
+    if (!(plus0 == minus0))                    { std::cout << "Error: " << name << " +0==-0 failed\n";          errors++; }
+    if (!(plus0 <= minus0 && plus0 >= minus0)) { std::cout << "Error: " << name << " +0<=>=-0 failed\n";        errors++; }
+    if (plus0 < minus0 || plus0 > minus0)      { std::cout << "Error: " << name << " +0 strict vs -0 failed\n"; errors++; }
+    if (nanv == nanv)                          { std::cout << "Error: " << name << " NaN==NaN true\n";          errors++; }
+    if (!(nanv != nanv))                       { std::cout << "Error: " << name << " NaN!=NaN false\n";         errors++; }
+    if (nanv < one || one < nanv || nanv <= one || nanv > one || nanv >= one) {
+        std::cout << "Error: " << name << " NaN ordered vs finite\n"; errors++; }
+    if (!(minusInf < plusInf))                 { std::cout << "Error: " << name << " -Inf<+Inf failed\n";       errors++; }
+    if (!(plusInf == plusInf))                 { std::cout << "Error: " << name << " +Inf==+Inf failed\n";      errors++; }
+    if (!(plusInf > one))                      { std::cout << "Error: " << name << " +Inf>finite failed\n";     errors++; }
+    if (!(minusInf < one))                     { std::cout << "Error: " << name << " -Inf<finite failed\n";     errors++; }
+
+    if (errors) std::cout << name << ": " << errors << " ieee-invariant errors\n";
+    return errors;
+}
+
+int test_comparisons_edge_cases()
+{
+    int errors = 0;
+    // Reference-vs-lo all-pairs sweep on every Inf/NaN-capable format — this is
+    // the actual coverage of Compare's special-value paths.
+    errors += edge_pairs_sweep<half>("half");
+    errors += edge_pairs_sweep<bfloat16>("bfloat16");
+    errors += edge_pairs_sweep<tf32>("tf32");
+    errors += edge_pairs_sweep<
+        P_3109_float<8, 4, Signedness::Signed, Inf_Behaviors::Extended>>("P3109<8,4,Ext>");
+    // Explicit headline invariants on the full-IEEE formats (extra teeth).
+    errors += ieee_invariants<half>("half");
+    errors += ieee_invariants<bfloat16>("bfloat16");
+    return errors;
+}
+
+// ---------------------------------------------------------------------------
+// F4 — format-preset alias smoke check.
+// ---------------------------------------------------------------------------
+int test_format_aliases()
+{
+    int errors = 0;
+    static_assert(std::is_same_v<float16, half>,   "float16 must alias half");
+    static_assert(std::is_same_v<float32, single>, "float32 must alias single");
+
+    auto chk = [&](bool cond, const char* msg) {
+        if (!cond) { std::cout << "Error: alias " << msg << "\n"; errors++; }
+    };
+
+    // IEEE / ML + OCP element presets: a couple of finite floats round-trip
+    chk((float)ocp_e4m3(1.5f)  == 1.5f, "ocp_e4m3(1.5)");
+    chk((float)ocp_e5m2(1.5f)  == 1.5f, "ocp_e5m2(1.5)");
+    chk((float)ocp_e3m2(1.5f)  == 1.5f, "ocp_e3m2(1.5)");
+    chk((float)ocp_e2m1(1.5f)  == 1.5f, "ocp_e2m1(1.5)");
+    chk((float)bfloat16(2.0f)  == 2.0f, "bfloat16(2.0)");
+    chk((float)half(2.0f)      == 2.0f, "half(2.0)");
+    chk((float)tf32(2.0f)      == 2.0f, "tf32(2.0)");
+    chk((float)single(3.25f)   == 3.25f,"single(3.25)");
+
+    // Dojo: default + non-default template bias compile and round-trip
+    chk((float)dojo_cfloat8_1_4_3<>(1.5f)   == 1.5f, "dojo_cfloat8_1_4_3(1.5)");
+    chk((float)dojo_cfloat8_1_5_2<>(1.5f)   == 1.5f, "dojo_cfloat8_1_5_2(1.5)");
+    chk((float)dojo_cfloat16_1_8_7<>(1.5f)  == 1.5f, "dojo_cfloat16_1_8_7(1.5)");
+    chk((float)dojo_cfloat16_1_6_9<>(1.5f)  == 1.5f, "dojo_cfloat16_1_6_9(1.5)");
+    chk((float)dojo_cfloat8_1_4_3<5>(1.5f)  == 1.5f, "dojo_cfloat8_1_4_3<5>(1.5)"); // non-default bias
+
+    // Dojo no-Inf / no-NaN invariant — every encoding is finite, incl. all-ones
+    chk(!isinf(dojo_cfloat8_1_4_3<>(1.5f)) && !isnan(dojo_cfloat8_1_4_3<>(1.5f)),
+        "dojo value finite");
+    chk(!isinf(dojo_cfloat8_1_4_3<>::FromRep(0xFF)) && !isnan(dojo_cfloat8_1_4_3<>::FromRep(0xFF)),
+        "dojo 0xFF not special");
+
+    // E8M0 is primarily an MX scale format: power-of-two round-trip + NaN sanity
+    chk((float)ocp_e8m0(4.0f) == 4.0f, "ocp_e8m0(4.0)");
+    chk(isnan(std::numeric_limits<ocp_e8m0>::quiet_NaN()), "ocp_e8m0 qNaN");
+
+    if (errors) std::cout << "format-alias smoke: " << errors << " errors\n";
+    return errors;
+}
+
+
 int main()
 {
     //run exhaustive test on P_3109 formats for length <= 8
 
     int total_errors = 0;
-   
-    instantiate_all();
 
-    if (test_comparisons_random(10000)) {
+    total_errors += instantiate_all();
+
+    int rnd = test_comparisons_random(10000);
+    if (rnd) {
         printf("Randomized comparison tests failed\n");
+        total_errors += rnd;
     }
-    
 
-    std::cout << "comparison tests passed\n";
+    total_errors += test_comparisons_edge_cases();
+    total_errors += test_format_aliases();
 
-    return 0;
+    if (total_errors == 0)
+        std::cout << "comparison tests passed\n";
+    else
+        std::cout << "comparison tests FAILED: " << total_errors << " errors\n";
 
+    return total_errors ? 1 : 0;
 }

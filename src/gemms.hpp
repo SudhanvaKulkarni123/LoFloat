@@ -138,10 +138,9 @@ static void generic_microkernel(
     T_out* C,           // MR x NR output (will be overwritten), row-major
     std::size_t ld_a,   // leading dimension of A (should be KR for packed)
     std::size_t ld_b,   // leading dimension of B (should be NR for packed)
-    Rounding_Mode rm = Rounding_Mode::RoundToNearestEven,
-    int stoch_len = 0
+    ProjSpec ps = ProjSpec{}
 ) noexcept {
-    
+
     // Accumulate in T_out precision (user-specified micro-accumulator precision)
     T_out C_accum[MR * NR];
     
@@ -173,18 +172,18 @@ static void generic_microkernel(
             
             // Compute: temp = a_ik * B[k, :] using mul_vec
             mul_vec<T_out, T_out, T_out, arch>(
-                a_broadcast, b_row, temp, NR, rm, stoch_len
+                a_broadcast, b_row, temp, NR, ps
             );
-            
+
             // Accumulate: C[i, :] += temp using add_vec
             add_vec<T_out, T_out, T_out, arch>(
-                C_accum + i * NR, temp, C_accum + i * NR, NR, rm, stoch_len
+                C_accum + i * NR, temp, C_accum + i * NR, NR, ps
             );
         }
     }
-    
+
     // Project final result to output (handles rounding/quantization)
-    lo_float::Project(C_accum, C, MR * NR, rm, stoch_len);
+    lo_float::Project(C_accum, C, MR * NR, ps);
 }
 
 // Optimized version using FMA for better performance
@@ -196,10 +195,9 @@ static void generic_microkernel_fma(
     T_out* C,           // MR x NR output (will be overwritten), row-major
     std::size_t ld_a,   // leading dimension of A
     std::size_t ld_b,   // leading dimension of B
-    Rounding_Mode rm = Rounding_Mode::RoundToNearestEven,
-    int stoch_len = 0
+    ProjSpec ps = ProjSpec{}
 ) noexcept {
-    
+
     // Accumulate in T_out precision
     T_out C_accum[MR * NR];
     
@@ -233,14 +231,13 @@ static void generic_microkernel_fma(
                 C_accum + i * NR,      // z: current accumulator C[i, :]
                 C_accum + i * NR,      // out: write back to C[i, :]
                 NR,
-                rm,
-                stoch_len
+                ps
             );
         }
     }
-    
+
     // Project final result (handles rounding/quantization)
-    lo_float::Project(C_accum, C, MR * NR, rm, stoch_len);
+    lo_float::Project(C_accum, C, MR * NR, ps);
 }
 
 template<MatrixType MatrixA, MatrixType MatrixB, MatrixType MatrixC, 
@@ -300,8 +297,7 @@ public:
     }
 
     void run(const MatrixA& A, const MatrixB& B, MatrixC& C, MatrixAccum2& C_accum,
-             Rounding_Mode rm = Rounding_Mode::RoundToNearestEven,
-             int stoch_len = 0) {
+             ProjSpec ps = ProjSpec{}) {
         const std::size_t m = A.rows();
         const std::size_t n = B.cols();
         const std::size_t k = A.cols();
@@ -316,24 +312,24 @@ public:
         
         switch(strategy) {
             case GemmStrategy::NAIVE:
-                run_naive(A, B, C, C_accum, rm, stoch_len);
+                run_naive(A, B, C, C_accum, ps);
                 break;
-                
+
             case GemmStrategy::MICRO_KERNEL:
-                run_micro_kernel_unpacked(A, B, C, C_accum, rm, stoch_len);
+                run_micro_kernel_unpacked(A, B, C, C_accum, ps);
                 break;
-                
+
             case GemmStrategy::BLOCKED_PACKED:
-                run_blocked_with_packing(A, B, C, C_accum, rm, stoch_len);
+                run_blocked_with_packing(A, B, C, C_accum, ps);
                 break;
         }
     }
 
 private:
     // Strategy 1: Naive triple-loop GEMM for very small matrices
-    void run_naive(const MatrixA& A, const MatrixB& B, 
+    void run_naive(const MatrixA& A, const MatrixB& B,
                    MatrixC& C, MatrixAccum2& C_accum,
-                   Rounding_Mode rm, int stoch_len) {
+                   ProjSpec ps) {
         const std::size_t m = A.rows();
         const std::size_t n = B.cols();
         const std::size_t k = A.cols();
@@ -351,7 +347,7 @@ private:
                 // Round to final output type
                 output_type c_output[1];
                 AccumType2 c_temp[1] = {C_accum(i, j)};
-                lo_float::Project(c_temp, c_output, 1, rm, stoch_len);
+                lo_float::Project(c_temp, c_output, 1, ps);
                 C(i, j) = c_output[0];
             }
         }
@@ -360,7 +356,7 @@ private:
     // Strategy 2: Micro-kernel without packing for medium matrices
     void run_micro_kernel_unpacked(const MatrixA& A, const MatrixB& B,
                                    MatrixC& C, MatrixAccum2& C_accum,
-                                   Rounding_Mode rm, int stoch_len) {
+                                   ProjSpec ps) {
         const std::size_t m = A.rows();
         const std::size_t n = B.cols();
         const std::size_t k = A.cols();
@@ -395,17 +391,17 @@ private:
                 
                 // Write back results
                 AccumType2 C_accum_temp[MR * NR];
-                lo_float::Project(C_micro, C_accum_temp, MR * NR, rm, stoch_len);
-                
+                lo_float::Project(C_micro, C_accum_temp, MR * NR, ps);
+
                 for (std::size_t ii = 0; ii < mr_eff; ++ii) {
                     for (std::size_t jj = 0; jj < nr_eff; ++jj) {
                         C_accum(i + ii, j + jj) = C_accum_temp[ii * NR + jj];
                     }
                 }
-                
+
                 // Project to final output
                 output_type C_output_temp[MR * NR];
-                lo_float::Project(C_accum_temp, C_output_temp, MR * NR, rm, stoch_len);
+                lo_float::Project(C_accum_temp, C_output_temp, MR * NR, ps);
                 
                 for (std::size_t ii = 0; ii < mr_eff; ++ii) {
                     for (std::size_t jj = 0; jj < nr_eff; ++jj) {
@@ -417,9 +413,9 @@ private:
     }
     
     // Strategy 3: Full blocked GEMM with packing for large matrices
-    void run_blocked_with_packing(const MatrixA& A, const MatrixB& B, 
+    void run_blocked_with_packing(const MatrixA& A, const MatrixB& B,
                                   MatrixC& C, MatrixAccum2& C_accum,
-                                  Rounding_Mode rm, int stoch_len) {
+                                  ProjSpec ps) {
         const std::size_t m = A.rows();
         const std::size_t n = B.cols();
         const std::size_t k = A.cols();
@@ -521,8 +517,7 @@ private:
                                             C_temp,
                                             A_pack_matrix.ld,
                                             B_pack_matrix.ld,
-                                            rm,
-                                            stoch_len
+                                            ps
                                         );
                                         
                                         // Accumulate C_temp into C_micro_accum
@@ -533,7 +528,7 @@ private:
                                     
                                     // Project micro-accumulator to C_accum (AccumType2 precision)
                                     AccumType2 C_accum_temp[MR * NR];
-                                    lo_float::Project(C_micro_accum, C_accum_temp, MR * NR, rm, stoch_len);
+                                    lo_float::Project(C_micro_accum, C_accum_temp, MR * NR, ps);
                                     
                                     // Store back to C_accum matrix
                                     for (int i_micro = 0; i_micro < MR; ++i_micro) {
@@ -546,7 +541,7 @@ private:
                                     // On last k-iteration, project to final output C
                                     if (pc + kc_eff >= k) {
                                         output_type C_output_temp[MR * NR];
-                                        lo_float::Project(C_accum_temp, C_output_temp, MR * NR, rm, stoch_len);
+                                        lo_float::Project(C_accum_temp, C_output_temp, MR * NR, ps);
                                         
                                         for (int i_micro = 0; i_micro < MR; ++i_micro) {
                                             for (int j_micro = 0; j_micro < NR; ++j_micro) {
@@ -629,8 +624,7 @@ private:
                                         C_temp,
                                         A_pack_matrix.ld,
                                         B_pack_matrix.ld,
-                                        rm,
-                                        stoch_len
+                                        ps
                                     );
                                     
                                     // Accumulate C_temp into C_micro_accum
@@ -641,7 +635,7 @@ private:
                                 
                                 // Project micro-accumulator to C_accum (AccumType2 precision)
                                 AccumType2 C_accum_temp[MR * NR];
-                                lo_float::Project(C_micro_accum, C_accum_temp, MR * NR, rm, stoch_len);
+                                lo_float::Project(C_micro_accum, C_accum_temp, MR * NR, ps);
                                 
                                 // Store back to C_accum matrix
                                 for (int i_micro = 0; i_micro < MR; ++i_micro) {
@@ -654,7 +648,7 @@ private:
                                 // On last k-iteration, project to final output C
                                 if (pc + kc_eff >= k) {
                                     output_type C_output_temp[MR * NR];
-                                    lo_float::Project(C_accum_temp, C_output_temp, MR * NR, rm, stoch_len);
+                                    lo_float::Project(C_accum_temp, C_output_temp, MR * NR, ps);
                                     
                                     for (int i_micro = 0; i_micro < MR; ++i_micro) {
                                         for (int j_micro = 0; j_micro < NR; ++j_micro) {
@@ -748,8 +742,7 @@ private:
                                             C_temp,
                                             A_pack_matrix.ld,
                                             B_pack_matrix.ld,
-                                            rm,
-                                            stoch_len
+                                            ps
                                         );
                                         
                                         for (int idx = 0; idx < MR * NR; ++idx) {
@@ -758,7 +751,7 @@ private:
                                     }
                                     
                                     AccumType2 C_accum_temp[MR * NR];
-                                    lo_float::Project(C_micro_accum, C_accum_temp, MR * NR, rm, stoch_len);
+                                    lo_float::Project(C_micro_accum, C_accum_temp, MR * NR, ps);
                                     
                                     for (int i_micro = 0; i_micro < MR; ++i_micro) {
                                         for (int j_micro = 0; j_micro < NR; ++j_micro) {
@@ -769,7 +762,7 @@ private:
                                     
                                     if (pc + kc_eff >= k) {
                                         output_type C_output_temp[MR * NR];
-                                        lo_float::Project(C_accum_temp, C_output_temp, MR * NR, rm, stoch_len);
+                                        lo_float::Project(C_accum_temp, C_output_temp, MR * NR, ps);
                                         
                                         for (int i_micro = 0; i_micro < MR; ++i_micro) {
                                             for (int j_micro = 0; j_micro < NR; ++j_micro) {
@@ -838,8 +831,7 @@ private:
                                         C_temp,
                                         A_pack_matrix.ld,
                                         B_pack_matrix.ld,
-                                        rm,
-                                        stoch_len
+                                        ps
                                     );
                                     
                                     for (int idx = 0; idx < MR * NR; ++idx) {
@@ -848,7 +840,7 @@ private:
                                 }
                                 
                                 AccumType2 C_accum_temp[MR * NR];
-                                lo_float::Project(C_micro_accum, C_accum_temp, MR * NR, rm, stoch_len);
+                                lo_float::Project(C_micro_accum, C_accum_temp, MR * NR, ps);
                                 
                                 for (int i_micro = 0; i_micro < MR; ++i_micro) {
                                     for (int j_micro = 0; j_micro < NR; ++j_micro) {
@@ -859,7 +851,7 @@ private:
                                 
                                 if (pc + kc_eff >= k) {
                                     output_type C_output_temp[MR * NR];
-                                    lo_float::Project(C_accum_temp, C_output_temp, MR * NR, rm, stoch_len);
+                                    lo_float::Project(C_accum_temp, C_output_temp, MR * NR, ps);
                                     
                                     for (int i_micro = 0; i_micro < MR; ++i_micro) {
                                         for (int j_micro = 0; j_micro < NR; ++j_micro) {

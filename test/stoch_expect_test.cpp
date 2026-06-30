@@ -47,7 +47,7 @@ constexpr FloatingPointParams param_fp32(
     IsNaN_f32()
 );
 
-using float32 = Templated_Float<param_fp32>;
+using fp32 = Templated_Float<param_fp32>;
 
 // ---------------------------------------------------------------------------
 // Helper: relative error
@@ -78,19 +78,19 @@ int main()
     int countAdd = 0, countSub = 0, countMul = 0, countDiv = 0;
 
     // Print limits
-    std::cout << "float32 min: " << (double)std::numeric_limits<float32>::min() << "\n";
-    std::cout << "float32 max: " << (double)std::numeric_limits<float32>::max() << "\n";
-    std::cout << "float32 denorm_min: " << (double)std::numeric_limits<float32>::denorm_min() << "\n";
-    std::cout << "float32 mantissa_bits: " << float32::mantissa_bits << "\n";
+    std::cout << "fp32 min: " << (double)std::numeric_limits<fp32>::min() << "\n";
+    std::cout << "fp32 max: " << (double)std::numeric_limits<fp32>::max() << "\n";
+    std::cout << "fp32 denorm_min: " << (double)std::numeric_limits<fp32>::denorm_min() << "\n";
+    std::cout << "fp32 mantissa_bits: " << fp32::mantissa_bits << "\n";
 
     for (int i = 0; i < N; i++) {
         double x_d = dist(rng);
         double y_d = dist(rng);
         if (std::fabs(y_d) < 1e-15) y_d = 1.0;
 
-        // Convert inputs to float32 (rounding applied at conversion via Round)
-        float32 x_f32 = static_cast<float32>(x_d);
-        float32 y_f32 = static_cast<float32>(y_d);
+        // Convert inputs to fp32 (rounding applied at conversion via Round)
+        fp32 x_f32 = static_cast<fp32>(x_d);
+        fp32 y_f32 = static_cast<fp32>(y_d);
 
         std::cout << "x_f32: " << double(x_f32) << ", y_f32: " << double(y_f32) << "\n";
 
@@ -110,10 +110,10 @@ int main()
         //            StochasticAdd(a, b, stochastic_len) with mode set elsewhere.
         //            Using the explicit rounding mode + stochastic_len API.
         {
-            float32 add_sr1 = Add(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 1);
-            float32 sub_sr1 = Sub(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 1);
-            float32 mul_sr1 = Mul(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 1);
-            float32 div_sr1 = Div(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 1);
+            fp32 add_sr1 = Add(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 1});
+            fp32 sub_sr1 = Sub(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 1});
+            fp32 mul_sr1 = Mul(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 1});
+            fp32 div_sr1 = Div(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 1});
 
             sumErrAdd_sr1 += relative_error(double(add_sr1), add_ref);
             sumErrSub_sr1 += relative_error(double(sub_sr1), sub_ref);
@@ -123,10 +123,10 @@ int main()
 
         // --- StochasticRoundingC, stochastic_len=5 ---
         {
-            float32 add_sr5 = Add(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 5);
-            float32 sub_sr5 = Sub(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 5);
-            float32 mul_sr5 = Mul(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 5);
-            float32 div_sr5 = Div(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 5);
+            fp32 add_sr5 = Add(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 5});
+            fp32 sub_sr5 = Sub(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 5});
+            fp32 mul_sr5 = Mul(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 5});
+            fp32 div_sr5 = Div(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 5});
 
             sumErrAdd_sr5 += relative_error(double(add_sr5), add_ref);
             sumErrSub_sr5 += relative_error(double(sub_sr5), sub_ref);
@@ -136,10 +136,10 @@ int main()
 
         // --- StochasticRoundingC, stochastic_len=10 ---
         {
-            float32 add_sr10 = Add(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 10);
-            float32 sub_sr10 = Sub(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 10);
-            float32 mul_sr10 = Mul(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 10);
-            float32 div_sr10 = Div(x_f32, y_f32, Rounding_Mode::StochasticRoundingC, 10);
+            fp32 add_sr10 = Add(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 10});
+            fp32 sub_sr10 = Sub(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 10});
+            fp32 mul_sr10 = Mul(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 10});
+            fp32 div_sr10 = Div(x_f32, y_f32, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, 10});
 
             sumErrAdd_sr10 += relative_error(double(add_sr10), add_ref);
             sumErrSub_sr10 += relative_error(double(sub_sr10), sub_ref);
@@ -149,10 +149,10 @@ int main()
 
         // --- RoundTiesToEven (deterministic, no stochastic_len) ---
         {
-            float32 add_rn = Add(x_f32, y_f32, Rounding_Mode::RoundToNearestEven);
-            float32 sub_rn = Sub(x_f32, y_f32, Rounding_Mode::RoundToNearestEven);
-            float32 mul_rn = Mul(x_f32, y_f32, Rounding_Mode::RoundToNearestEven);
-            float32 div_rn = Div(x_f32, y_f32, Rounding_Mode::RoundToNearestEven);
+            fp32 add_rn = Add(x_f32, y_f32, ProjSpec{Rounding_Mode::RoundToNearestEven});
+            fp32 sub_rn = Sub(x_f32, y_f32, ProjSpec{Rounding_Mode::RoundToNearestEven});
+            fp32 mul_rn = Mul(x_f32, y_f32, ProjSpec{Rounding_Mode::RoundToNearestEven});
+            fp32 div_rn = Div(x_f32, y_f32, ProjSpec{Rounding_Mode::RoundToNearestEven});
 
             sumErrAdd_rn += relative_error(double(add_rn), add_ref);
             sumErrSub_rn += relative_error(double(sub_rn), sub_ref);

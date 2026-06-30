@@ -6,12 +6,16 @@
     * @note This file is part of the lo_float library, which provides a set of tools for working with low to medium floating-point numbers in C++.
 */
 
+#pragma once
+
 #include <cstdint>
 #include <concepts>
 #include <iostream>
 #include <limits>
 #include <mutex>
 #include <string>
+
+#include "fp_tools.hpp"  // for lo_float::NaN_Behaviors (the _754 gate)
 
 
 //need some kind of functors that tell us how to deal with traps. Also need some global flags that are visible to users
@@ -42,7 +46,7 @@ namespace lo_float {
             AllExceptions = DivisionByZero | Overflow | Underflow | InvalidOperation | Inexact
         };
 
-        std::string exception_names[] = {
+        inline std::string exception_names[] = {
             "NoException",
             "DivisionByZero",
             "Overflow",
@@ -53,7 +57,7 @@ namespace lo_float {
 
 
 
-        void DefaultTrapHandler(LF_exception_flags f) noexcept {
+        inline void DefaultTrapHandler(LF_exception_flags f) noexcept {
                 std::cerr << "[Default Trap] Exception (s) : ";
                 for(int i = 0; i < 5; i++) {
                     if ((uint8_t)f & (1 << i)) {
@@ -164,10 +168,23 @@ namespace lo_float {
                 }
                 
 
-                //specialize for 
+                //specialize for
             };
 
-       
+
+        // Single, header-safe global environment shared by every translation unit.
+        // (inline => one definition even when ENABLE_EXCEPT is on across TUs.)
+        inline Environment f_env{};
+
+        // Gate helper: raise `f` on the global environment, but only for formats that
+        // opted into IEEE-754 exception semantics (NA_behavior == _754). The behavior
+        // is a compile-time constant, so the non-_754 case folds away to nothing.
+        template <lo_float::NaN_Behaviors NAB>
+        inline void signal_if_754(LF_exception_flags f) {
+            if constexpr (NAB == lo_float::NaN_Behaviors::_754) {
+                f_env.set_exception_flag(f);
+            }
+        }
 
 
     } // namespace lo_float_internal

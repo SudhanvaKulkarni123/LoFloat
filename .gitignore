@@ -1,14 +1,72 @@
-# Python cache
-LoFloat/__pycache__/
-*.py[cod]
-*.pyo
+# Object files, static & shared libs
+*.o
+*.obj
+*.lo
+*.a
+*.lib
+*.dll
+*.so
+*.so.*
+*.dylib
 
-# Build directory
-build/
+# Executables (any name with no extension or common ones)
+*.exe
+*.out
+*.app
+*/*/a.out
 
-# Binaries/ncu-rep in test/
-test/*
-!test/*.cpp
-!test/*.cu
-!test/*.py
-LoFloat/*.so
+# macOS debug symbol bundles
+*.dSYM/
+*.dSYM/**
+
+# Linker & dependency files
+*.map
+*.dep
+*.d
+*.gsym
+*.lld
+
+# Visual Studio / MSBuild
+*.vscode/*
+*.vcxproj*
+*.user
+*.suo
+*.opensdf
+*.psess
+*.vspx?
+*.cache
+*.pdb
+*.ipch
+*.vcxproj.*
+
+# Xcode
+*.xcworkspace
+*.xcuserstate
+*.xccheckout
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+
+# Logs / temporary
+*.log
+*.csv
+*~
+
+
+.DS_Store
+Thumbs.db
+
+# Compiled test binaries (extensionless; sources keep their .cpp/.cu/.cuh/.py)
+test/test_*
+!test/test_*.*
+test/lo_test
+test/sine
+test/*_test
+!test/*_test.*
+get_cache
+# LLVM IR dumps from the *.ll Makefile targets
+*.ll
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.egg-info/

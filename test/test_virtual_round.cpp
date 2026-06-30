@@ -201,7 +201,7 @@ int test_mantissa_round(int n_iters = 2000) {
                 if (!std::isfinite(d)) continue;
                 float fd = lo_float::virtual_round(d, ToMantissaBits, Rounding_Mode::RoundDown);
                 float fu = lo_float::virtual_round(d, ToMantissaBits, Rounding_Mode::RoundUp);
-                float rs = lo_float::virtual_round(d, ToMantissaBits, stoch_modes[m], 8);
+                float rs = lo_float::virtual_round(d, ToMantissaBits, ProjSpec{stoch_modes[m], Saturation_Mode::OvfInf, 8});
                 if (rs != fd && rs != fu) {
                     std::cout << "[mant=" << ToMantissaBits << "] " << stoch_names[m]
                               << " produced non-adjacent result (x=" << d
@@ -435,7 +435,7 @@ int test_fp_params_round(const char* name,
                 float local_d = d, local_u = d, local_s = d;
                 float fd = lo_float::virtual_round(local_d, ToFp, Rounding_Mode::RoundDown);
                 float fu = lo_float::virtual_round(local_u, ToFp, Rounding_Mode::RoundUp);
-                float rs = lo_float::virtual_round(local_s, ToFp, stoch_modes[m], 8);
+                float rs = lo_float::virtual_round(local_s, ToFp, ProjSpec{stoch_modes[m], Saturation_Mode::OvfInf, 8});
                 if (rs != fd && rs != fu) {
                     std::cout << name << " " << stoch_names[m]
                               << " produced non-adjacent result (x=" << d

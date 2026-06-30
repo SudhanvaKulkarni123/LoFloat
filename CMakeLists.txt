@@ -21,7 +21,12 @@ target_include_directories(lo_float
 )
 
 if(DEFINED ENV{USE_CUDA} AND "$ENV{USE_CUDA}" EQUAL 1)
-    set(CUDAToolkit_ROOT /usr/local/cuda-13.2 CACHE PATH "")
+    # Honor $CUDA_HOME if set, else fall back to the conventional install dir.
+    if(DEFINED ENV{CUDA_HOME})
+        set(CUDAToolkit_ROOT $ENV{CUDA_HOME} CACHE PATH "")
+    else()
+        set(CUDAToolkit_ROOT /usr/local/cuda CACHE PATH "")
+    endif()
     find_package(CUDAToolkit REQUIRED)
 
     execute_process(
@@ -45,6 +50,21 @@ if(MSVC)
     target_compile_options(lo_float INTERFACE /W4 /permissive-)
 else()
     target_compile_options(lo_float INTERFACE -Wall -Wextra -pedantic)
+endif()
+
+# ---------------------------------------------------------------------------
+# Optional IEEE-754 exception flags (ENABLE_EXCEPT).
+# The global exception environment (f_env) is unsynchronized and host-only, so
+# enable it only for a single-threaded CPU build: requested AND not USE_CUDA AND
+# not _LOFOPENMP.
+# ---------------------------------------------------------------------------
+if(DEFINED ENV{LOFLOAT_EXCEPTIONS} AND "$ENV{LOFLOAT_EXCEPTIONS}" EQUAL 1)
+    if((DEFINED ENV{USE_CUDA} AND "$ENV{USE_CUDA}" EQUAL 1) OR
+       (DEFINED ENV{_LOFOPENMP} AND "$ENV{_LOFOPENMP}" EQUAL 1))
+        message(STATUS "LOFLOAT_EXCEPTIONS=1 ignored: disabled because USE_CUDA/_LOFOPENMP is set.")
+    else()
+        target_compile_definitions(lo_float INTERFACE ENABLE_EXCEPT)
+    endif()
 endif()
 
 # option(LOFLOAT_BUILD_TESTS "Build LoFloat unit tests" OFF)

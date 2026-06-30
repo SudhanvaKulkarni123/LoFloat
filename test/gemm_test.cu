@@ -374,8 +374,7 @@ void test_lof_gemm(int M, int N, int K,
 
   lo_float::Gemm<MatA, MatB, MatC, MatD> gemm(
       accum_mant_bits,
-      rounding_mode,
-      stochastic_rounding_bits);
+      lo_float::ProjSpec{rounding_mode, lo_float::Saturation_Mode::OvfInf, stochastic_rounding_bits});
 
   // ── Warmup + error check ──────────────────────────────────────────────
 

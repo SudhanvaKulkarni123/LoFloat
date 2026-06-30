@@ -3,212 +3,94 @@
 #include <cuda_fp16.h>
 #include <c10/util/Half.h>
 #include <cub/cub.cuh>
+#include <cuda/functional>   // cuda::maximum (replaces removed cub::Max)
 #include "lo_float.h"
 #include "Lof_kernels.h"
 #include "cutlass_gemms.cuh"
+#include "cutlass_conv.cuh"
 #include "LUT_apprx.h"
+#include "mx_round.cuh"   // lo_float::virtual_mx_round (also used by the GPU test)
 
+  struct ContiguousLayout {
+      int64_t n, block_size;
+      __device__ int64_t num_blocks()   const { return n / block_size; }
+      __device__ int     block_elems()  const { return block_size; }
+      __device__ int64_t offset(int64_t blk, int e) const { return blk*block_size + e; }
+      __device__ bool    valid (int64_t blk, int e) const { return blk*block_size + e < n; }
+  };
+
+  struct RectLayout {            // row-major, leading dim = ld
+      int M, N, ld, BR, BC;
+      __device__ int64_t num_blocks()  const { return (int64_t)(M/BR) * (N/BC); }
+      __device__ int     block_elems() const { return BR*BC; }
+      __device__ int64_t offset(int64_t blk, int e) const {
+          int nbc = N/BC;
+          int bi = blk / nbc, bj = blk % nbc;     // block coords
+          int lr = e / BC,    lc = e % BC;         // intra-block coords
+          return (int64_t)(bi*BR + lr)*ld + (bj*BC + lc);
+      }
+      __device__ bool valid(int64_t blk, int e) const { return offset(blk, e) < (int64_t)M*ld; }
+  };
 
 namespace cg = cooperative_groups;
 namespace lo_float {
 template <typename From>
-__global__ void round_mantissa_kernel(const From* in, From* out, int64_t n, int mantissa_bits, Rounding_Mode round_mode, int stoch_len, From scale) {
+__global__ void round_mantissa_kernel(const From* in, From* out, int64_t n, int mantissa_bits, ProjSpec ps, From scale) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         From v = (scale == From(1)) ? in[idx] : From(scale * in[idx]);
-        out[idx] = virtual_round(v, mantissa_bits, round_mode, stoch_len);
+        out[idx] = virtual_round(v, mantissa_bits, ps);
     }
 }
 template <typename From>
-void round_mantissa(const From* in, From* out, int64_t n, int mantissa_bits, Rounding_Mode round_mode, int stoch_len, From scale) {
-    round_mantissa_kernel<<<(n + 255) / 256, 256>>>(in, out, n, mantissa_bits, round_mode, stoch_len, scale);
+void round_mantissa(const From* in, From* out, int64_t n, int mantissa_bits, ProjSpec ps, From scale) {
+    round_mantissa_kernel<<<(n + 255) / 256, 256>>>(in, out, n, mantissa_bits, ps, scale);
 }
 template <typename From>
-__global__ void round_fp_params_kernel(From* inout, int64_t n, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker> params, Rounding_Mode round_mode, int stoch_len, From scale) {
+__global__ void round_fp_params_kernel(From* inout, int64_t n, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker> params, ProjSpec ps, From scale) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         From v = (scale == From(1)) ? inout[idx] : From(scale * inout[idx]);
-        inout[idx] = virtual_round(v, params, round_mode, stoch_len);
+        inout[idx] = virtual_round(v, params, ps);
     }
 }
 template <typename From>
-void round_fp_params(From* inout, int64_t n, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker> params, Rounding_Mode round_mode, int stoch_len, From scale) {
-    round_fp_params_kernel<<<(n + 255) / 256, 256>>>(inout, n, params, round_mode, stoch_len, scale);
+void round_fp_params(From* inout, int64_t n, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker> params, ProjSpec ps, From scale) {
+    round_fp_params_kernel<<<(n + 255) / 256, 256>>>(inout, n, params, ps, scale);
 }
 
 
+// virtual_mx_round now lives in mx_round.cuh (included above) so the GPU test
+// can use it without pulling in torch/cutlass. The discard-the-rounding bug
+// (virtual_round results were not assigned back) is fixed there.
 
-template<typename From, int num_threads_per_cta = 256, int block_size = 32>
-__global__ void virtual_mx_round(
-    From* inout, int64_t n, From* /*scales (unused: virtual MX)*/,
+// Host launcher: dispatch a runtime block_size to the matching compile-time
+// kernel instantiation (num_threads_per_cta = 256). float only. Called from the
+// Python binding for CUDA tensors.
+void run_virtual_mx_round(
+    float* inout, int64_t n, int block_size,
     FloatingPointParams<DeviceInfChecker, DeviceNaNChecker> params_public,
     FloatingPointParams<DeviceInfChecker, DeviceNaNChecker> params_private,
-    Rounding_Mode round_mode_public, Rounding_Mode round_mode_private, int stoch_len)
+    ProjSpec ps_public, ProjSpec ps_private)
 {
-    static_assert((block_size & (block_size - 1)) == 0,
-                  "block_size must be a power of 2");
-    static_assert((num_threads_per_cta & (num_threads_per_cta - 1)) == 0,
-                  "num_threads_per_cta must be a power of 2");
-
-    const int tid     = threadIdx.x;
-    const int warp_id = tid >> 5;
-    const int lane_id = tid & 31;
-    const int64_t num_mx_blocks = n / block_size;
-
-    // Compute the rounded public scale from the block's amax.
-    // stoch_len = 0 because we never want stochastic rounding on the scale.
-    auto compute_scale = [&] (float amax) -> From {
-        From s = static_cast<From>(amax * (1.0f / params_private.max_normal));
-        virtual_round(s, params_public, round_mode_public, /*stoch_len=*/0);
-        return s;
-    };
-
-    // =======================================================================
-    // CASE 1:  block_size <= 32        (multiple MX blocks live in one warp)
-    // =======================================================================
-    if constexpr (block_size <= 32) {
-        static_assert(num_threads_per_cta % block_size == 0,
-                      "num_threads_per_cta must be divisible by block_size");
-        constexpr int blocks_per_cta = num_threads_per_cta / block_size;
-
-        const int local_block_idx = tid / block_size;
-        const int local_lane      = tid & (block_size - 1);
-
-        for (int64_t cta_iter = blockIdx.x;
-             cta_iter * blocks_per_cta < num_mx_blocks;
-             cta_iter += gridDim.x)
-        {
-            const int64_t block_idx = cta_iter * blocks_per_cta + local_block_idx;
-            const bool    valid     = block_idx < num_mx_blocks;
-            const int64_t idx       = block_idx * block_size + local_lane;
-
-            From  val  = valid ? inout[idx] : From(0);
-            float aval = fabsf(static_cast<float>(val));
-
-            // Subgroup amax via shfl_xor (offsets < block_size stay in-block).
-            #pragma unroll
-            for (int offset = block_size / 2; offset > 0; offset >>= 1) {
-                aval = fmaxf(aval, __shfl_xor_sync(0xFFFFFFFFu, aval, offset));
-            }
-            const From scale = compute_scale(aval);
-
-            if (valid) {
-                // Divide by scale, round into private format, then re-multiply.
-                From scaled = static_cast<From>(static_cast<float>(val) /
-                                                static_cast<float>(scale));
-                virtual_round(scaled, params_private, round_mode_private, stoch_len);
-                inout[idx] = static_cast<From>(static_cast<float>(scaled) *
-                                               static_cast<float>(scale));
-            }
-        }
+    constexpr int NTPC = 256;
+    const int64_t nb = (n + block_size - 1) / block_size;
+    int grid = (int)(nb < 1 ? 1 : (nb > 65535 ? 65535 : nb));
+    #define LOF_MX_LAUNCH(MX, NX)                                              \
+        virtual_mx_round<float, NTPC, MX, NX><<<grid, NTPC>>>(                \
+            inout, n, nullptr, params_public, params_private,                \
+            ps_public, ps_private)
+    switch (block_size) {
+        case 16:  LOF_MX_LAUNCH(1, 16);  break;
+        case 32:  LOF_MX_LAUNCH(1, 32);  break;
+        case 64:  LOF_MX_LAUNCH(2, 32);  break;
+        case 128: LOF_MX_LAUNCH(4, 32);  break;
+        case 256: LOF_MX_LAUNCH(8, 32);  break;
+        default:
+            throw std::runtime_error(
+                "virtual_mx_round: unsupported block_size (use 16/32/64/128/256)");
     }
-    // =======================================================================
-    // CASE 2:  32 < block_size <= num_threads_per_cta
-    // =======================================================================
-    else if constexpr (block_size <= num_threads_per_cta) {
-        static_assert(num_threads_per_cta % block_size == 0,
-                      "num_threads_per_cta must be divisible by block_size");
-        constexpr int warps_per_block = block_size / 32;
-        constexpr int blocks_per_cta  = num_threads_per_cta / block_size;
-
-        __shared__ float smem_partial[blocks_per_cta][warps_per_block];
-        __shared__ From  smem_scale  [blocks_per_cta];
-
-        const int local_block_idx = warp_id / warps_per_block;
-        const int warp_in_block   = warp_id % warps_per_block;
-        const int local_lane      = warp_in_block * 32 + lane_id;
-
-        for (int64_t cta_iter = blockIdx.x;
-             cta_iter * blocks_per_cta < num_mx_blocks;
-             cta_iter += gridDim.x)
-        {
-            const int64_t block_idx = cta_iter * blocks_per_cta + local_block_idx;
-            const bool    valid     = block_idx < num_mx_blocks;
-            const int64_t idx       = block_idx * block_size + local_lane;
-
-            From  val  = valid ? inout[idx] : From(0);
-            float aval = fabsf(static_cast<float>(val));
-
-            // Intra-warp reduction.
-            #pragma unroll
-            for (int offset = 16; offset > 0; offset >>= 1) {
-                aval = fmaxf(aval, __shfl_xor_sync(0xFFFFFFFFu, aval, offset));
-            }
-            if (lane_id == 0)
-                smem_partial[local_block_idx][warp_in_block] = aval;
-            __syncthreads();
-
-            // First warp of each MX block finishes the reduction & makes scale.
-            if (warp_in_block == 0) {
-                float v = (lane_id < warps_per_block)
-                            ? smem_partial[local_block_idx][lane_id]
-                            : 0.0f;
-                #pragma unroll
-                for (int offset = warps_per_block / 2; offset > 0; offset >>= 1) {
-                    v = fmaxf(v, __shfl_xor_sync(0xFFFFFFFFu, v, offset));
-                }
-                if (lane_id == 0)
-                    smem_scale[local_block_idx] = compute_scale(v);
-            }
-            __syncthreads();
-
-            const From scale = smem_scale[local_block_idx];
-            if (valid) {
-                From scaled = static_cast<From>(static_cast<float>(val) /
-                                                static_cast<float>(scale));
-                virtual_round(scaled, params_private, round_mode_private, stoch_len);
-                inout[idx] = static_cast<From>(static_cast<float>(scaled) *
-                                               static_cast<float>(scale));
-            }
-            __syncthreads();   // protect smem before next iteration
-        }
-    }
-    // =======================================================================
-    // CASE 3:  block_size > num_threads_per_cta   (two-pass, CUB reduce)
-    // =======================================================================
-    else {
-        static_assert(block_size % num_threads_per_cta == 0,
-                      "block_size must be divisible by num_threads_per_cta");
-        constexpr int chunks_per_block = block_size / num_threads_per_cta;
-
-        using BlockReduce = cub::BlockReduce<float, num_threads_per_cta>;
-        __shared__ typename BlockReduce::TempStorage temp_storage;
-        __shared__ From  smem_scale;
-
-        for (int64_t block_idx = blockIdx.x;
-             block_idx < num_mx_blocks;
-             block_idx += gridDim.x)
-        {
-            const int64_t base = block_idx * block_size;
-
-            // Pass 1: amax across the entire MX block.
-            float thread_max = 0.0f;
-            #pragma unroll
-            for (int chunk = 0; chunk < chunks_per_block; ++chunk) {
-                const int64_t idx = base + chunk * num_threads_per_cta + tid;
-                thread_max = fmaxf(thread_max,
-                                   fabsf(static_cast<float>(inout[idx])));
-            }
-            float amax = BlockReduce(temp_storage).Reduce(thread_max, cub::Max());
-
-            if (tid == 0) smem_scale = compute_scale(amax);
-            __syncthreads();
-            const From scale = smem_scale;
-
-            // Pass 2: divide, round private, re-multiply.
-            #pragma unroll
-            for (int chunk = 0; chunk < chunks_per_block; ++chunk) {
-                const int64_t idx = base + chunk * num_threads_per_cta + tid;
-                From val    = inout[idx];
-                From scaled = static_cast<From>(static_cast<float>(val) /
-                                                static_cast<float>(scale));
-                virtual_round(scaled, params_private, round_mode_private, stoch_len);
-                inout[idx]  = static_cast<From>(static_cast<float>(scaled) *
-                                                static_cast<float>(scale));
-            }
-            __syncthreads();   // before reusing temp_storage / smem_scale
-        }
-    }
+    #undef LOF_MX_LAUNCH
 }
 
 torch::Tensor LoF_gemm(
@@ -255,8 +137,7 @@ torch::Tensor LoF_gemm(
     // ── Construct and launch ─────────────────────────────────────────────
     lo_float::Gemm<MatA, MatB, MatC, MatD> gemm(
         accum_mant_bits,
-        round_mode,
-        stochastic_rounding_bits);
+        lo_float::ProjSpec{round_mode, lo_float::Saturation_Mode::OvfInf, stochastic_rounding_bits});
 
     auto status = gemm.run_scaled(
         /*scale_a=*/static_cast<float>(scale_a),
@@ -272,30 +153,131 @@ torch::Tensor LoF_gemm(
     return C;
 }
 
+torch::Tensor LoF_conv2d(
+    torch::Tensor input,
+    torch::Tensor weight,
+    int64_t pad_h, int64_t pad_w,
+    int64_t stride_h, int64_t stride_w,
+    int64_t dilation_h, int64_t dilation_w,
+    int accum_mant_bits,
+    Rounding_Mode round_mode,
+    int stochastic_rounding_bits,
+    double weight_scale,
+    double input_scale)
+{
+    TORCH_CHECK(input.dim() == 4 && weight.dim() == 4,
+        "LoF_conv2d: input and weight must be 4-D (NCHW / OIHW)");
+    TORCH_CHECK(input.scalar_type() == torch::kFloat32 && weight.scalar_type() == torch::kFloat32,
+        "LoF_conv2d: only float32 inputs are supported");
+    TORCH_CHECK(input.is_cuda() && weight.is_cuda(),
+        "LoF_conv2d requires CUDA tensors (input on ", input.device(),
+        ", weight on ", weight.device(), ")");
+    TORCH_CHECK(input.size(1) == weight.size(1),
+        "LoF_conv2d: input C_in (", input.size(1), ") != weight C_in (", weight.size(1), ")");
 
-template <typename T, class Reducer, class ApproxFn>
-__global__ void silu_kernel(const T* __restrict__ in,
-                            T* __restrict__ out,
-                            int64_t n,
-                            FuncApprox<Reducer, ApproxFn> approx) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) out[idx] = approx(in[idx]);
+    // NCHW -> NHWC, OIHW -> KRSC (CUTLASS conv's native layouts).
+    auto x = input.permute({0, 2, 3, 1}).contiguous();
+    auto w = weight.permute({0, 2, 3, 1}).contiguous();
+
+    const int N = static_cast<int>(x.size(0));
+    const int H = static_cast<int>(x.size(1));
+    const int W = static_cast<int>(x.size(2));
+    const int C = static_cast<int>(x.size(3));
+    const int K = static_cast<int>(w.size(0));
+    const int R = static_cast<int>(w.size(1));
+    const int S = static_cast<int>(w.size(2));
+
+    const int ph = static_cast<int>(pad_h), pw = static_cast<int>(pad_w);
+    const int sh = static_cast<int>(stride_h), sw = static_cast<int>(stride_w);
+    const int dh = static_cast<int>(dilation_h), dw = static_cast<int>(dilation_w);
+
+    const int P = (H + 2 * ph - dh * (R - 1) - 1) / sh + 1;
+    const int Q = (W + 2 * pw - dw * (S - 1) - 1) / sw + 1;
+    TORCH_CHECK(P > 0 && Q > 0,
+        "LoF_conv2d: non-positive output spatial size (P=", P, ", Q=", Q, ")");
+
+    auto out_nhwc = torch::zeros({N, P, Q, K}, x.options());
+
+    cutlass::conv::Conv2dProblemSize problem_size(
+        N, H, W, C, K, R, S, P, Q,
+        ph, pw, sh, sw, dh, dw,
+        cutlass::conv::Mode::kCrossCorrelation);
+
+    lo_float::Conv2d<> conv(accum_mant_bits,
+        lo_float::ProjSpec{round_mode, lo_float::Saturation_Mode::OvfInf, stochastic_rounding_bits});
+
+    // Rescale back to the unscaled domain, same convention as LoF_gemm's
+    // scale_a/scale_b (either scale being 0 is treated as 1, no-op).
+    double denom = weight_scale * input_scale;
+    float alpha = (denom == 0.0) ? 1.0f : static_cast<float>(1.0 / denom);
+
+    auto status = conv(
+        problem_size,
+        x.data_ptr<float>(), w.data_ptr<float>(),
+        out_nhwc.data_ptr<float>(), out_nhwc.data_ptr<float>(),
+        alpha, 0.0f);
+
+    TORCH_CHECK(status == decltype(conv)::Status::kSuccess,
+        "LoF_conv2d: kernel launch/init failed (status=", static_cast<int>(status), ")");
+
+    cudaError_t sync_err = cudaDeviceSynchronize();
+    TORCH_CHECK(sync_err == cudaSuccess, "LoF_conv2d sync: ", cudaGetErrorString(sync_err));
+
+    // NHWC -> NCHW
+    return out_nhwc.permute({0, 3, 1, 2}).contiguous();
 }
 
-template <typename T>
-void silu_lut(const T* in, T* out, int64_t n) {
-    silu_kernel<<<(n + 255) / 256, 256>>>(in, out, n, g_silu);
+
+// Piecewise-linear SiLU. `lut` holds N+1 uniform knots over [-R, R] (built in
+// Python by PWLSiLU). For x in [-R, R] we interpolate the table; outside we
+// fall back to the asymptote relu(x) (== x for x>R, 0 for x<-R), matching
+// PWLSiLU.forward exactly. The table is read from global memory by pointer, so
+// N is bounded by L2/cache residency rather than the 4KB/32KB kernel-arg limit.
+//
+// N (the segment count, always a power of 2) is a compile-time template
+// parameter so the bound `N - 1` and `inv_step` fold to constants; the runtime
+// length is dispatched to the matching instantiation in LoPy_bind.cpp.
+template <typename T, int N>
+__global__ void pwl_silu_kernel(const T* __restrict__ in,
+                                T* __restrict__ out,
+                                const float* __restrict__ lut,
+                                int64_t n, float R, float inv_step) {
+    int64_t k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    float x  = static_cast<float>(in[k]);
+    float xc = fminf(fmaxf(x, -R), R);
+    float u  = (xc + R) * inv_step;          // in [0, N]
+    int   i  = static_cast<int>(u);          // floor (u >= 0)
+    if (i > N - 1) i = N - 1;
+    float frac = u - static_cast<float>(i);
+    float y0 = lut[i];
+    float y1 = lut[i + 1];
+    float y  = fmaf(frac, y1 - y0, y0);
+    if (fabsf(x) > R) y = x > 0.0f ? x : 0.0f;   // relu asymptote
+    out[k] = static_cast<T>(y);
 }
 
-template void silu_lut<float>    (const float*,     float*,     int64_t);
-template void silu_lut<double>   (const double*,    double*,    int64_t);
-template void silu_lut<c10::Half>(const c10::Half*, c10::Half*, int64_t);
+template <typename T, int N>
+void pwl_silu(const T* in, T* out, const float* lut, int64_t n, float R) {
+    if (n == 0) return;
+    float inv_step = static_cast<float>(N) / (2.0f * R);
+    pwl_silu_kernel<T, N><<<(n + 255) / 256, 256>>>(in, out, lut, n, R, inv_step);
+}
+
+// Instantiate for every supported power-of-2 length (single source of truth in
+// Lof_kernels.h) across the three element types virtual_round also supports.
+#define LOF_PWL_SILU_INST(NV) \
+    template void pwl_silu<float,     NV>(const float*,     float*,     const float*, int64_t, float); \
+    template void pwl_silu<double,    NV>(const double*,    double*,    const float*, int64_t, float); \
+    template void pwl_silu<c10::Half, NV>(const c10::Half*, c10::Half*, const float*, int64_t, float);
+LOF_PWL_SILU_LENGTHS(LOF_PWL_SILU_INST)
+#undef LOF_PWL_SILU_INST
 
 
-template void round_mantissa<c10::Half>(const c10::Half*, c10::Half*, int64_t, int, Rounding_Mode, int, c10::Half);
-template void round_mantissa<float>(const float*, float*, int64_t, int, Rounding_Mode, int, float);
-template void round_mantissa<double>(const double*, double*, int64_t, int, Rounding_Mode, int, double);
-template void round_fp_params<c10::Half>(c10::Half*, int64_t, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker>, Rounding_Mode, int, c10::Half);
-template void round_fp_params<float>(float*, int64_t, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker>, Rounding_Mode, int, float);
-template void round_fp_params<double>(double*, int64_t, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker>, Rounding_Mode, int, double);
+template void round_mantissa<c10::Half>(const c10::Half*, c10::Half*, int64_t, int, ProjSpec, c10::Half);
+template void round_mantissa<float>(const float*, float*, int64_t, int, ProjSpec, float);
+template void round_mantissa<double>(const double*, double*, int64_t, int, ProjSpec, double);
+template void round_fp_params<c10::Half>(c10::Half*, int64_t, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker>, ProjSpec, c10::Half);
+template void round_fp_params<float>(float*, int64_t, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker>, ProjSpec, float);
+template void round_fp_params<double>(double*, int64_t, FloatingPointParams<DeviceInfChecker, DeviceNaNChecker>, ProjSpec, double);
 }

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <concepts>
+#include "platform_macros.h"
 
 #define rounding_modes \
     X(RoundToNearestEven) \
@@ -21,7 +22,10 @@
     X(StochasticRoundingB) \
     X(StochasticRoundingC) \
     X(True_StochasticRounding) \
-    X(ProbabilisticRounding) 
+    X(ProbabilisticRounding) \
+    X(RoundToOdd) \
+    X(RoundTiesTowardsZero) \
+    X(StochasticRoundingD)
 
 #define signednesses \
     X(Signed) \
@@ -30,6 +34,12 @@
 #define inf_behaviors \
     X(Extended) \
     X(Saturating)
+
+#define saturation_modes \
+    X(OvfInf) \
+    X(SatFinite) \
+    X(SatPropagate) 
+    
 
 #define nan_behaviors \
     X(_3109) \
@@ -49,6 +59,32 @@ namespace lo_float {
     #define X(name) name,
     rounding_modes
     #undef X
+};
+
+/**
+ * @enum Saturation_Mode
+ * @brief Defines different saturation modes (finite->max finite, finite->inf, inf->inf) for floating-point operations.
+ */
+enum Saturation_Mode : uint8_t {
+    #define X(name) name,
+    saturation_modes
+    #undef X
+};
+
+/**
+ * @struct ProjSpec
+ * @brief struct that describes how rounding should happen after each operation
+*/
+struct ProjSpec {
+    Rounding_Mode rounding_mode;
+    Saturation_Mode saturation_mode;
+    int stoch_length; // number of bits for stochastic rounding (0 = none)
+
+    // explicit: a bare Rounding_Mode must NOT implicitly become a ProjSpec — every
+    // call site has to pass a ProjSpec, so the old (Rounding_Mode[, stoch]) API can't
+    // sneak back in via implicit conversion. Still default-constructible (ProjSpec{}).
+    constexpr explicit LOFLOAT_HOST_DEVICE ProjSpec(Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, Saturation_Mode sm = Saturation_Mode::OvfInf, int stoch_len = 0)
+        : rounding_mode(rm), saturation_mode(sm), stoch_length(stoch_len) {}
 };
 
 /**
@@ -225,7 +261,7 @@ struct FloatingPointParams
  */
 class SingleInfChecker {
     public:
-    bool operator()(uint32_t bits) const {
+    LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const {
         static constexpr uint32_t ExponentMask = 0x7F800000;
         static constexpr uint32_t FractionMask = 0x007FFFFF;
         // Infinity => exponent=0xFF, fraction=0
@@ -234,17 +270,17 @@ class SingleInfChecker {
         return isInf;
     }
 
-    uint32_t infBitPattern() const {
+    LOFLOAT_HOST_DEVICE uint32_t infBitPattern() const {
         // +∞ => 0x7F800000
         return 0x7F800000;
     }
 
-    uint32_t minNegInf() const {
+    LOFLOAT_HOST_DEVICE uint32_t minNegInf() const {
         // -∞ => 0xFF800000
         return 0xFF800000;
     }
 
-    uint32_t minPosInf() const {
+    LOFLOAT_HOST_DEVICE uint32_t minPosInf() const {
         // +∞ => 0x7F800000
         return 0x7F800000;
     }
@@ -258,7 +294,7 @@ class SingleInfChecker {
  */
 class SingleNaNChecker {
     public:
-    bool operator()(uint32_t bits) const {
+    LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const {
         static constexpr uint32_t ExponentMask = 0x7F800000;
         static constexpr uint32_t FractionMask = 0x007FFFFF;
         // NaN => exponent=0xFF, fraction!=0
@@ -267,12 +303,12 @@ class SingleNaNChecker {
         return isNaN;
     }
 
-    uint32_t qNanBitPattern() const {
+    LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const {
         // quiet-NaN => 0x7FC00000
         return 0x7FC00000;
     }
 
-    uint32_t sNanBitPattern() const {
+    LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const {
         // signaling-NaN => 0x7F800001
         return 0x7F800001;
     }
@@ -296,28 +332,28 @@ inline constexpr FloatingPointParams<SingleInfChecker , SingleNaNChecker> single
 
 //defintions for half precision and bfloat-
 struct FP16InfChecker {
-    bool operator()(uint32_t bits) const {
+    LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const {
         uint32_t exp  = (bits >> 10) & 0x1F;  // bits 14–10
         uint32_t mant = bits & 0x3FF;         // bits 9–0
         return (exp == 0x1F) && (mant == 0);
     }
 
-    uint32_t minPosInf() const { return 0x7C00; }  // sign=0, exp=31, mant=0
-    uint32_t minNegInf() const { return 0xFC00; }  // sign=1, exp=31, mant=0
-    uint32_t infBitPattern() const { return minPosInf(); }
+    LOFLOAT_HOST_DEVICE uint32_t minPosInf() const { return 0x7C00; }  // sign=0, exp=31, mant=0
+    LOFLOAT_HOST_DEVICE uint32_t minNegInf() const { return 0xFC00; }  // sign=1, exp=31, mant=0
+    LOFLOAT_HOST_DEVICE uint32_t infBitPattern() const { return minPosInf(); }
 };
 
 struct FP16NaNChecker {
-    bool operator()(uint32_t bits) const {
+    LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const {
         uint32_t exp  = (bits >> 10) & 0x1F;
         uint32_t mant = bits & 0x3FF;
         return (exp == 0x1F) && (mant != 0);
     }
 
     // Canonical quiet NaN (mantissa MSB=1)
-    uint32_t qNanBitPattern() const { return 0x7E00; }
+    LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const { return 0x7E00; }
     // Example signaling NaN (mantissa LSB=1, MSB=0)
-    uint32_t sNanBitPattern() const { return 0x7C01; }
+    LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const { return 0x7C01; }
 };
 
 
@@ -334,28 +370,28 @@ inline constexpr FloatingPointParams<FP16InfChecker, FP16NaNChecker> halfPrecisi
 
 
 struct BF16InfChecker {
-    bool operator()(uint32_t bits) const {
+    LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const {
         uint32_t exp  = (bits >> 7) & 0xFF;   // bits 14–7
         uint32_t mant = bits & 0x7F;          // bits 6–0
         return (exp == 0xFF) && (mant == 0);
     }
 
-    uint32_t minPosInf() const { return 0x7F80; }  // sign=0, exp=255, mant=0
-    uint32_t minNegInf() const { return 0xFF80; }  // sign=1, exp=255, mant=0
-    uint32_t infBitPattern() const { return minPosInf(); }
+    LOFLOAT_HOST_DEVICE uint32_t minPosInf() const { return 0x7F80; }  // sign=0, exp=255, mant=0
+    LOFLOAT_HOST_DEVICE uint32_t minNegInf() const { return 0xFF80; }  // sign=1, exp=255, mant=0
+    LOFLOAT_HOST_DEVICE uint32_t infBitPattern() const { return minPosInf(); }
 };
 
 struct BF16NaNChecker {
-    bool operator()(uint32_t bits) const {
+    LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const {
         uint32_t exp  = (bits >> 7) & 0xFF;
         uint32_t mant = bits & 0x7F;
         return (exp == 0xFF) && (mant != 0);
     }
 
     // Canonical quiet NaN (mantissa MSB=1)
-    uint32_t qNanBitPattern() const { return 0x7FC0; }
+    LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const { return 0x7FC0; }
     // Example signaling NaN (mantissa LSB=1, MSB=0)
-    uint32_t sNanBitPattern() const { return 0x7F81; }
+    LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const { return 0x7F81; }
 };
 
 inline constexpr FloatingPointParams<BF16InfChecker, BF16NaNChecker> bfloatPrecisionParams(
@@ -374,7 +410,7 @@ inline constexpr FloatingPointParams<BF16InfChecker, BF16NaNChecker> bfloatPreci
 //definitions for tf32
 struct TF32InfChecker {
     // Checks if packed bits are Inf
-    bool operator()(uint32_t bits) const {
+    LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const {
         // Extract exponent (bits 17–10) and mantissa (bits 9–0)
         uint32_t exp = (bits >> 10) & 0xFF;
         uint32_t mant = bits & 0x3FF;
@@ -382,29 +418,29 @@ struct TF32InfChecker {
     }
 
     // +∞ pattern (sign=0, exp=255, mant=0)
-    uint32_t minPosInf() const { return 0x0003F800; }
+    LOFLOAT_HOST_DEVICE uint32_t minPosInf() const { return 0x0003F800; }
 
     // −∞ pattern (sign=1, exp=255, mant=0)
-    uint32_t minNegInf() const { return 0x0007F800; }
+    LOFLOAT_HOST_DEVICE uint32_t minNegInf() const { return 0x0007F800; }
 
     // Canonical infBitPattern: same as PosInf
-    uint32_t infBitPattern() const { return minPosInf(); }
+    LOFLOAT_HOST_DEVICE uint32_t infBitPattern() const { return minPosInf(); }
 };
 
 
 struct TF32NaNChecker {
     // Checks if packed bits are NaN
-    bool operator()(uint32_t bits) const {
+    LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const {
         uint32_t exp = (bits >> 10) & 0xFF;
         uint32_t mant = bits & 0x3FF;
         return (exp == 0xFF) && (mant != 0);
     }
 
     // Canonical quiet NaN: mantissa MSB = 1
-    uint32_t qNanBitPattern() const { return 0x0003FE00; }
+    LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const { return 0x0003FE00; }
 
     // Example signaling NaN: mantissa LSB set, MSB clear
-    uint32_t sNanBitPattern() const { return 0x0003F801; }
+    LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const { return 0x0003F801; }
 };
 
 
