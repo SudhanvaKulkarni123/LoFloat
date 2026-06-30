@@ -35,21 +35,21 @@ constexpr FloatingPointParams param_fp32(
     Signedness::Signed,
     IsInf_f32(), IsNaN_f32());
 
-using float32 = Templated_Float<param_fp32>;   // always the same storage layout
+using fp32 = Templated_Float<param_fp32>;   // always the same storage layout
 
 // ---------- generic experiment for any stochastic-length ----------
 void run_one_len(const char* label,
                  double      testVal,
                  int         stoch_len,
                  int         trials,
-                const float32 d_down, const float32 d_up)
+                const fp32 d_down, const fp32 d_up)
 {
     int hitLower = 0, hitUpper = 0;
 
     for (int i = 0; i < trials; ++i) {
         // --- perform conversion with stochastic rounding of 'stoch_len' bits
-        float32 fp = Round<float32, double>(
-            testVal, Rounding_Mode::StochasticRoundingC, stoch_len);
+        fp32 fp = Round<fp32, double>(
+            testVal, ProjSpec{Rounding_Mode::StochasticRoundingC, Saturation_Mode::OvfInf, stoch_len});
 
         double d = static_cast<double>(fp);
 
@@ -106,7 +106,7 @@ int main()
 
     for (int len = 1; len <= 10; ++len) {
         char name[8]; std::snprintf(name, sizeof(name), "sr%d", len);
-        run_one_len(name, x, len, trials, float32(f_low), float32(f_up));
+        run_one_len(name, x, len, trials, fp32(f_low), fp32(f_up));
     }
     return 0;
 }

@@ -7,6 +7,17 @@ TORCH_LIB = os.path.join(os.path.dirname(torch.__file__), 'lib')
 
 # --- CUDA home detection ---
 use_cuda = os.environ.get('USE_CUDA', '0') == '1'
+use_openmp = os.environ.get('_LOFOPENMP', '0') == '1'
+
+# --- Exception handling (ENABLE_EXCEPT) ---
+# The global exception environment (f_env) is unsynchronized and host-only, so it
+# is only safe with a single-threaded CPU build. Disable it whenever CUDA or
+# OpenMP is active.
+want_except = os.environ.get('LOFLOAT_EXCEPTIONS', '0') == '1'
+enable_except = want_except and not use_cuda and not use_openmp
+if want_except and not enable_except:
+    forced_off = [n for n, on in (('USE_CUDA', use_cuda), ('_LOFOPENMP', use_openmp)) if on]
+    print(f"LOFLOAT_EXCEPTIONS=1 ignored: exceptions disabled because {', '.join(forced_off)} is set.")
 if use_cuda and not os.environ.get('CUDA_HOME'):
     nvcc = subprocess.run(['which', 'nvcc'], capture_output=True, text=True).stdout.strip()
     if nvcc:
@@ -29,15 +40,18 @@ if use_cuda:
     cuda_home = os.environ.get('CUDA_HOME', '/usr/local/cuda')
     cxx_args = ['-std=c++20', '-O3', '-fPIC', '-DUSE_CUDA']
     nvcc_args = ['-std=c++20', '-O3', '-DUSE_CUDA']
-    use_openmp = os.environ.get('_LOFOPENMP', '0') == '1'
     link_args = ['-fopenmp'] if use_openmp else []
     if use_openmp:
         cxx_args.append('-fopenmp')
+    # never passed to nvcc — f_env is host-only. (enable_except is always False
+    # in this branch since use_cuda is True, but kept for symmetry.)
+    if enable_except:
+        cxx_args.append('-DENABLE_EXCEPT')
 
     
     # --- Paths and flags ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    cutlass_path = os.path.join(script_dir, '../cutlass')
+    cutlass_path = os.path.join(script_dir, 'third_party/cutlass')
     include_dirs = [
         os.path.join(script_dir, 'src/'),
         os.path.join(script_dir, 'third_party/xsimd/include'),
@@ -64,7 +78,6 @@ else:
     # --- Paths and flags ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
     xsimd_include = os.environ.get('XSIMD_INCLUDE_PATH', 'third_party/xsimd/include')
-    use_openmp = os.environ.get('_LOFOPENMP', '0') == '1'
     link_args = ['-fopenmp'] if use_openmp else []
     include_dirs = [
         xsimd_include,
@@ -74,6 +87,8 @@ else:
     cxx_args = ['-std=c++20', '-O3', '-fPIC']
     if use_openmp:
         cxx_args.append('-fopenmp')
+    if enable_except:
+        cxx_args.append('-DENABLE_EXCEPT')
 
     ext = CppExtension(
         name='LoFloat.LoFloat',

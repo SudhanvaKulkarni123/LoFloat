@@ -2,8 +2,14 @@
 //  test_lof_gemm_gpu.cu
 //
 //  GPU test for lo_float::Gemm (CUTLASS + LoFMma accumulation rounding).
-//  Compares against cuBLAS SGEMM (fp32) and HGEMM (fp16) as references.
-//  Reports: kernel time, GFLOP/s, max element-wise backward error.
+//  All three matrices A, B, C/D are RowMajor.
+//
+//  cuBLAS trick for RowMajor × RowMajor:
+//    D (M×N, RM) = A (M×K, RM) · B (K×N, RM)
+//    ≡ D^T (N×M, CM) = B^T (N×K, CM) · A^T (K×M, CM)
+//    → cublasSgemm(OP_N, OP_N, N, M, K, B_ptr, ldB=N, A_ptr, ldA=K, D_ptr, ldD=N)
+//
+//  Reports: kernel time, GFLOP/s, max/avg element-wise backward error.
 // ═══════════════════════════════════════════════════════════════════════════
 #define USE_CUDA 1
 #include <cstdio>
@@ -22,30 +28,28 @@
 // ── Your project headers ─────────────────────────────────────────────────
 #include "lo_float.h"
 #include "layouts.h"
-
-// ── The lo_float::Gemm wrapper ───────────────────────────────────────────
 #include "cutlass_gemms.cuh"
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define CUDA_CHECK(x) do {                                              \
-  cudaError_t e = (x);                                                  \
-  if (e != cudaSuccess) {                                               \
-    fprintf(stderr, "CUDA error %s:%d: %s\n",                          \
-            __FILE__, __LINE__, cudaGetErrorString(e));                  \
-    exit(1);                                                            \
-  }                                                                     \
+#define CUDA_CHECK(x) do {                                                    \
+  cudaError_t e = (x);                                                        \
+  if (e != cudaSuccess) {                                                     \
+    fprintf(stderr, "CUDA error %s:%d: %s\n",                                \
+            __FILE__, __LINE__, cudaGetErrorString(e));                        \
+    exit(1);                                                                  \
+  }                                                                           \
 } while (0)
 
-#define CUBLAS_CHECK(x) do {                                            \
-  cublasStatus_t s = (x);                                               \
-  if (s != CUBLAS_STATUS_SUCCESS) {                                     \
-    fprintf(stderr, "cuBLAS error %s:%d: status %d\n",                  \
-            __FILE__, __LINE__, (int)s);                                 \
-    exit(1);                                                            \
-  }                                                                     \
+#define CUBLAS_CHECK(x) do {                                                  \
+  cublasStatus_t s = (x);                                                     \
+  if (s != CUBLAS_STATUS_SUCCESS) {                                           \
+    fprintf(stderr, "cuBLAS error %s:%d: status %d\n",                        \
+            __FILE__, __LINE__, (int)s);                                       \
+    exit(1);                                                                  \
+  }                                                                           \
 } while (0)
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -66,88 +70,90 @@ __global__ void half2float_kernel(const __half* __restrict__ src,
 
 void float2half_gpu(const float* d_src, __half* d_dst, size_t n) {
   int threads = 256;
-  int blocks = (int)((n + threads - 1) / threads);
+  int blocks  = (int)((n + threads - 1) / threads);
   float2half_kernel<<<blocks, threads>>>(d_src, d_dst, n);
   CUDA_CHECK(cudaGetLastError());
 }
 
 void half2float_gpu(const __half* d_src, float* d_dst, size_t n) {
   int threads = 256;
-  int blocks = (int)((n + threads - 1) / threads);
+  int blocks  = (int)((n + threads - 1) / threads);
   half2float_kernel<<<blocks, threads>>>(d_src, d_dst, n);
   CUDA_CHECK(cudaGetLastError());
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  cuBLAS SGEMM wrapper for: D = alpha * A * B + beta * C
+//  cuBLAS SGEMM  — RowMajor × RowMajor → RowMajor
 //
-//  A : RowMajor  M × K, ld = K
-//  B : ColMajor  K × N, ld = K
-//  C/D : RowMajor  M × N, ld = N
+//  Computes:  D = alpha * A * B + beta * C
+//
+//    A   : RowMajor  M × K,  ld = K
+//    B   : RowMajor  K × N,  ld = N
+//    C/D : RowMajor  M × N,  ld = N
+//
+//  cuBLAS (column-major) identity used:
+//    D^T = B^T · A^T
+//    → OP_N on B^T (N×K, ld=N) and A^T (K×M, ld=K), result N×M (ld=N)
 // ─────────────────────────────────────────────────────────────────────────
-void cublas_sgemm_rm_cm(
+void cublas_sgemm_rr(
     cublasHandle_t handle,
     int M, int N, int K,
     float alpha, float beta,
-    const float* d_A,     // RowMajor M×K, ld=K
-    const float* d_B,     // ColMajor K×N, ld=K
-    const float* d_C,     // RowMajor M×N, ld=N  (source for beta)
-    float*       d_D)     // RowMajor M×N, ld=N  (output)
+    const float* d_A,   // RowMajor M×K, ld=K
+    const float* d_B,   // RowMajor K×N, ld=N
+    const float* d_C,   // RowMajor M×N, ld=N  (beta source)
+    float*       d_D)   // RowMajor M×N, ld=N  (output)
 {
-  if (d_D != d_C && beta != 0.0f) {
+  if (d_D != d_C && beta != 0.0f)
     CUDA_CHECK(cudaMemcpy(d_D, d_C, sizeof(float) * M * N,
                           cudaMemcpyDeviceToDevice));
-  }
 
   CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH));
+
+  // D^T (N×M) = B^T (N×K) · A^T (K×M)
   CUBLAS_CHECK(cublasSgemm(
       handle,
-      CUBLAS_OP_T,    // op on first matrix (B): transpose
-      CUBLAS_OP_N,    // op on second matrix (A as col-major K×M): no transpose
-      N, M, K,        // m, n, k for the column-major computation
+      CUBLAS_OP_N,   // no transpose on B^T  (it is already N×K in col-major)
+      CUBLAS_OP_N,   // no transpose on A^T  (it is already K×M in col-major)
+      N, M, K,
       &alpha,
-      d_B, K,         // B col-major K×N
-      d_A, K,         // A row-major M×K = col-major K×M
+      d_B, N,        // B row-major K×N, ld=N  ≡  B^T col-major N×K, ld=N
+      d_A, K,        // A row-major M×K, ld=K  ≡  A^T col-major K×M, ld=K
       &beta,
-      d_D, N));       // D row-major M×N = col-major N×M
+      d_D, N));      // D row-major M×N, ld=N  ≡  D^T col-major N×M, ld=N
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  cuBLAS HGEMM wrapper for: D = alpha * A * B + beta * C
+//  cuBLAS HGEMM  — RowMajor × RowMajor → RowMajor  (fp16)
 //
-//  Same layout convention as SGEMM above, but with fp16 inputs/outputs
-//  and fp16 accumulation.
-//
-//  A_h : RowMajor  M × K, ld = K  (half)
-//  B_h : ColMajor  K × N, ld = K  (half)
-//  D_h : RowMajor  M × N, ld = N  (half, output)
+//  Same layout as SGEMM above.
 // ─────────────────────────────────────────────────────────────────────────
-void cublas_hgemm_rm_cm(
+void cublas_hgemm_rr(
     cublasHandle_t handle,
     int M, int N, int K,
     float alpha_f, float beta_f,
-    const __half* d_A_h,    // RowMajor M×K, ld=K
-    const __half* d_B_h,    // ColMajor K×N, ld=K
-    __half*       d_D_h)    // RowMajor M×N, ld=N  (output)
+    const __half* d_A_h,   // RowMajor M×K, ld=K
+    const __half* d_B_h,   // RowMajor K×N, ld=N
+    __half*       d_D_h)   // RowMajor M×N, ld=N  (output)
 {
   __half alpha_h = __float2half(alpha_f);
   __half beta_h  = __float2half(beta_f);
 
-  // Same transpose trick: D^T = B^T * A^T viewed as column-major
+  // D^T (N×M) = B^T (N×K) · A^T (K×M)
   CUBLAS_CHECK(cublasHgemm(
       handle,
-      CUBLAS_OP_T,    // B transpose
-      CUBLAS_OP_N,    // A no-transpose (row-major = col-major transposed)
+      CUBLAS_OP_N,
+      CUBLAS_OP_N,
       N, M, K,
       &alpha_h,
-      d_B_h, K,
+      d_B_h, N,
       d_A_h, K,
       &beta_h,
       d_D_h, N));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  Helper: print a submatrix from a float host array (RowMajor, ld = N)
+//  Print a submatrix from a float host array (RowMajor, ld = N)
 // ─────────────────────────────────────────────────────────────────────────
 void print_submatrix(const char* label, const float* h, int M, int N,
                      int rows, int cols, bool scientific = false) {
@@ -167,8 +173,7 @@ void print_submatrix(const char* label, const float* h, int M, int N,
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  Helper: compute backward error stats between test and reference,
-//          normalized by |A|*|B|.
+//  Backward error stats: |test - ref| / |A|*|B|
 // ─────────────────────────────────────────────────────────────────────────
 struct ErrorStats {
   double max_err;
@@ -186,7 +191,7 @@ ErrorStats compute_backward_error(const float* h_test, const float* h_ref,
       double rel = diff / absval;
       s.max_err = std::max(s.max_err, rel);
       s.avg_err += rel;
-      s.count++;
+      ++s.count;
     }
   }
   if (s.count > 0) s.avg_err /= s.count;
@@ -203,7 +208,7 @@ void test_lof_gemm(int M, int N, int K,
                    int stochastic_rounding_bits)
 {
   std::cout << "\n══════════════════════════════════════════════════\n";
-  std::cout << "  lo_float::Gemm GPU Test\n";
+  std::cout << "  lo_float::Gemm GPU Test  (RowMajor × RowMajor)\n";
   std::cout << "  M=" << M << "  N=" << N << "  K=" << K << "\n";
   std::cout << "  accum_mant_bits=" << accum_mant_bits
             << "  stochastic_bits=" << stochastic_rounding_bits << "\n";
@@ -217,10 +222,10 @@ void test_lof_gemm(int M, int N, int K,
 
   float* h_A       = new float[size_A];
   float* h_B       = new float[size_B];
-  float* h_C       = new float[size_C];
-  float* h_D_lof   = new float[size_C];   // LoF result
-  float* h_D_ref   = new float[size_C];   // SGEMM fp32 reference
-  float* h_D_half  = new float[size_C];   // HGEMM fp16 reference (as float)
+  float* h_C       = new float[size_C];   // zero (beta=0)
+  float* h_D_lof   = new float[size_C];
+  float* h_D_ref   = new float[size_C];
+  float* h_D_half  = new float[size_C];
   float* h_absA    = new float[size_A];
   float* h_absB    = new float[size_B];
   float* h_abs_ref = new float[size_C];
@@ -230,16 +235,18 @@ void test_lof_gemm(int M, int N, int K,
   std::mt19937 rng(42);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
+  // A : RowMajor M×K, ld=K  →  A[i,k] = h_A[i*K + k]
   for (size_t i = 0; i < size_A; ++i) {
-    h_A[i] = dist(rng);
+    h_A[i]    = dist(rng);
     h_absA[i] = std::abs(h_A[i]);
   }
 
-  for (int n = 0; n < N; ++n) {
-    for (int k = 0; k < K; ++k) {
+  // B : RowMajor K×N, ld=N  →  B[k,j] = h_B[k*N + j]
+  for (int k = 0; k < K; ++k) {
+    for (int j = 0; j < N; ++j) {
       float val = dist(rng);
-      h_B[k + n * K] = val;           // ColMajor: ld = K
-      h_absB[k + n * K] = std::abs(val);
+      h_B[k * N + j]    = val;
+      h_absB[k * N + j] = std::abs(val);
     }
   }
 
@@ -254,15 +261,15 @@ void test_lof_gemm(int M, int N, int K,
   float *d_A, *d_B, *d_C, *d_D, *d_D_ref, *d_D_half_f;
   float *d_absA, *d_absB, *d_abs_ref;
 
-  CUDA_CHECK(cudaMalloc(&d_A,         size_A * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_B,         size_B * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_C,         size_C * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_D,         size_C * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_D_ref,     size_C * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_D_half_f,  size_C * sizeof(float)));  // HGEMM result in float
-  CUDA_CHECK(cudaMalloc(&d_absA,      size_A * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_absB,      size_B * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_abs_ref,   size_C * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_A,        size_A * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_B,        size_B * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_C,        size_C * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_D,        size_C * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_D_ref,    size_C * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_D_half_f, size_C * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_absA,     size_A * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_absB,     size_B * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_abs_ref,  size_C * sizeof(float)));
 
   // ── Device allocations (fp16) ─────────────────────────────────────────
 
@@ -283,7 +290,7 @@ void test_lof_gemm(int M, int N, int K,
   CUDA_CHECK(cudaMemcpy(d_absB,    h_absB, size_B * sizeof(float), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_abs_ref, h_C,    size_C * sizeof(float), cudaMemcpyHostToDevice));
 
-  // ── Convert A, B to half on device ────────────────────────────────────
+  // ── Convert A, B to fp16 on device ───────────────────────────────────
 
   float2half_gpu(d_A, d_A_h, size_A);
   float2half_gpu(d_B, d_B_h, size_B);
@@ -296,22 +303,22 @@ void test_lof_gemm(int M, int N, int K,
   CUDA_CHECK(cudaEventCreate(&ev_start));
   CUDA_CHECK(cudaEventCreate(&ev_stop));
 
+  cublasHandle_t handle;
+  CUBLAS_CHECK(cublasCreate(&handle));
+
   // ═════════════════════════════════════════════════════════════════════
   //  1. cuBLAS SGEMM reference (fp32)
   // ═════════════════════════════════════════════════════════════════════
 
-  cublasHandle_t handle;
-  CUBLAS_CHECK(cublasCreate(&handle));
-
   // Warmup
-  cublas_sgemm_rm_cm(handle, M, N, K, 1.0f, 0.0f, d_A, d_B, d_C, d_D_ref);
+  cublas_sgemm_rr(handle, M, N, K, 1.0f, 0.0f, d_A, d_B, d_C, d_D_ref);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // Timed
   const int cublas_reps = 20;
   CUDA_CHECK(cudaEventRecord(ev_start));
   for (int i = 0; i < cublas_reps; ++i)
-    cublas_sgemm_rm_cm(handle, M, N, K, 1.0f, 0.0f, d_A, d_B, d_C, d_D_ref);
+    cublas_sgemm_rr(handle, M, N, K, 1.0f, 0.0f, d_A, d_B, d_C, d_D_ref);
   CUDA_CHECK(cudaEventRecord(ev_stop));
   CUDA_CHECK(cudaEventSynchronize(ev_stop));
 
@@ -319,8 +326,8 @@ void test_lof_gemm(int M, int N, int K,
   CUDA_CHECK(cudaEventElapsedTime(&cublas_ms, ev_start, ev_stop));
   cublas_ms /= cublas_reps;
 
-  // |A| * |B| for backward error normalization
-  cublas_sgemm_rm_cm(handle, M, N, K, 1.0f, 0.0f, d_absA, d_absB, d_abs_ref, d_abs_ref);
+  // |A| · |B|  for backward error normalization
+  cublas_sgemm_rr(handle, M, N, K, 1.0f, 0.0f, d_absA, d_absB, d_abs_ref, d_abs_ref);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // ═════════════════════════════════════════════════════════════════════
@@ -329,7 +336,7 @@ void test_lof_gemm(int M, int N, int K,
 
   // Warmup
   CUDA_CHECK(cudaMemset(d_D_h, 0, size_C * sizeof(__half)));
-  cublas_hgemm_rm_cm(handle, M, N, K, 1.0f, 0.0f, d_A_h, d_B_h, d_D_h);
+  cublas_hgemm_rr(handle, M, N, K, 1.0f, 0.0f, d_A_h, d_B_h, d_D_h);
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // Timed
@@ -337,7 +344,7 @@ void test_lof_gemm(int M, int N, int K,
   CUDA_CHECK(cudaEventRecord(ev_start));
   for (int i = 0; i < hgemm_reps; ++i) {
     CUDA_CHECK(cudaMemset(d_D_h, 0, size_C * sizeof(__half)));
-    cublas_hgemm_rm_cm(handle, M, N, K, 1.0f, 0.0f, d_A_h, d_B_h, d_D_h);
+    cublas_hgemm_rr(handle, M, N, K, 1.0f, 0.0f, d_A_h, d_B_h, d_D_h);
   }
   CUDA_CHECK(cudaEventRecord(ev_stop));
   CUDA_CHECK(cudaEventSynchronize(ev_stop));
@@ -352,22 +359,22 @@ void test_lof_gemm(int M, int N, int K,
 
   // ═════════════════════════════════════════════════════════════════════
   //  3. lo_float::Gemm  (CUTLASS + LoFMma)
+  //     All matrices RowMajor; B has ld=N.
   // ═════════════════════════════════════════════════════════════════════
 
   using MatA = lo_float::Matrix<float, int, lo_float::RowMajor>;
-  using MatB = lo_float::Matrix<float, int, lo_float::ColMajor>;
+  using MatB = lo_float::Matrix<float, int, lo_float::RowMajor>;
   using MatC = lo_float::Matrix<float, int, lo_float::RowMajor>;
   using MatD = lo_float::Matrix<float, int, lo_float::RowMajor>;
 
-  MatA A(d_A, M, K, K);
-  MatB B(d_B, K, N, K);
-  MatC C(d_C, M, N, N);
-  MatD D(d_D, M, N, N);
+  MatA A(d_A, M, K, K);   // RowMajor, ld=K
+  MatB B(d_B, K, N, N);   // RowMajor, ld=N
+  MatC C(d_C, M, N, N);   // RowMajor, ld=N
+  MatD D(d_D, M, N, N);   // RowMajor, ld=N
 
   lo_float::Gemm<MatA, MatB, MatC, MatD> gemm(
       accum_mant_bits,
-      rounding_mode,
-      stochastic_rounding_bits);
+      lo_float::ProjSpec{rounding_mode, lo_float::Saturation_Mode::OvfInf, stochastic_rounding_bits});
 
   // ── Warmup + error check ──────────────────────────────────────────────
 
@@ -416,47 +423,42 @@ void test_lof_gemm(int M, int N, int K,
     CUDA_CHECK(cudaEventElapsedTime(&lof_ms, ev_start, ev_stop));
     lof_ms /= lof_reps;
 
-    // ═════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────
     //  4. Copy results D → H
-    // ═════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────
 
-    CUDA_CHECK(cudaMemcpy(h_D_lof,   d_D,         size_C * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_D_ref,   d_D_ref,     size_C * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_D_half,  d_D_half_f,  size_C * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_abs_ref, d_abs_ref,   size_C * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_D_lof,   d_D,        size_C * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_D_ref,   d_D_ref,    size_C * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_D_half,  d_D_half_f, size_C * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_abs_ref, d_abs_ref,  size_C * sizeof(float), cudaMemcpyDeviceToHost));
 
-    // ═════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────
     //  5. Backward errors (all vs. fp32 SGEMM reference)
-    // ═════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────
 
     ErrorStats lof_err  = compute_backward_error(h_D_lof,  h_D_ref, h_abs_ref, size_C);
     ErrorStats half_err = compute_backward_error(h_D_half, h_D_ref, h_abs_ref, size_C);
 
-    // ═════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────
     //  6. Report
-    // ═════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────
 
-    double total_flops = 2.0 * M * N * K;
+    double total_flops   = 2.0 * M * N * K;
     double cublas_gflops = total_flops / (cublas_ms * 1e-3) / 1e9;
-    double hgemm_gflops  = total_flops / (hgemm_ms * 1e-3) / 1e9;
-    double lof_gflops    = total_flops / (lof_ms   * 1e-3) / 1e9;
+    double hgemm_gflops  = total_flops / (hgemm_ms  * 1e-3) / 1e9;
+    double lof_gflops    = total_flops / (lof_ms    * 1e-3) / 1e9;
 
     std::cout << std::fixed << std::setprecision(4);
 
     std::cout << "--- Performance ---\n";
     std::cout << "  cuBLAS SGEMM (fp32)   : "
-              << cublas_ms << " ms   "
-              << cublas_gflops << " GFLOP/s\n";
+              << cublas_ms << " ms   " << cublas_gflops << " GFLOP/s\n";
     std::cout << "  cuBLAS HGEMM (fp16)   : "
-              << hgemm_ms << " ms   "
-              << hgemm_gflops << " GFLOP/s\n";
+              << hgemm_ms  << " ms   " << hgemm_gflops  << " GFLOP/s\n";
     std::cout << "  lo_float::Gemm (LoF)  : "
-              << lof_ms << " ms   "
-              << lof_gflops << " GFLOP/s\n";
-    std::cout << "  Ratio SGEMM/LoF       : "
-              << cublas_ms / lof_ms << "x\n";
-    std::cout << "  Ratio HGEMM/LoF       : "
-              << hgemm_ms / lof_ms << "x\n";
+              << lof_ms    << " ms   " << lof_gflops    << " GFLOP/s\n";
+    std::cout << "  Ratio SGEMM/LoF       : " << cublas_ms / lof_ms << "x\n";
+    std::cout << "  Ratio HGEMM/LoF       : " << hgemm_ms  / lof_ms << "x\n";
 
     std::cout << "\n--- Accuracy (backward error vs. cuBLAS fp32) ---\n";
     std::cout << std::scientific << std::setprecision(6);
@@ -471,40 +473,37 @@ void test_lof_gemm(int M, int N, int K,
 
     if (accum_mant_bits > 0) {
       double eps_lof  = std::pow(2.0, -accum_mant_bits);
-      double eps_fp16 = std::pow(2.0, -10.0);  // fp16 has 10 mantissa bits
-      std::cout << "\n  eps(accum=" << accum_mant_bits << ")  : " << eps_lof << "\n";
+      double eps_fp16 = std::pow(2.0, -10.0);
+      std::cout << "\n  eps(accum=" << accum_mant_bits << ")  : " << eps_lof  << "\n";
       std::cout << "  eps(fp16=10)          : " << eps_fp16 << "\n";
       std::cout << "  LoF  max_err/(K*eps)  : "
-                << lof_err.max_err / (K * eps_lof) << "\n";
+                << lof_err.max_err  / (K * eps_lof)  << "\n";
       std::cout << "  fp16 max_err/(K*eps)  : "
                 << half_err.max_err / (K * eps_fp16) << "\n";
     }
 
-    // ═════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────
     //  7. Print submatrices
-    // ═════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────
 
     const int pr = std::min(M, 6);
     const int pc = std::min(N, 6);
 
-    print_submatrix("D_ref (cuBLAS fp32)", h_D_ref, M, N, pr, pc);
+    print_submatrix("D_ref (cuBLAS fp32)",  h_D_ref,  M, N, pr, pc);
     print_submatrix("D_half (cuBLAS fp16)", h_D_half, M, N, pr, pc);
-    print_submatrix("D_lof (CUTLASS LoF)", h_D_lof, M, N, pr, pc);
+    print_submatrix("D_lof (CUTLASS LoF)",  h_D_lof,  M, N, pr, pc);
 
-    // Diff tables
     {
-      // |D_half - D_ref|
       float* h_diff_half = new float[size_C];
       for (size_t i = 0; i < size_C; ++i)
-        h_diff_half[i] = (float)std::abs((double)h_D_half[i] - (double)h_D_ref[i]);
+        h_diff_half[i] = std::abs(h_D_half[i] - h_D_ref[i]);
       print_submatrix("|D_half - D_ref|", h_diff_half, M, N, pr, pc, /*scientific=*/true);
       delete[] h_diff_half;
 
-      // |D_lof - D_ref|
       float* h_diff_lof = new float[size_C];
       for (size_t i = 0; i < size_C; ++i)
-        h_diff_lof[i] = (float)std::abs((double)h_D_lof[i] - (double)h_D_ref[i]);
-      print_submatrix("|D_lof - D_ref|", h_diff_lof, M, N, pr, pc, /*scientific=*/true);
+        h_diff_lof[i] = std::abs(h_D_lof[i] - h_D_ref[i]);
+      print_submatrix("|D_lof  - D_ref|", h_diff_lof,  M, N, pr, pc, /*scientific=*/true);
       delete[] h_diff_lof;
     }
 
@@ -512,20 +511,18 @@ void test_lof_gemm(int M, int N, int K,
   }
 
 cleanup:
-  // ── Free ────────────────────────────────────────────────────────────
-
   CUBLAS_CHECK(cublasDestroy(handle));
   CUDA_CHECK(cudaEventDestroy(ev_start));
   CUDA_CHECK(cudaEventDestroy(ev_stop));
 
-  cudaFree(d_A);       cudaFree(d_B);       cudaFree(d_C);
-  cudaFree(d_D);       cudaFree(d_D_ref);   cudaFree(d_D_half_f);
-  cudaFree(d_absA);    cudaFree(d_absB);    cudaFree(d_abs_ref);
-  cudaFree(d_A_h);     cudaFree(d_B_h);     cudaFree(d_D_h);
+  cudaFree(d_A);     cudaFree(d_B);     cudaFree(d_C);
+  cudaFree(d_D);     cudaFree(d_D_ref); cudaFree(d_D_half_f);
+  cudaFree(d_absA);  cudaFree(d_absB);  cudaFree(d_abs_ref);
+  cudaFree(d_A_h);   cudaFree(d_B_h);   cudaFree(d_D_h);
 
-  delete[] h_A;        delete[] h_B;        delete[] h_C;
-  delete[] h_D_lof;    delete[] h_D_ref;    delete[] h_D_half;
-  delete[] h_absA;     delete[] h_absB;     delete[] h_abs_ref;
+  delete[] h_A;      delete[] h_B;      delete[] h_C;
+  delete[] h_D_lof;  delete[] h_D_ref;  delete[] h_D_half;
+  delete[] h_absA;   delete[] h_absB;   delete[] h_abs_ref;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -533,17 +530,15 @@ cleanup:
 // ═══════════════════════════════════════════════════════════════════════════
 
 int main() {
-
   cudaDeviceProp prop;
   CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
   std::cout << "Device: " << prop.name
             << " (SM " << prop.major << prop.minor
             << ", " << prop.sharedMemPerMultiprocessor / 1024 << " KB smem/SM)\n";
 
-  // ── Test: Reduced precision accumulation (10-bit mantissa) ───────────
   test_lof_gemm(4096, 4096, 4096,
                 /*accum_mant_bits=*/10,
-                lo_float::Rounding_Mode::RoundTowardsZero,
+                lo_float::Rounding_Mode::RoundToNearestEven,
                 /*stochastic_rounding_bits=*/0);
 
   return 0;

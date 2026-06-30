@@ -1,4 +1,5 @@
-from .LoFloat import virtual_round, RoundingMode, InfBehavior, NaNBehavior, Signedness, FloatFormatDescriptor, lof_gemm  # compiled C++ extension
-from .formats import create_p3109_params, create_half_params, create_single_params
-from .layers import LoF_Quantize, LoF_Linear, LoF_Conv2d, _quantize, mantissa_quantize, exp_mant_quantize, ExplicitMultiheadAttention, replace_mha_with_explicit, L1BatchNorm, LinfBatchNorm
+from .LoFloat import virtual_round, virtual_mx_round, RoundingMode, InfBehavior, NaNBehavior, Signedness, FloatFormatDescriptor, lof_gemm, lof_conv2d, pwl_silu  # compiled C++ extension
+from . import _custom_ops  # registers torch.ops.lofloat.* for tracing
+from .formats import create_p3109_params, create_half_params, create_single_params, create_e8m0_params
+from .layers import LoF_Quantize, LoF_Linear, LoF_Conv2d, _quantize, mantissa_quantize, exp_mant_quantize, ExplicitMultiheadAttention, replace_mha_with_explicit, L1BatchNorm, LinfBatchNorm, FISRBatchNorm, PWLBatchNorm, PWLSiLU, _fwht
 from .utils import set_mantissa_fields, set_exponent_fields, set_exponentbias_fields, set_accumulation_precisions,lofloatify, set_all_to_half, set_all_to_3109, print_exp_mant, record_formats, sparsity_in_weights

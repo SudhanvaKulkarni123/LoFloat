@@ -57,6 +57,7 @@ def create_p3109_params(k, p, is_signed=True, saturating=True, bias=None):
     if bias is None:
         bias = 1 << (k - p - 1)
     inf_behavior = lof.InfBehavior.Saturating if saturating else lof.InfBehavior.Extended
+   
     
     return lof.FloatFormatDescriptor(
         k,
@@ -67,6 +68,23 @@ def create_p3109_params(k, p, is_signed=True, saturating=True, bias=None):
         signedness=lof.Signedness.Signed if is_signed else lof.Signedness.Unsigned,
         is_inf_checker=P3109_InfChecker(k, is_signed, saturating),
         is_nan_checker=P3109_NaNChecker(k, is_signed)
+    )
+
+
+def create_e8m0_params():
+    """E8M0 shared-scale format for microscaling (MX): 8-bit unsigned, 0 mantissa
+    bits (power-of-two), bias 127 -> range 2^-127 .. 2^128. This is the standard
+    MX scale format; pass it as the `scale_format` of virtual_mx_round. (The MX
+    path ignores the inf/nan checkers, so the P3109 ones below are placeholders.)"""
+    return lof.FloatFormatDescriptor(
+        8,
+        0,
+        127,
+        inf_behavior=lof.InfBehavior.Extended,
+        nan_behavior=lof.NaNBehavior._3109,
+        signedness=lof.Signedness.Unsigned,
+        is_inf_checker=P3109_InfChecker(8, False, False),
+        is_nan_checker=P3109_NaNChecker(8, False),
     )
 
 

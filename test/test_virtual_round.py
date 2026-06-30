@@ -41,7 +41,7 @@ def test_virtual_round():
     #     is_nan_checker=HalfPrecisionNaNChecker()
     # )
 
-    P3109_params = lof.create_single_params()
+    P3109_params = lof.create_p3109_params(8, 5, False, False)
 
     rounded = lof.virtual_round(
         arr,
@@ -70,7 +70,7 @@ def test_virtual_round():
             continue
         mantissa, exp = np.frexp(og_val)
         two_pow = np.ldexp(1.0, exp)
-        threshold = (2.0 ** -11) / two_pow
+        threshold = (2.0 ** -5) / two_pow
         if err > threshold:
             print(f"Value: {rounded_val:.10f}, Original: {og_val:.10f}, Error: {err:.10f}")
             print(f"Threshold: {threshold:.10f}")

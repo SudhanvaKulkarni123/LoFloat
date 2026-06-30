@@ -3,34 +3,105 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import LoFloat as lof
+from LoFloat._custom_ops import register_format
 
 class STERound(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, tensor, params, rounding_mode=lof.RoundingMode.RoundToNearestEven):
-        return lof.virtual_round(tensor, params, round_mode=rounding_mode, stoch_len=0)
+    def forward(ctx, tensor, params, rounding_mode=lof.RoundingMode.RoundToNearestEven, scale=1.0):
+        # Fused scale-then-round: returns round(scale * tensor, params).
+        # Output is in the *scaled* domain — callers that want the original
+        # numeric range must divide by `scale` afterwards (or rely on the
+        # GEMM's scale_a/scale_b output rescale).
+        ctx.scale = float(scale)
+        # Traceable path: pre-resolved int format-id + int rounding mode go
+        # through the registered torch.ops.lofloat.virtual_round so Dynamo
+        # can put a real node in the graph. The legacy eager path keeps the
+        # pybind callable for callers that still pass a params object.
+        if isinstance(params, int):
+            return torch.ops.lofloat.virtual_round(
+                tensor, params, int(rounding_mode), 0, float(scale)
+            )
+        return lof.virtual_round(tensor, params, round_mode=rounding_mode, stoch_len=0, scale=float(scale))
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None, None
+        # STE: round(scale * x) ≈ scale * x in backward, so ∂/∂x = scale.
+        if ctx.scale == 1.0:
+            return grad_output, None, None, None
+        return grad_output * ctx.scale, None, None, None
+
+
+class STEMXRound(torch.autograd.Function):
+    """Straight-through microscaling (MX) fake-quantize. Forward applies
+    virtual_mx_round: the tensor is split into contiguous blocks of `block_size`
+    along its LAST axis (keep the reduction/K axis last; block_size must divide
+    it), each block gets one auto-computed shared scale in `scale_params`, and
+    each element is rounded into `element_params` then rescaled — so the output
+    is in the ORIGINAL numeric domain (no scale bookkeeping downstream).
+    Backward is the identity because round(x/s)*s ≈ x (the scale cancels)."""
+    @staticmethod
+    def forward(ctx, tensor, element_params, scale_params, block_size,
+                rounding_mode=lof.RoundingMode.RoundToNearestEven):
+        # Traceable path: pre-resolved int format-ids go through the registered
+        # op; eager path keeps the pybind callable with params objects.
+        if isinstance(element_params, int):
+            return torch.ops.lofloat.virtual_mx_round(
+                tensor, int(block_size), element_params, scale_params,
+                int(rounding_mode), int(lof.RoundingMode.RoundToNearestEven), 0)
+        return lof.virtual_mx_round(
+            tensor, int(block_size), element_params, scale_params,
+            round_mode=rounding_mode)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None, None, None
 
     
 class LoF_Quantize(nn.Module):
-    def __init__(self, params, rounding_mode=None):
+    """Quantize a tensor to a low-precision format.
+
+    scaling:
+      "per_tensor" (default) — fake-quant with no scaling (the legacy path; pass
+                   a scalar scale via the layer that owns this if needed).
+      "mx"         — microscaling: per-block auto scale along the LAST axis with
+                     block size `mx_block_size`, scale stored in `scale_format`
+                     (default E8M0). Requires the last dim divisible by the block
+                     size. Output is in the original numeric domain.
+    """
+    def __init__(self, params, rounding_mode=None,
+                 scaling="per_tensor", mx_block_size=32, scale_format=None):
         super().__init__()
+        if scaling not in ("per_tensor", "mx"):
+            raise ValueError(f"scaling must be 'per_tensor' or 'mx', got {scaling!r}")
         self.params = params
         self.rounding_mode = rounding_mode if rounding_mode is not None else lof.RoundingMode.RoundToNearestEven
+        self.scaling = scaling
+        self.mx_block_size = mx_block_size
+        self.scale_format = scale_format if scale_format is not None else lof.create_e8m0_params()
 
     def __deepcopy__(self, memo):
-        new = LoF_Quantize(self.params, self.rounding_mode)
+        new = LoF_Quantize(self.params, self.rounding_mode,
+                           scaling=self.scaling, mx_block_size=self.mx_block_size,
+                           scale_format=self.scale_format)
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
         return new
 
     def forward(self, x):
+        if self.scaling == "mx":
+            if x.shape[-1] % self.mx_block_size != 0:
+                raise ValueError(
+                    f"mx scaling needs the last dim ({x.shape[-1]}) divisible by "
+                    f"mx_block_size ({self.mx_block_size})")
+            return STEMXRound.apply(x, self.params, self.scale_format,
+                                    self.mx_block_size, self.rounding_mode)
         return STERound.apply(x, self.params, self.rounding_mode)
 
     def extra_repr(self):
-        return f'params={self.params}, rounding_mode={self.rounding_mode}'
+        s = f'params={self.params}, rounding_mode={self.rounding_mode}, scaling={self.scaling}'
+        if self.scaling == "mx":
+            s += f', mx_block_size={self.mx_block_size}'
+        return s
 
 def _quantize(self, tensor, params):
     if params is None:
@@ -47,15 +118,19 @@ def exp_mant_quantize(tensor, exp_bits, mantissa_bits):
         return tensor
     return STERound.apply(tensor, lof.create_p3109_params(exp_bits + mantissa_bits + 1, mantissa_bits + 1, True, True))
 
-def _lof_gemm_2d(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits):
+def _lof_gemm_2d(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+                 scale_a=1.0, scale_b=1.0):
     """Wrapper for (..., M, K) x (..., K, N) -> (..., M, N).
 
     Assumes the binary expects both A and B as contiguous RowMajor.
+    `scale_a`/`scale_b` rescale the output by 1/(scale_a*scale_b) — pass the same
+    scales used for scale-then-quantize on A and B to recover the original domain.
     """
     if A.dim() == 2 and B.dim() == 2:
         return lof.lof_gemm(
             A.contiguous(), B.contiguous(),
             accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+            scale_a, scale_b,
         )
 
     batch_shape = A.shape[:-2]
@@ -68,24 +143,77 @@ def _lof_gemm_2d(A, B, accum_mant_bits, gemm_round_mode, stochastic_rounding_bit
         lof.lof_gemm(
             A_flat[i], B_flat[i],         # already contiguous, indexing preserves that
             accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+            scale_a, scale_b,
         )
         for i in range(A_flat.shape[0])
     ])
     return out.reshape(*batch_shape, M, N)
 
 
-def _lof_linear(x, weight, bias, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits):
-    """Drop-in for F.linear using lof_gemm.  x: (..., K), weight: (N, K) -> (..., N)."""
+def _lof_linear(x, weight, bias, accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+                scale_a=1.0, scale_b=1.0):
+    """Drop-in for F.linear using lof_gemm.  x: (..., K), weight: (N, K) -> (..., N).
+    `scale_a`/`scale_b` are forwarded to the GEMM for output rescale.
+    """
     leading = x.shape[:-1]
     K = x.shape[-1]
     x_2d = x.reshape(-1, K).contiguous()            # (B, K) RowMajor
     wt   = weight.t().contiguous()                   # (K, N) RowMajor (actual copy)
     out = lof.lof_gemm(x_2d, wt,
-                       accum_mant_bits, gemm_round_mode, stochastic_rounding_bits)
+                       accum_mant_bits, gemm_round_mode, stochastic_rounding_bits,
+                       scale_a, scale_b)
     out = out.reshape(*leading, weight.shape[0])     # (..., N)
     if bias is not None:
         out = out + bias
     return out
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LoF_Linear
+# ═══════════════════════════════════════════════════════════════════════
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ───────────────────────────────────────────────────────────────────────
+#  Fast Walsh-Hadamard Transform (orthonormal, O(n log n))
+# ───────────────────────────────────────────────────────────────────────
+def _fwht(x: torch.Tensor, block_size=None) -> torch.Tensor:
+    """Orthonormal Walsh-Hadamard transform along the last dim.
+
+    If `block_size` is None, transforms the entire last dim (requires last
+    dim to be a power of 2). Otherwise the last dim is reshaped into
+    contiguous blocks of size `block_size` (must be a power of 2 dividing
+    the last dim) and the transform is applied within each block. The
+    block-diagonal rotation diag(H_B, H_B, ...) is still orthonormal and
+    self-inverse.
+    """
+    n = x.shape[-1]
+    if block_size is None:
+        block_size = n
+    if block_size <= 0 or (block_size & (block_size - 1)) != 0:
+        raise ValueError(f"block_size must be a power of 2, got {block_size}")
+    if n % block_size != 0:
+        raise ValueError(f"block_size {block_size} must divide last dim {n}")
+
+    orig_shape = x.shape
+    nb = n // block_size                     # number of blocks
+    x = x.reshape(-1, nb, block_size)        # (B, nb, block_size)
+    flat = x.reshape(-1, block_size)         # (B*nb, block_size)
+    M = flat.shape[0]
+
+    h = 1
+    while h < block_size:
+        flat = flat.view(M, block_size // (2 * h), 2, h)
+        a = flat[:, :, 0, :]
+        b = flat[:, :, 1, :]
+        flat = torch.stack([a + b, a - b], dim=2)
+        flat = flat.reshape(M, block_size)
+        h *= 2
+
+    flat = flat * (1.0 / math.sqrt(block_size))
+    return flat.view(*orig_shape[:-1], n)
 
 # ═══════════════════════════════════════════════════════════════════════
 #  LoF_Linear
@@ -110,8 +238,12 @@ class LoF_Linear(nn.Module):
                  act_scale_factor=1.0, w_scale_factor=1.0, b_scale_factor=1.0,
                  accum_mant_bits=23,
                  gemm_round_mode=None,
-                 stochastic_rounding_bits=0):
+                 stochastic_rounding_bits=0,
+                 hadamard_transform=False, hadamard_block_size=None,
+                 scaling="per_tensor", mx_block_size=32, scale_format=None):
         super().__init__()
+        if scaling not in ("per_tensor", "mx"):
+            raise ValueError(f"scaling must be 'per_tensor' or 'mx', got {scaling!r}")
         self.in_features = in_features
         self.out_features = out_features
         self.rounding_mode = rounding_mode if rounding_mode is not None else lof.RoundingMode.RoundToNearestEven
@@ -119,10 +251,25 @@ class LoF_Linear(nn.Module):
         self.w_scale_factor = w_scale_factor
         self.b_scale_factor = b_scale_factor
 
-        # lof_gemm parameters
+        # Microscaling: activations and weights are MX-quantized along the
+        # reduction (in_features = K) axis, which is the last axis of both x and
+        # weight. The block scale is applied inside the round, so the GEMM runs
+        # with scale_a = scale_b = 1.
+        self.scaling = scaling
+        self.mx_block_size = mx_block_size
+        self.scale_format = scale_format if scale_format is not None else lof.create_e8m0_params()
+        if scaling == "mx" and in_features % mx_block_size != 0:
+            raise ValueError(
+                f"mx scaling needs in_features ({in_features}) divisible by "
+                f"mx_block_size ({mx_block_size})")
+
         self.accum_mant_bits = accum_mant_bits
         self.gemm_round_mode = gemm_round_mode if gemm_round_mode is not None else lof.RoundingMode.RoundToNearestEven
         self.stochastic_rounding_bits = stochastic_rounding_bits
+
+        # Hadamard rotation of activations before GEMM
+        self.hadamard_transform = hadamard_transform
+        self.hadamard_block_size = hadamard_block_size
 
         if act_params is None:
             self.act_params = lof.create_p3109_params(act_exp + act_mant + 1, act_mant + 1, True, True)
@@ -139,6 +286,10 @@ class LoF_Linear(nn.Module):
         else:
             self.bias_params = bias_params
 
+        # Cache integer ids for the traceable path — Dynamo sees only ints
+        # flowing into STERound / the registered ops, never the pybind objects.
+        self._refresh_traced_ids()
+
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
@@ -150,7 +301,8 @@ class LoF_Linear(nn.Module):
     @classmethod
     def from_linear(cls, linear: nn.Linear, act_params, weight_params, bias_params=None,
                     rounding_mode=None,
-                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0):
+                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0,
+                    hadamard_transform=False, hadamard_block_size=None):
         layer = cls(
             linear.in_features,
             linear.out_features,
@@ -162,6 +314,8 @@ class LoF_Linear(nn.Module):
             accum_mant_bits=accum_mant_bits,
             gemm_round_mode=gemm_round_mode,
             stochastic_rounding_bits=stochastic_rounding_bits,
+            hadamard_transform=hadamard_transform,
+            hadamard_block_size=hadamard_block_size,
         )
         layer.weight = nn.Parameter(linear.weight.clone())
         if linear.bias is not None:
@@ -182,6 +336,11 @@ class LoF_Linear(nn.Module):
             accum_mant_bits=self.accum_mant_bits,
             gemm_round_mode=self.gemm_round_mode,
             stochastic_rounding_bits=self.stochastic_rounding_bits,
+            hadamard_transform=self.hadamard_transform,
+            hadamard_block_size=self.hadamard_block_size,
+            scaling=self.scaling,
+            mx_block_size=self.mx_block_size,
+            scale_format=self.scale_format,
         )
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
@@ -192,21 +351,54 @@ class LoF_Linear(nn.Module):
             return tensor
         return STERound.apply(tensor, params, self.rounding_mode)
 
-    def forward(self, x):
-        x_q = self._quantize(x * self.act_scale_factor, self.act_params)
-        w_q = self._quantize(self.weight * self.w_scale_factor, self.weight_params)
+    def _refresh_traced_ids(self):
+        self._act_fid = register_format(self.act_params)
+        self._weight_fid = register_format(self.weight_params)
+        self._bias_fid = register_format(self.bias_params)
+        self._round_mode_int = int(self.rounding_mode)
+        self._gemm_round_mode_int = int(self.gemm_round_mode)
 
-        # ── lof_gemm replaces torch.matmul(x_q, w_q.t()) ──
-        out = _lof_linear(x_q, w_q, None,
-                          self.accum_mant_bits, self.gemm_round_mode,
-                          self.stochastic_rounding_bits)
+    def forward(self, x):
+        # Optional Hadamard rotation of activations along the in_features axis.
+        if self.hadamard_transform:
+            x = _fwht(x, block_size=self.hadamard_block_size)
+
+        if self.scaling == "mx":
+            # Microscaling: per-block auto scale along K (the last axis of both x
+            # and weight). Output is already in the original domain, so the GEMM
+            # runs with scale_a = scale_b = 1.
+            x_q = STEMXRound.apply(x, self.act_params, self.scale_format,
+                                   self.mx_block_size, self.rounding_mode)
+            w_q = STEMXRound.apply(self.weight, self.weight_params, self.scale_format,
+                                   self.mx_block_size, self.rounding_mode)
+            out = _lof_linear(x_q, w_q, None,
+                              self.accum_mant_bits, self.gemm_round_mode,
+                              self.stochastic_rounding_bits,
+                              scale_a=1.0, scale_b=1.0)
+        else:
+            # Scale-then-quantize is fused inside the CUDA round kernel — no
+            # intermediate scaled tensor materialized on GPU.
+            x_q = STERound.apply(x, self._act_fid, self._round_mode_int, self.act_scale_factor)
+            w_q = STERound.apply(self.weight, self._weight_fid, self._round_mode_int, self.w_scale_factor)
+
+            # GEMM divides output by (act_scale * w_scale) to rescale back to the
+            # original (unscaled) domain.
+            out = _lof_linear(x_q, w_q, None,
+                              self.accum_mant_bits, self._gemm_round_mode_int,
+                              self.stochastic_rounding_bits,
+                              scale_a=float(self.act_scale_factor),
+                              scale_b=float(self.w_scale_factor))
 
         if self.bias is not None:
-            b_q = self._quantize(self.bias * self.b_scale_factor, self.bias_params)
+            # Quantize bias in its scaled domain, then descale to match the
+            # rescaled GEMM output.
+            b_q = STERound.apply(self.bias, self._bias_fid, self._round_mode_int, self.b_scale_factor)
+            if self.b_scale_factor != 1.0:
+                b_q = b_q / self.b_scale_factor
             out = out + b_q
         return out
 
-    # ── set_* and extra_repr unchanged ──────────────────────────────────
+    # ── set_* unchanged ────────────────────────────────────────────────
     def set_mantissa(self, activ_mant, weight_mant, bias_mant):
         act_exp = self.act_params.total_bits - self.act_params.mantissa_bits - 1
         weight_exp = self.weight_params.total_bits - self.weight_params.mantissa_bits - 1
@@ -235,7 +427,7 @@ class LoF_Linear(nn.Module):
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
         self.bias_params = lof.create_p3109_params(self.bias_params.total_bits, self.bias_params.mantissa_bits, True, bias_sat)
-    
+
     def set_accumulation_precision(self, accum_mant_bits):
         self.accum_mant_bits = accum_mant_bits
 
@@ -249,7 +441,9 @@ class LoF_Linear(nn.Module):
             f'weight_exponent={self.weight_params.total_bits - self.weight_params.mantissa_bits - 1}, '
             f'bias_mantissa={self.bias_params.mantissa_bits}, '
             f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}, '
-            f'accum_mant_bits={self.accum_mant_bits}'
+            f'accum_mant_bits={self.accum_mant_bits}, '
+            f'hadamard_transform={self.hadamard_transform}, '
+            f'hadamard_block_size={self.hadamard_block_size}'
         )
 
 
@@ -277,8 +471,21 @@ class LoF_Conv2d(nn.Module):
                  act_scale_factor=1.0, w_scale_factor=1.0, b_scale_factor=1.0,
                  accum_mant_bits=23,
                  gemm_round_mode=None,
-                 stochastic_rounding_bits=0):
+                 stochastic_rounding_bits=0,
+                 hadamard_transform=False, hadamard_block_size=None,
+                 scaling="per_tensor", mx_block_size=32, scale_format=None,
+                 backend="im2col"):
         super().__init__()
+        if scaling not in ("per_tensor", "mx"):
+            raise ValueError(f"scaling must be 'per_tensor' or 'mx', got {scaling!r}")
+        if backend not in ("im2col", "cutlass"):
+            raise ValueError(f"backend must be 'im2col' or 'cutlass', got {backend!r}")
+        if backend == "cutlass":
+            if scaling == "mx":
+                raise NotImplementedError("backend='cutlass' does not yet support scaling='mx'")
+            if groups != 1:
+                raise NotImplementedError("backend='cutlass' currently supports groups=1 only")
+        self.backend = backend
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
@@ -291,10 +498,41 @@ class LoF_Conv2d(nn.Module):
         self.w_scale_factor = w_scale_factor
         self.b_scale_factor = b_scale_factor
 
-        # lof_gemm parameters
         self.accum_mant_bits = accum_mant_bits
         self.gemm_round_mode = gemm_round_mode if gemm_round_mode is not None else lof.RoundingMode.RoundToNearestEven
         self.stochastic_rounding_bits = stochastic_rounding_bits
+
+        # Microscaling: block along the im2col reduction axis K = (C_in/groups)*kH*kW
+        # (the last axis of both the unfolded activation and the reshaped weight).
+        self.scaling = scaling
+        self.mx_block_size = mx_block_size
+        self.scale_format = scale_format if scale_format is not None else lof.create_e8m0_params()
+        if scaling == "mx":
+            kH, kW = self.kernel_size
+            K = (in_channels // groups) * kH * kW
+            if groups != 1:
+                raise NotImplementedError("scaling='mx' for LoF_Conv2d currently supports groups=1 only")
+            if K % mx_block_size != 0:
+                raise ValueError(
+                    f"mx scaling needs the im2col K=(C_in/groups)*kH*kW={K} divisible by "
+                    f"mx_block_size ({mx_block_size})")
+
+        # Hadamard rotation along the C_in axis (per spatial position) before im2col.
+        self.hadamard_transform = hadamard_transform
+        self.hadamard_block_size = hadamard_block_size
+        if hadamard_transform:
+            c_per_group_in = in_channels // groups
+            eff = hadamard_block_size if hadamard_block_size is not None else c_per_group_in
+            if eff <= 0 or (eff & (eff - 1)) != 0:
+                raise ValueError(
+                    f"hadamard_transform=True requires (hadamard_block_size or "
+                    f"in_channels//groups) to be a power of 2, got {eff}"
+                )
+            if c_per_group_in % eff != 0:
+                raise ValueError(
+                    f"hadamard_block_size={eff} must divide in_channels//groups="
+                    f"{c_per_group_in}"
+                )
 
         if act_params is None:
             self.act_params = lof.create_p3109_params(act_exp + act_mant + 1, act_mant + 1, True, True)
@@ -322,7 +560,8 @@ class LoF_Conv2d(nn.Module):
     @classmethod
     def from_conv2d(cls, conv: nn.Conv2d, act_params, weight_params, bias_params=None,
                     rounding_mode=None,
-                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0):
+                    accum_mant_bits=23, gemm_round_mode=None, stochastic_rounding_bits=0,
+                    hadamard_transform=False, hadamard_block_size=None):
         layer = cls(
             conv.in_channels,
             conv.out_channels,
@@ -339,6 +578,8 @@ class LoF_Conv2d(nn.Module):
             accum_mant_bits=accum_mant_bits,
             gemm_round_mode=gemm_round_mode,
             stochastic_rounding_bits=stochastic_rounding_bits,
+            hadamard_transform=hadamard_transform,
+            hadamard_block_size=hadamard_block_size,
         )
         layer.weight = nn.Parameter(conv.weight.clone())
         if conv.bias is not None:
@@ -361,6 +602,12 @@ class LoF_Conv2d(nn.Module):
             accum_mant_bits=self.accum_mant_bits,
             gemm_round_mode=self.gemm_round_mode,
             stochastic_rounding_bits=self.stochastic_rounding_bits,
+            hadamard_transform=self.hadamard_transform,
+            hadamard_block_size=self.hadamard_block_size,
+            scaling=self.scaling,
+            mx_block_size=self.mx_block_size,
+            scale_format=self.scale_format,
+            backend=self.backend,
         )
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
@@ -372,74 +619,141 @@ class LoF_Conv2d(nn.Module):
         return STERound.apply(tensor, params, self.rounding_mode)
 
     def forward(self, x):
-        x_q = self._quantize(x * self.act_scale_factor, self.act_params)
-        w_q = self._quantize(self.weight * self.w_scale_factor, self.weight_params)
+        # Optional Hadamard rotation along the channel axis (before im2col).
+        # Move C to last dim, transform, then move back.
+        if self.hadamard_transform:
+            if self.groups == 1:
+                x = x.movedim(1, -1).contiguous()       # (B, H, W, C_in)
+                x = _fwht(x, block_size=self.hadamard_block_size)
+                x = x.movedim(-1, 1).contiguous()       # (B, C_in, H, W)
+            else:
+                # Apply Hadamard within each group's channel slab
+                B, C_in, H_in, W_in = x.shape
+                x = x.view(B, self.groups, C_in // self.groups, H_in, W_in)
+                x = x.movedim(2, -1).contiguous()       # (B, G, H, W, C/G)
+                x = _fwht(x, block_size=self.hadamard_block_size)
+                x = x.movedim(-1, 2).contiguous()       # (B, G, C/G, H, W)
+                x = x.view(B, C_in, H_in, W_in)
+
+        if self.backend == "cutlass":
+            # Native CUTLASS implicit-GEMM Conv2d (no im2col materialization).
+            # groups=1, scaling='per_tensor' only (enforced in __init__).
+            x_q = STERound.apply(x, self.act_params, self.rounding_mode, self.act_scale_factor)
+            w_q = STERound.apply(self.weight, self.weight_params, self.rounding_mode, self.w_scale_factor)
+
+            out = lof.lof_conv2d(
+                x_q, w_q,
+                self.padding[0], self.padding[1],
+                self.stride[0], self.stride[1],
+                self.dilation[0], self.dilation[1],
+                self.accum_mant_bits, self.gemm_round_mode,
+                self.stochastic_rounding_bits,
+                float(self.w_scale_factor), float(self.act_scale_factor))
+
+            if self.bias is not None:
+                b_q = STERound.apply(self.bias, self.bias_params, self.rounding_mode, self.b_scale_factor)
+                if self.b_scale_factor != 1.0:
+                    b_q = b_q / self.b_scale_factor
+                out = out + b_q.view(1, -1, 1, 1)
+            return out
+
+        if self.scaling == "mx":
+            # Microscaling: im2col first, then MX-quantize the activation and the
+            # weight along the reduction axis K = (C_in)*kH*kW (the last axis of
+            # the unfolded activation and the reshaped weight). GEMM scale = 1.
+            B, C_in, H_in, W_in = x.shape
+            C_out = self.out_channels
+            kH, kW = self.kernel_size
+            H_out = (H_in + 2 * self.padding[0] - self.dilation[0] * (kH - 1) - 1) // self.stride[0] + 1
+            W_out = (W_in + 2 * self.padding[1] - self.dilation[1] * (kW - 1) - 1) // self.stride[1] + 1
+
+            x_col = F.unfold(x, kernel_size=self.kernel_size, dilation=self.dilation,
+                             padding=self.padding, stride=self.stride)        # (B, K, L)
+            x_col = STEMXRound.apply(
+                x_col.transpose(1, 2).contiguous(), self.act_params,           # (B, L, K)
+                self.scale_format, self.mx_block_size, self.rounding_mode
+            ).transpose(1, 2).contiguous()                                     # (B, K, L)
+            w_col = STEMXRound.apply(
+                self.weight.view(C_out, -1), self.weight_params,               # (C_out, K)
+                self.scale_format, self.mx_block_size, self.rounding_mode)
+
+            out = torch.stack([
+                lof.lof_gemm(w_col, x_col[b].contiguous(),
+                             self.accum_mant_bits, self.gemm_round_mode,
+                             self.stochastic_rounding_bits, 1.0, 1.0)
+                for b in range(B)
+            ]).view(B, C_out, H_out, W_out)
+
+            if self.bias is not None:
+                b_q = STERound.apply(self.bias, self.bias_params, self.rounding_mode)
+                out = out + b_q.view(1, -1, 1, 1)
+            return out
+
+        # Fused scale-then-quantize on GPU; no intermediate scaled tensor.
+        x_q = STERound.apply(x, self.act_params, self.rounding_mode, self.act_scale_factor)
+        w_q = STERound.apply(self.weight, self.weight_params, self.rounding_mode, self.w_scale_factor)
 
         B, C_in, H_in, W_in = x_q.shape
         C_out = self.out_channels
         kH, kW = self.kernel_size
 
-        # ── Compute output spatial dimensions ──
         H_out = (H_in + 2 * self.padding[0] - self.dilation[0] * (kH - 1) - 1) // self.stride[0] + 1
         W_out = (W_in + 2 * self.padding[1] - self.dilation[1] * (kW - 1) - 1) // self.stride[1] + 1
-        L = H_out * W_out  # number of output spatial positions
+        L = H_out * W_out
+
+        # GEMM divides output by (act_scale * w_scale) — note the conv im2col
+        # GEMM is W @ X_col, so scale_a corresponds to the weight scale and
+        # scale_b to the activation scale.
+        s_w = float(self.w_scale_factor)
+        s_a = float(self.act_scale_factor)
 
         if self.groups == 1:
-            # ── im2col: unfold input → (B, C_in*kH*kW, L) ──
             x_col = F.unfold(x_q, kernel_size=self.kernel_size,
                              dilation=self.dilation, padding=self.padding,
-                             stride=self.stride)                         # (B, C_in*kH*kW, L)
+                             stride=self.stride)
+            w_col = w_q.view(C_out, -1)
 
-            # Weight as 2-D: (C_out, C_in*kH*kW)
-            w_col = w_q.view(C_out, -1)                                  # (C_out, C_in*kH*kW)
-
-            # Per-sample GEMM: w_col @ x_col[b] → (C_out, L)
             out = torch.stack([
                 lof.lof_gemm(w_col, x_col[b].contiguous(),
                              self.accum_mant_bits, self.gemm_round_mode,
-                             self.stochastic_rounding_bits)
+                             self.stochastic_rounding_bits,
+                             s_w, s_a)
                 for b in range(B)
-            ])                                                           # (B, C_out, L)
-
+            ])
         else:
-            # ── Grouped convolution via im2col ──
-            # Split input channels per group
             c_per_group_in = C_in // self.groups
             c_per_group_out = C_out // self.groups
 
             x_col = F.unfold(x_q, kernel_size=self.kernel_size,
                              dilation=self.dilation, padding=self.padding,
-                             stride=self.stride)                         # (B, C_in*kH*kW, L)
-
-            # Reshape for groups: (B, groups, c_per_group_in*kH*kW, L)
+                             stride=self.stride)
             x_col = x_col.view(B, self.groups, c_per_group_in * kH * kW, L)
-
-            # Weight per group: (groups, c_per_group_out, c_per_group_in*kH*kW)
             w_col = w_q.view(self.groups, c_per_group_out, -1)
 
             results = []
             for b in range(B):
                 group_outs = []
                 for g in range(self.groups):
-                    # (c_per_group_out, c_per_group_in*kH*kW) @ (c_per_group_in*kH*kW, L)
                     group_outs.append(
                         lof.lof_gemm(w_col[g], x_col[b, g].contiguous(),
                                      self.accum_mant_bits, self.gemm_round_mode,
-                                     self.stochastic_rounding_bits)
+                                     self.stochastic_rounding_bits,
+                                     s_w, s_a)
                     )
-                results.append(torch.cat(group_outs, dim=0))             # (C_out, L)
-            out = torch.stack(results)                                   # (B, C_out, L)
+                results.append(torch.cat(group_outs, dim=0))
+            out = torch.stack(results)
 
-        # ── Fold back to spatial layout ──
         out = out.view(B, C_out, H_out, W_out)
 
         if self.bias is not None:
-            b_q = self._quantize(self.bias * self.b_scale_factor, self.bias_params)
+            b_q = STERound.apply(self.bias, self.bias_params, self.rounding_mode, self.b_scale_factor)
+            if self.b_scale_factor != 1.0:
+                b_q = b_q / self.b_scale_factor
             out = out + b_q.view(1, -1, 1, 1)
 
         return out
 
-    # ── set_* and extra_repr unchanged ──────────────────────────────────
+    # ── set_* unchanged ────────────────────────────────────────────────
     def set_mantissa(self, activ_mant, weight_mant, bias_mant):
         act_exp = self.act_params.total_bits - self.act_params.mantissa_bits - 1
         weight_exp = self.weight_params.total_bits - self.weight_params.mantissa_bits - 1
@@ -468,7 +782,7 @@ class LoF_Conv2d(nn.Module):
         self.act_params = lof.create_p3109_params(self.act_params.total_bits, self.act_params.mantissa_bits, True, activ_sat)
         self.weight_params = lof.create_p3109_params(self.weight_params.total_bits, self.weight_params.mantissa_bits, True, weight_sat)
         self.bias_params = lof.create_p3109_params(self.bias_params.total_bits, self.bias_params.mantissa_bits, True, bias_sat)
-    
+
     def set_accumulation_precision(self, accum_mant_bits):
         self.accum_mant_bits = accum_mant_bits
 
@@ -483,10 +797,10 @@ class LoF_Conv2d(nn.Module):
             f'weight_exponent={self.weight_params.total_bits - self.weight_params.mantissa_bits - 1}, '
             f'bias_mantissa={self.bias_params.mantissa_bits}, '
             f'bias_exponent={self.bias_params.total_bits - self.bias_params.mantissa_bits - 1}, '
-            f'accum_mant_bits={self.accum_mant_bits}'
+            f'accum_mant_bits={self.accum_mant_bits}, '
+            f'hadamard_transform={self.hadamard_transform}, '
+            f'hadamard_block_size={self.hadamard_block_size}'
         )
-
-
 
 def _make_scale_buffer(scale, num_features):
     if isinstance(scale, torch.Tensor):
@@ -500,15 +814,7 @@ def _make_scale_buffer(scale, num_features):
         return s.clone()
     return torch.full((num_features,), float(scale))
 
-
 class L1BatchNorm(nn.Module):
-    """BatchNorm variant using mean absolute deviation (L1) instead of std dev (L2).
-
-    scale is a per-channel buffer of shape [num_features]. Default sqrt(2/pi)
-    broadcasts to all channels (the Gaussian-assumption constant). Passing a
-    calibrated per-channel MAD/std ratio makes pre-affine output match BN2d's
-    (x-mean)/std regardless of input distribution.
-    """
     def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True,
                  scale=math.sqrt(2 / math.pi)):
         super().__init__()
@@ -524,22 +830,24 @@ class L1BatchNorm(nn.Module):
             self.register_parameter("bias", None)
         self.register_buffer("running_mean", torch.zeros(num_features))
         self.register_buffer("running_mad", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
         self.register_buffer("scale", _make_scale_buffer(scale, num_features))
 
     def forward(self, x):
         reduce_dims = [0] + list(range(2, x.dim()))
-        view_shape  = [1, -1] + [1] * (x.dim() - 2)
+        view_shape = [1, -1] + [1] * (x.dim() - 2)
 
         if self.training:
             mean = x.mean(dim=reduce_dims)
             x_centered = x - mean.view(view_shape)
             mad = x_centered.abs().mean(dim=reduce_dims)
             with torch.no_grad():
+                self.num_batches_tracked += 1
                 self.running_mean.mul_(1 - self.momentum).add_(mean.detach(), alpha=self.momentum)
-                self.running_mad.mul_(1 - self.momentum).add_(mad.detach(),  alpha=self.momentum)
+                self.running_mad.mul_(1 - self.momentum).add_(mad.detach(), alpha=self.momentum)
         else:
             mean = self.running_mean
-            mad  = self.running_mad
+            mad = self.running_mad
             x_centered = x - mean.view(view_shape)
 
         out = x_centered / (mad.view(view_shape) + self.eps)
@@ -547,7 +855,6 @@ class L1BatchNorm(nn.Module):
         if self.affine:
             out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
         return out
-
 
 class LinfBatchNorm(nn.Module):
     """BatchNorm variant using max absolute deviation (L-infinity) instead of std.
@@ -596,6 +903,249 @@ class LinfBatchNorm(nn.Module):
         if self.affine:
             out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
         return out
+
+class FISRBatchNorm(nn.Module):
+    """BatchNorm variant using Quake III fast inverse square root + 1 Newton-Raphson step
+    in place of 1/sqrt(var + eps). FP32 only (bit-hack assumes IEEE 754 single precision).
+    """
+    MAGIC = 0x5F3759DF
+
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        if affine:
+            self.weight = nn.Parameter(torch.ones(num_features))
+            self.bias = nn.Parameter(torch.zeros(num_features))
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+
+    @staticmethod
+    def _fast_rsqrt(x):
+        x32 = x.to(torch.float32).contiguous()
+        x_half = x32 * 0.5
+        i = x32.view(torch.int32)
+        i = FISRBatchNorm.MAGIC - (i >> 1)
+        y = i.view(torch.float32).clone()
+        y = y * (1.5 - x_half * y * y)   # one Newton-Raphson step
+        y = y * (1.5 - x_half * y * y)   # second Newton-Raphson step for improved accuracy
+        return y.to(x.dtype)
+
+    def forward(self, x):
+        reduce_dims = [0] + list(range(2, x.dim()))
+        view_shape = [1, -1] + [1] * (x.dim() - 2)
+        if self.training:
+            mean = x.mean(dim=reduce_dims)
+            var = x.var(dim=reduce_dims, unbiased=False)
+            with torch.no_grad():
+                self.num_batches_tracked += 1
+                self.running_mean.mul_(1 - self.momentum).add_(mean.detach(), alpha=self.momentum)
+                self.running_var.mul_(1 - self.momentum).add_(var.detach(), alpha=self.momentum)
+        else:
+            mean = self.running_mean
+            var = self.running_var
+        rsqrt = self._fast_rsqrt(var + self.eps)
+        out = (x - mean.view(view_shape)) * rsqrt.view(view_shape)
+        if self.affine:
+            out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
+        return out
+
+
+class PWLBatchNorm(nn.Module):
+    """BatchNorm variant using a piecewise-linear LUT for 1/sqrt(var + eps).
+    Range-reduces var+eps via frexp to mantissa m in [1, 2), looks up 1/sqrt(m)
+    by linear interpolation over 2^lut_bits segments, then applies the exponent
+    correction.
+
+    lut_method: 'uniform' | 'midpoint' | 'minimax'.
+    """
+    INV_SQRT2 = 0.7071067811865476
+
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True,
+                 lut_bits=4, lut_method="minimax"):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        self.lut_bits = lut_bits
+        self.lut_size = 1 << lut_bits
+        if affine:
+            self.weight = nn.Parameter(torch.ones(num_features))
+            self.bias = nn.Parameter(torch.zeros(num_features))
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+        self.register_buffer("lut", torch.empty(self.lut_size + 1))
+        self.init_lut(lut_method)
+
+    def init_lut(self, method="minimax"):
+        N = self.lut_size
+        knots = torch.linspace(1.0, 2.0, N + 1, dtype=self.lut.dtype)
+        f_at_knots = 1.0 / knots.sqrt()
+        if method == "uniform":
+            lut = f_at_knots.clone()
+        elif method == "midpoint":
+            mids = 0.5 * (knots[:-1] + knots[1:])
+            f_at_mids = 1.0 / mids.sqrt()
+            lut = f_at_knots.clone()
+            lut[1:-1] = f_at_mids[:-1]
+        elif method == "minimax":
+            mids = 0.5 * (knots[:-1] + knots[1:])
+            delta = 1.0 / mids.sqrt() - 0.5 * (f_at_knots[:-1] + f_at_knots[1:])
+            c = torch.empty_like(f_at_knots)
+            c[0] = delta[0] / 2
+            c[1:-1] = (delta[:-1] + delta[1:]) / 4
+            c[-1] = delta[-1] / 2
+            lut = f_at_knots + c
+        else:
+            raise ValueError(f"Unknown lut_method {method!r}")
+        self.lut.copy_(lut)
+        self.lut_method = method
+
+    def _rsqrt_pwl(self, x):
+        m, e = torch.frexp(x)             # m in [0.5, 1)
+        m = m * 2.0                        # m in [1, 2)
+        e = e - 1
+        u = (m - 1.0) * self.lut_size
+        idx = u.floor().long().clamp(0, self.lut_size - 1)
+        frac = u - idx.to(x.dtype)
+        f = self.lut[idx]
+        g = self.lut[idx + 1]
+        rsqrt_m = f + frac * (g - f)
+        e_half = e // 2
+        odd = (e % 2 != 0)
+        scale = torch.ldexp(torch.ones_like(x), -e_half)
+        scale = torch.where(odd, scale * self.INV_SQRT2, scale)
+        return rsqrt_m * scale
+
+    def forward(self, x):
+        reduce_dims = [0] + list(range(2, x.dim()))
+        view_shape = [1, -1] + [1] * (x.dim() - 2)
+        if self.training:
+            mean = x.mean(dim=reduce_dims)
+            var = x.var(dim=reduce_dims, unbiased=False)
+            with torch.no_grad():
+                self.num_batches_tracked += 1
+                self.running_mean.mul_(1 - self.momentum).add_(mean.detach(), alpha=self.momentum)
+                self.running_var.mul_(1 - self.momentum).add_(var.detach(), alpha=self.momentum)
+        else:
+            mean = self.running_mean
+            var = self.running_var
+        rsqrt = self._rsqrt_pwl(var + self.eps)
+        out = (x - mean.view(view_shape)) * rsqrt.view(view_shape)
+        if self.affine:
+            out = out * self.weight.view(view_shape) + self.bias.view(view_shape)
+        return out
+
+class _PWLSiLUApprox(torch.autograd.Function):
+    """Autograd wrapper around the fused C++/CUDA ``lof.pwl_silu`` forward.
+
+    Forward runs the LUT kernel (one read + one write); backward uses the
+    analytic SiLU derivative σ(x)·(1 + x·(1 − σ(x))) as a smooth surrogate. The
+    PWL forward's exact gradient is piecewise-constant (the segment slope), which
+    is a poor training signal, so we differentiate the function it approximates.
+    """
+
+    @staticmethod
+    def forward(ctx, x, lut, R):
+        ctx.save_for_backward(x)
+        return lof.pwl_silu(x, lut, float(R))
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (x,) = ctx.saved_tensors
+        s = torch.sigmoid(x)
+        dsilu = s * (1 + x * (1 - s))
+        return grad_output * dsilu, None, None
+
+
+class PWLSiLU(nn.Module):
+    """SiLU(x) = x * sigmoid(x) approximated via a piecewise-linear LUT on [-R, R].
+    Outside the range, falls back to the asymptotes: 0 for x < -R, x for x > R.
+    Uniform knot spacing; lut_size must be even so x=0 lands on a knot.
+    lut_method: 'uniform' | 'midpoint' | 'minimax'.
+
+    Forward dispatches to the fused ``lof.pwl_silu`` kernel when available
+    (GPU or CPU); set ``use_ext=False`` to force the pure-torch reference path.
+    """
+
+    def __init__(self, R=8.0, lut_bits=4, lut_method="minimax", use_ext=True):
+        super().__init__()
+        self.R = float(R)
+        self.lut_bits = lut_bits
+        self.lut_size = 1 << lut_bits
+        if self.lut_size % 2 != 0:
+            raise ValueError("lut_size must be even so x=0 is a knot.")
+        # The kernel is instantiated for power-of-2 lengths up to 4096 (= 2^12).
+        self.use_ext = use_ext and hasattr(lof, "pwl_silu") and self.lut_size <= 4096
+        self.register_buffer("lut", torch.empty(self.lut_size + 1))
+        self.init_lut(lut_method)
+
+    @staticmethod
+    def _silu(x):
+        return x * torch.sigmoid(x)
+
+    def init_lut(self, method="minimax"):
+        N = self.lut_size
+        knots = torch.linspace(-self.R, self.R, N + 1, dtype=self.lut.dtype)
+        f_at_knots = self._silu(knots)
+        if method == "uniform":
+            lut = f_at_knots.clone()
+        elif method == "midpoint":
+            mids = 0.5 * (knots[:-1] + knots[1:])
+            f_at_mids = self._silu(mids)
+            lut = f_at_knots.clone()
+            lut[1:-1] = f_at_mids[:-1]
+        elif method == "minimax":
+            mids = 0.5 * (knots[:-1] + knots[1:])
+            delta = self._silu(mids) - 0.5 * (f_at_knots[:-1] + f_at_knots[1:])
+            c = torch.empty_like(f_at_knots)
+            c[0] = delta[0] / 2
+            c[1:-1] = (delta[:-1] + delta[1:]) / 4
+            c[-1] = delta[-1] / 2
+            lut = f_at_knots + c
+        else:
+            raise ValueError(f"Unknown lut_method {method!r}")
+        self.lut.copy_(lut)
+        self.lut_method = method
+
+    
+    def forward(self, x):
+        if self.use_ext:
+            # Fused LUT kernel: one read + one write, differentiable via the
+            # analytic SiLU derivative. Falls back to the reference path below
+            # only if disabled at construction.
+            return _PWLSiLUApprox.apply(x, self.lut, self.R)
+        return self._forward_ref(x)
+
+    def _forward_ref(self, x):
+        """Pure-torch reference (the op chain the fused kernel replaces)."""
+        N = self.lut_size
+        R = self.R
+
+        # Clamp once so the LUT index is always in range — avoids wild extrapolation
+        # for out-of-range x and removes the need for a separate "below -R" branch.
+        u = (x.clamp(-R, R) + R) * (N / (2 * R))
+        idx = u.long().clamp_(max=N - 1)          # in-place clamp
+        frac = u - idx.to(x.dtype)
+
+        # lerp = f + frac*(g - f), but as one fused op
+        out = torch.lerp(self.lut[idx], self.lut[idx + 1], frac)
+
+        # Single asymptote fix: F.relu(x) is x for x>R and 0 for x<-R,
+        # which is exactly the asymptote you want. One where, no zeros_like.
+        return torch.where(x.abs() > R, F.relu(x), out)
+
 # ═══════════════════════════════════════════════════════════════════════
 #  LoF_MultiHeadAttention
 # ═══════════════════════════════════════════════════════════════════════
@@ -610,9 +1160,12 @@ class LoF_MultiHeadAttention(nn.Module):
                  rounding_mode=None, dropout=0.0,
                  accum_mant_bits=23,
                  gemm_round_mode=None,
-                 stochastic_rounding_bits=0):
+                 stochastic_rounding_bits=0,
+                 scaling="per_tensor", mx_block_size=32, scale_format=None):
         super().__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        if scaling not in ("per_tensor", "mx"):
+            raise ValueError(f"scaling must be 'per_tensor' or 'mx', got {scaling!r}")
 
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -620,6 +1173,17 @@ class LoF_MultiHeadAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.dropout = dropout
         self.rounding_mode = rounding_mode if rounding_mode is not None else lof.RoundingMode.RoundToNearestEven
+
+        # Microscaling: every _quantize() call (q/k/v activations + projection
+        # weights/biases) blocks along the LAST axis, which is the embedding dim
+        # E — the contraction (K) axis of the projections. Needs E % block == 0.
+        self.scaling = scaling
+        self.mx_block_size = mx_block_size
+        self.scale_format = scale_format if scale_format is not None else lof.create_e8m0_params()
+        if scaling == "mx" and embed_dim % mx_block_size != 0:
+            raise ValueError(
+                f"mx scaling needs embed_dim ({embed_dim}) divisible by "
+                f"mx_block_size ({mx_block_size})")
 
         # lof_gemm parameters
         self.accum_mant_bits = accum_mant_bits
@@ -709,6 +1273,9 @@ class LoF_MultiHeadAttention(nn.Module):
             accum_mant_bits=self.accum_mant_bits,
             gemm_round_mode=self.gemm_round_mode,
             stochastic_rounding_bits=self.stochastic_rounding_bits,
+            scaling=self.scaling,
+            mx_block_size=self.mx_block_size,
+            scale_format=self.scale_format,
         )
         new.load_state_dict(self.state_dict())
         memo[id(self)] = new
@@ -717,6 +1284,15 @@ class LoF_MultiHeadAttention(nn.Module):
     def _quantize(self, tensor, params):
         if params is None:
             return tensor
+        if self.scaling == "mx":
+            # MX along the last axis (= E, the projection contraction). Applies to
+            # q/k/v activations and projection weights/biases alike.
+            if tensor.shape[-1] % self.mx_block_size != 0:
+                raise ValueError(
+                    f"mx scaling needs the last dim ({tensor.shape[-1]}) divisible by "
+                    f"mx_block_size ({self.mx_block_size})")
+            return STEMXRound.apply(tensor, params, self.scale_format,
+                                    self.mx_block_size, self.rounding_mode)
         return STERound.apply(tensor, params, self.rounding_mode)
 
     def forward(self, query, key, value, attn_mask=None, key_padding_mask=None, need_weights=False):

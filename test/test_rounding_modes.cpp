@@ -54,13 +54,15 @@ int test_n2sn__3109() {
 
         double UNT = (double)std::numeric_limits<P_3109_type>::denorm_min();
 
-        P_3109_type fd   = Round<P_3109_type>(d, Rounding_Mode::RoundDown);
-        P_3109_type fu   = Round<P_3109_type>(d, Rounding_Mode::RoundUp);
-        P_3109_type frne = Round<P_3109_type>(d, Rounding_Mode::RoundToNearestEven);
-        P_3109_type frno = Round<P_3109_type>(d, Rounding_Mode::RoundToNearestOdd);
-        P_3109_type frta = Round<P_3109_type>(d, Rounding_Mode::RoundTiesToAway);
-        P_3109_type frtz = Round<P_3109_type>(d, Rounding_Mode::RoundTowardsZero);
-        P_3109_type fraw = Round<P_3109_type>(d, Rounding_Mode::RoundAwayFromZero);
+        P_3109_type fd   = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundDown});
+        P_3109_type fu   = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundUp});
+        P_3109_type frne = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundToNearestEven});
+        P_3109_type frno = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundToNearestOdd});
+        P_3109_type frta = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundTiesToAway});
+        P_3109_type frtz = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundTowardsZero});
+        P_3109_type fraw = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundAwayFromZero});
+        P_3109_type frto = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundToOdd});
+        P_3109_type frttz = Round<P_3109_type>(d, ProjSpec{Rounding_Mode::RoundTiesTowardsZero});
 
         double denom = get_denom(d);
 
@@ -79,6 +81,10 @@ int test_n2sn__3109() {
         double rel_rta  = std::fabs(static_cast<double>(frta) - d) / denom;
         double rel_rtz  = std::fabs(static_cast<double>(frtz) - d) / denom;
         double rel_raw  = std::fabs(static_cast<double>(fraw) - d) / denom;
+        double abs_rto  = std::fabs(static_cast<double>(frto)  - d);
+        double rel_rto  = abs_rto / denom;
+        double abs_rttz = std::fabs(static_cast<double>(frttz) - d);
+        double rel_rttz = abs_rttz / denom;
 
        if (!isnan(d)) {
     if (is_normal(fd)) {
@@ -178,6 +184,48 @@ int test_n2sn__3109() {
             num_errors++;
         }
     }
+
+    // RoundToOdd (sticky): |[x]-x| < beta, and the mantissa is odd whenever the
+    // rounding was inexact (an exactly-representable value rounds to itself).
+    if (is_normal(frto)) {
+        if (rel_rto > mach_eps) {
+            std::cout << "RoundToOdd failed (x=" << d << " frto=" << (double)frto
+                      << " rel_err=" << rel_rto << ")\n";
+            num_errors++;
+        }
+    } else {
+        if (abs_rto > UNT) {
+            std::cout << "RoundToOdd failed (x=" << d << " frto=" << (double)frto
+                      << " abs_err=" << abs_rto << ")\n";
+            num_errors++;
+        }
+    }
+    // Odd-mantissa guarantee: assert only for p>1 and normal results. With a
+    // single mantissa bit (p==1) the odd/even concept is degenerate (and at the
+    // subnormal/normal boundary the value can land on the even min-normal), so
+    // we skip it there -- mirroring the p>1 guard on the tie-break checks below.
+    if constexpr (p > 1) {
+        if (is_normal(frto) && static_cast<double>(frto) != (double)d && !is_odd(frto.rep())) {
+            std::cout << "RoundToOdd result not odd (x=" << d << " frto=" << (double)frto
+                      << " rep=" << (int)frto.rep() << ")\n";
+            num_errors++;
+        }
+    }
+
+    // RoundTiesTowardsZero: |[x]-x| < beta/2 (same nearest-mode magnitude bound).
+    if (is_normal(frttz)) {
+        if (rel_rttz > mach_eps) {
+            std::cout << "RoundTiesTowardsZero failed (x=" << d << " frttz=" << (double)frttz
+                      << " rel_err=" << rel_rttz << ")\n";
+            num_errors++;
+        }
+    } else {
+        if (abs_rttz > UNT) {
+            std::cout << "RoundTiesTowardsZero failed (x=" << d << " frttz=" << (double)frttz
+                      << " abs_err=" << abs_rttz << ")\n";
+            num_errors++;
+        }
+    }
 }
 
 
@@ -191,9 +239,10 @@ int test_n2sn__3109() {
             double b_d = (double)P_3109_type::FromRep(rep+1);
             double tie = (a_d + b_d) / 2.0;
 
-            P_3109_type rne = Round<P_3109_type>(tie, Rounding_Mode::RoundToNearestEven);
-            P_3109_type rno = Round<P_3109_type>(tie, Rounding_Mode::RoundToNearestOdd);
-            P_3109_type rta = Round<P_3109_type>(tie, Rounding_Mode::RoundTiesToAway);
+            P_3109_type rne = Round<P_3109_type>(tie, ProjSpec{Rounding_Mode::RoundToNearestEven});
+            P_3109_type rno = Round<P_3109_type>(tie, ProjSpec{Rounding_Mode::RoundToNearestOdd});
+            P_3109_type rta = Round<P_3109_type>(tie, ProjSpec{Rounding_Mode::RoundTiesToAway});
+            P_3109_type rttz = Round<P_3109_type>(tie, ProjSpec{Rounding_Mode::RoundTiesTowardsZero});
 
             if(isnan(tie)) continue;
             if (!is_even(rne.rep())) {
@@ -213,6 +262,18 @@ int test_n2sn__3109() {
                 std::cout << "RTiesToAway tie not away (x=" << tie
                           << " res=" << rta_d << ")\n";
                 num_errors++;
+            }
+
+            // RoundTiesTowardsZero: an exact tie rounds to the smaller-magnitude
+            // neighbour. Skip the zero-straddling pair where |a| == |b| (the
+            // midpoint is 0, not a genuine tie between same-sign neighbours).
+            if (std::fabs(a_d) != std::fabs(b_d)) {
+                double smaller = std::fabs(a_d) < std::fabs(b_d) ? a_d : b_d;
+                if (std::fabs(static_cast<double>(rttz) - smaller) > 1e-20) {
+                    std::cout << "RTiesTowardsZero tie not toward zero (x=" << tie
+                              << " res=" << (double)rttz << " expected=" << smaller << ")\n";
+                    num_errors++;
+                }
             }
         }
     }
@@ -242,13 +303,13 @@ int test_n2n_old()
         double denom = get_denom(d);
 
         // bf16 rounding and error calculations
-        bf16 fb_d   = Round<bf16>(d, Rounding_Mode::RoundDown);
-        bf16 fb_u   = Round<bf16>(d, Rounding_Mode::RoundUp);
-        bf16 fb_rne = Round<bf16>(d, Rounding_Mode::RoundToNearestEven);
-        bf16 fb_rno = Round<bf16>(d, Rounding_Mode::RoundToNearestOdd);
-        bf16 fb_rta = Round<bf16>(d, Rounding_Mode::RoundTiesToAway);
-        bf16 fb_rtz = Round<bf16>(d, Rounding_Mode::RoundTowardsZero);
-        bf16 fb_raw = Round<bf16>(d, Rounding_Mode::RoundAwayFromZero);
+        bf16 fb_d   = Round<bf16>(d, ProjSpec{Rounding_Mode::RoundDown});
+        bf16 fb_u   = Round<bf16>(d, ProjSpec{Rounding_Mode::RoundUp});
+        bf16 fb_rne = Round<bf16>(d, ProjSpec{Rounding_Mode::RoundToNearestEven});
+        bf16 fb_rno = Round<bf16>(d, ProjSpec{Rounding_Mode::RoundToNearestOdd});
+        bf16 fb_rta = Round<bf16>(d, ProjSpec{Rounding_Mode::RoundTiesToAway});
+        bf16 fb_rtz = Round<bf16>(d, ProjSpec{Rounding_Mode::RoundTowardsZero});
+        bf16 fb_raw = Round<bf16>(d, ProjSpec{Rounding_Mode::RoundAwayFromZero});
 
         double abs_b_d = std::fabs(static_cast<double>(fb_d) - d);
         double abs_b_u = std::fabs(static_cast<double>(fb_u) - d);
@@ -267,13 +328,13 @@ int test_n2n_old()
         double rel_b_raw = abs_b_raw / denom;
 
         // tf32 rounding and error calculations
-        tf32 ft_d   = Round<tf32>(d, Rounding_Mode::RoundDown);
-        tf32 ft_u   = Round<tf32>(d, Rounding_Mode::RoundUp);
-        tf32 ft_rne = Round<tf32>(d, Rounding_Mode::RoundToNearestEven);
-        tf32 ft_rno = Round<tf32>(d, Rounding_Mode::RoundToNearestOdd);
-        tf32 ft_rta = Round<tf32>(d, Rounding_Mode::RoundTiesToAway);
-        tf32 ft_rtz = Round<tf32>(d, Rounding_Mode::RoundTowardsZero);
-        tf32 ft_raw = Round<tf32>(d, Rounding_Mode::RoundAwayFromZero);
+        tf32 ft_d   = Round<tf32>(d, ProjSpec{Rounding_Mode::RoundDown});
+        tf32 ft_u   = Round<tf32>(d, ProjSpec{Rounding_Mode::RoundUp});
+        tf32 ft_rne = Round<tf32>(d, ProjSpec{Rounding_Mode::RoundToNearestEven});
+        tf32 ft_rno = Round<tf32>(d, ProjSpec{Rounding_Mode::RoundToNearestOdd});
+        tf32 ft_rta = Round<tf32>(d, ProjSpec{Rounding_Mode::RoundTiesToAway});
+        tf32 ft_rtz = Round<tf32>(d, ProjSpec{Rounding_Mode::RoundTowardsZero});
+        tf32 ft_raw = Round<tf32>(d, ProjSpec{Rounding_Mode::RoundAwayFromZero});
 
         double abs_t_d = std::fabs(static_cast<double>(ft_d) - d);
         double abs_t_u = std::fabs(static_cast<double>(ft_u) - d);
@@ -292,13 +353,13 @@ int test_n2n_old()
         double rel_t_raw = abs_t_raw / denom;
 
         // binary16 rounding and error calculations
-        binary16 fh_d   = Round<binary16>(d, Rounding_Mode::RoundDown);
-        binary16 fh_u   = Round<binary16>(d, Rounding_Mode::RoundUp);
-        binary16 fh_rne = Round<binary16>(d, Rounding_Mode::RoundToNearestEven);
-        binary16 fh_rno = Round<binary16>(d, Rounding_Mode::RoundToNearestOdd);
-        binary16 fh_rta = Round<binary16>(d, Rounding_Mode::RoundTiesToAway);
-        binary16 fh_rtz = Round<binary16>(d, Rounding_Mode::RoundTowardsZero);
-        binary16 fh_raw = Round<binary16>(d, Rounding_Mode::RoundAwayFromZero);
+        binary16 fh_d   = Round<binary16>(d, ProjSpec{Rounding_Mode::RoundDown});
+        binary16 fh_u   = Round<binary16>(d, ProjSpec{Rounding_Mode::RoundUp});
+        binary16 fh_rne = Round<binary16>(d, ProjSpec{Rounding_Mode::RoundToNearestEven});
+        binary16 fh_rno = Round<binary16>(d, ProjSpec{Rounding_Mode::RoundToNearestOdd});
+        binary16 fh_rta = Round<binary16>(d, ProjSpec{Rounding_Mode::RoundTiesToAway});
+        binary16 fh_rtz = Round<binary16>(d, ProjSpec{Rounding_Mode::RoundTowardsZero});
+        binary16 fh_raw = Round<binary16>(d, ProjSpec{Rounding_Mode::RoundAwayFromZero});
 
         double abs_h_d = std::fabs(static_cast<double>(fh_d) - d);
         double abs_h_u = std::fabs(static_cast<double>(fh_u) - d);
@@ -392,7 +453,7 @@ int test_array_round() {
         float_arr[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
     }
 
-    lo_float::Project(float_arr, arr, n, Rounding_Mode::RoundToNearestEven);
+    lo_float::Project(float_arr, arr, n, ProjSpec{Rounding_Mode::RoundToNearestEven});
 
     int num_errors = 0;
     for (int i = 0; i < n; i++) {

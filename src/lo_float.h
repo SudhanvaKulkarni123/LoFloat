@@ -1,6 +1,5 @@
 /// @author Sudhanva Kulkarni
 #pragma once
-
 #define LEN 13
 #include <random>
 #include <algorithm>
@@ -62,6 +61,43 @@ namespace lo_float
         lof_seed = seed;
     }
 
+#if defined(USE_CUDA) && defined(__CUDACC__)
+    // ---- Device-side RNG for stochastic rounding ---------------------------
+    // The host stochastic-rounding helpers draw from std::mt19937 seeded by the
+    // thread_local `lof_seed`. None of that survives on the GPU: <random> is
+    // host-only, `thread_local` is illegal in __device__ code, and a single
+    // shared seed would make every thread draw the *same* value (fully
+    // correlated SR, which defeats the purpose). Rather than thread a curand
+    // state object through virtual_round -> RoundMantissa -> every helper, we
+    // derive each sample *statelessly* from a SplitMix64 hash of the element's
+    // own bits, a per-call salt, and the global thread index. This needs no RNG
+    // state, is decorrelated across threads/elements, and is deterministic for a
+    // fixed launch geometry.
+    LOFLOAT_DEVICE LOFLOAT_FORCEINLINE uint64_t lof_splitmix64(uint64_t x) {
+        x += 0x9E3779B97F4A7C15ULL;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+        return x ^ (x >> 31);
+    }
+
+    LOFLOAT_DEVICE LOFLOAT_FORCEINLINE uint64_t lof_device_global_tid() {
+        const uint64_t block =
+            (uint64_t(blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;
+        const uint64_t tinb =
+            (uint64_t(threadIdx.z) * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;
+        return block * (uint64_t(blockDim.x) * blockDim.y * blockDim.z) + tinb;
+    }
+
+    // Uniform 64-bit sample; `entropy` is normally the element's magnitude bits
+    // and `salt` distinguishes the different rounding modes.
+    LOFLOAT_DEVICE LOFLOAT_FORCEINLINE uint64_t lof_device_rand64(uint64_t entropy, uint64_t salt) {
+        return lof_splitmix64(entropy
+                              ^ (lof_device_global_tid() * 0x9E3779B97F4A7C15ULL)
+                              ^ (salt * 0xD1B54A32D192ED03ULL)
+                              ^ 0x2545F4914F6CDD1DULL);
+    }
+#endif
+
     // Concept to constrain to floating-point types
 
     namespace lo_float_internal
@@ -87,9 +123,8 @@ namespace lo_float
 
 
 
-#ifdef ENABLE_EXCEPT
-        Environment f_env{};
-#endif
+        // NOTE: the global exception Environment `f_env` and the `signal_if_754`
+        // gate helper now live in f_exceptions.hpp (inline => header-safe across TUs).
 
         // @brief helper struct that picks underlying float that should be used for the simulation. We require 2*mantissa_bits + 1 mantissa bits in the simulation type
         template <int N>
@@ -122,10 +157,17 @@ namespace lo_float
 
 
         //bitcast helper
+        // std::bit_cast does NOT work in nvcc device code (it silently yields 0),
+        // which is why the rest of the library uses cuda::std::bit_cast on device.
+        // Dispatch here so this helper is correct on both host and device.
         template <typename To, typename From>
         LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE To bit_cast(From val) {
+        #if defined(USE_CUDA) && defined(__CUDA_ARCH__)
+            return cuda::std::bit_cast<To>(val);
+        #else
             return std::bit_cast<To>(val);
-        } 
+        #endif
+        }
 
         #ifdef USE_CUDA
         // c10::Half -> uint16_t
@@ -163,9 +205,9 @@ namespace lo_float
             friend class Templated_Float;
 
         public:
-            constexpr lo_float_base() : rep_(0) {}
+            LOFLOAT_HOST_DEVICE constexpr lo_float_base() : rep_(0) {}
 
-            constexpr UnderlyingType rep() const
+            LOFLOAT_HOST_DEVICE constexpr UnderlyingType rep() const
             {
                 return rep_;
             }
@@ -173,34 +215,34 @@ namespace lo_float
             // Templated constructor
             template <typename T,
                       typename EnableIf = std::enable_if_t<std::is_arithmetic_v<T>>>
-            explicit lo_float_base(T f)
+            LOFLOAT_HOST_DEVICE explicit lo_float_base(T f)
                 : lo_float_base(ConvertFrom(static_cast<float>(f)).rep(),
                                 ConstructFromRepTag{}) {}
 
-            explicit lo_float_base(double f64)
+            LOFLOAT_HOST_DEVICE explicit lo_float_base(double f64)
                 : lo_float_base(ConvertFrom(f64).rep(), ConstructFromRepTag{}) {}
 
-            explicit lo_float_base(float f32)
+            LOFLOAT_HOST_DEVICE explicit lo_float_base(float f32)
                 : lo_float_base(ConvertFrom(f32).rep(), ConstructFromRepTag{}) {}
 
-            explicit lo_float_base(const int i32)
+            LOFLOAT_HOST_DEVICE explicit lo_float_base(const int i32)
                 : lo_float_base(ConvertFrom(static_cast<double>(i32)).rep(), ConstructFromRepTag{}) {}
 
             template <int len, Signedness Sign>
-            explicit lo_float_base(i_n<len, Sign> var_int)
+            LOFLOAT_HOST_DEVICE explicit lo_float_base(i_n<len, Sign> var_int)
                 : lo_float_base(ConvertFrom(static_cast<double>((int)var_int)).rep(), ConstructFromRepTag{}) {}
 
             // CRTP helpers
-            constexpr const Derived &derived() const
+            LOFLOAT_HOST_DEVICE constexpr const Derived &derived() const
             {
                 return *static_cast<const Derived *>(this);
             }
-            constexpr Derived &derived()
+            LOFLOAT_HOST_DEVICE constexpr Derived &derived()
             {
                 return *static_cast<Derived *>(this);
             }
 
-            static constexpr Derived FromRep(UnderlyingType rep)
+            LOFLOAT_HOST_DEVICE static constexpr Derived FromRep(UnderlyingType rep)
             {
                 return Derived(rep, ConstructFromRepTag{});
             }
@@ -209,38 +251,55 @@ namespace lo_float
             // Declarations for ConvertFrom / ConvertTo
             // -------------------------------------------
             template <typename From>
-            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Derived ConvertFrom(const From &from, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0);
+            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Derived ConvertFrom(const From &from, ProjSpec ps = ProjSpec{});
 
             template <typename To>
-            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE To ConvertTo(const Derived &from, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0);
+            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE To ConvertTo(const Derived &from, ProjSpec ps = ProjSpec{});
 
             template <typename T,
                       typename EnableIf = std::enable_if<std::is_arithmetic_v<T>>>
-            explicit operator T() const
+            LOFLOAT_HOST_DEVICE explicit operator T() const
             {
                 return static_cast<T>(static_cast<float>(derived()));
             }
-            explicit operator double() const
+            LOFLOAT_HOST_DEVICE explicit operator double() const
             {
                 return ConvertTo<double>(derived());
             }
-            explicit operator float() const
+            LOFLOAT_HOST_DEVICE explicit operator float() const
             {
                 return ConvertTo<float>(derived());
             }
 
-            explicit operator int() const
+            LOFLOAT_HOST_DEVICE explicit operator int() const
             {
-                return (int)(ConvertTo<double>(derived()));
+                const double d = ConvertTo<double>(derived());
+#ifdef ENABLE_EXCEPT
+                // §7.2(j): converting NaN/Inf or an out-of-range value to an integer
+                // format has no usefully definable result -> invalid operation.
+                if (std::isnan(d) || std::isinf(d) ||
+                    d < double(std::numeric_limits<int>::min()) ||
+                    d > double(std::numeric_limits<int>::max()))
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::InvalidOperation);
+#endif
+                return (int)(d);
             }
 
             template <int len, Signedness sign>
-            explicit operator i_n<len, sign>() const
+            LOFLOAT_HOST_DEVICE explicit operator i_n<len, sign>() const
             {
-                return (i_n<len, sign>)int(ConvertTo<double>(derived()));
+                const double d = ConvertTo<double>(derived());
+#ifdef ENABLE_EXCEPT
+                // §7.2(j): NaN/Inf or out-of-range source -> invalid operation.
+                if (std::isnan(d) || std::isinf(d) ||
+                    d < double((int)i_n<len, sign>::lowest()) ||
+                    d > double((int)i_n<len, sign>::highest()))
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::InvalidOperation);
+#endif
+                return (i_n<len, sign>)int(d);
             }
 
-            explicit operator bool() const
+            LOFLOAT_HOST_DEVICE explicit operator bool() const
             {
                 if constexpr (get_signedness_v<Derived> == Signedness::Signed)
                 {
@@ -257,8 +316,11 @@ namespace lo_float
 
             LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Derived operator-() const
             {
+                // Reconstruct a stateless temporary checker instead of ODR-using the
+                // static constexpr IsNaNFunctor object (nvcc emits no device storage).
+                using NaNChk = std::remove_cv_t<std::remove_reference_t<decltype(Derived::IsNaNFunctor)>>;
                 // check spl case of -0 for nan
-                if (rep_ == 0 && Derived::IsNaNFunctor((1 << (get_bitwidth_v<Derived> - 1))))
+                if (rep_ == 0 && NaNChk{}((1 << (get_bitwidth_v<Derived> - 1))))
                 {
                     return FromRep(0);
                 }
@@ -276,12 +338,16 @@ namespace lo_float
                     {
                         if (get_NaN_Behavior_v<Derived> == NaN_Behaviors::_3109)
                         {
-                            return FromRep(Derived::IsNaNFunctor.qNanBitPattern());
+                            return FromRep(NaNChk{}.qNanBitPattern());
                         }
                         else
                         {
-                            // need to signal exception here
-                            return FromRep(Derived::IsNaNFunctor.sNanBitPattern());
+                            // Negating an unsigned value produces a NaN: no usefully
+                            // definable result -> invalid operation (§7.2).
+#ifdef ENABLE_EXCEPT
+                            signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::InvalidOperation);
+#endif
+                            return FromRep(NaNChk{}.sNanBitPattern());
                         }
                     }
                 }
@@ -290,7 +356,13 @@ namespace lo_float
             LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE  Derived
             operator+(const Derived &other) const
             {
-                return Derived{UnderlyingFloat{derived()} + UnderlyingFloat{other}};
+                const UnderlyingFloat res = UnderlyingFloat{derived()} + UnderlyingFloat{other};
+#ifdef ENABLE_EXCEPT
+                // ∞ + (−∞) has no usefully definable result -> invalid (§7.2 d).
+                if (std::isnan(res) && !isnan(derived()) && !isnan(other))
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::InvalidOperation);
+#endif
+                return Derived{res};
             }
             LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE  Derived
             operator=(const Derived &other) const
@@ -300,27 +372,44 @@ namespace lo_float
             LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE  Derived
             operator-(const Derived &other) const
             {
-                return Derived{UnderlyingFloat{derived()} - UnderlyingFloat{other}};
+                const UnderlyingFloat res = UnderlyingFloat{derived()} - UnderlyingFloat{other};
+#ifdef ENABLE_EXCEPT
+                // ∞ − ∞ has no usefully definable result -> invalid (§7.2 d).
+                if (std::isnan(res) && !isnan(derived()) && !isnan(other))
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::InvalidOperation);
+#endif
+                return Derived{res};
             }
             LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE  Derived
             operator*(const Derived &other) const
             {
-                return Derived{UnderlyingFloat{derived()} * UnderlyingFloat{other}};
+                const UnderlyingFloat res = UnderlyingFloat{derived()} * UnderlyingFloat{other};
+#ifdef ENABLE_EXCEPT
+                // 0 × ∞ (or ∞ × 0) has no usefully definable result -> invalid (§7.2 b).
+                if (std::isnan(res) && !isnan(derived()) && !isnan(other))
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::InvalidOperation);
+#endif
+                return Derived{res};
             }
             LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE  Derived
             operator/(const Derived &other) const
             {
+                const UnderlyingFloat a = UnderlyingFloat{derived()};
+                const UnderlyingFloat b = UnderlyingFloat{other};
 #ifdef ENABLE_EXCEPT
-                if (!other)
+                // §7.2/§7.3: 0/0 and ∞/∞ are invalid (no usefully definable result);
+                // a finite non-zero divided by zero is a true divide-by-zero.
+                if ((a == UnderlyingFloat(0) && b == UnderlyingFloat(0)) ||
+                    (std::isinf(a) && std::isinf(b)))
                 {
-                    f_env.set_exception_flag(LF_exception_flags::DivisionByZero);
-                    if (!derived())
-                    {
-                        f_env.set_exception_flag(LF_exception_flags::InvalidOperation);
-                    }
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::InvalidOperation);
+                }
+                else if (b == UnderlyingFloat(0) && std::isfinite(a))
+                {
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::DivisionByZero);
                 }
 #endif
-                return Derived{UnderlyingFloat{derived()} / UnderlyingFloat{other}};
+                return Derived{a / b};
             }
 
             // Example comparison
@@ -395,13 +484,17 @@ namespace lo_float
                 const Derived &other)
             {
 #ifdef ENABLE_EXCEPT
-                if constexpr (!other)
+                const UnderlyingFloat a = UnderlyingFloat{derived()};
+                const UnderlyingFloat b = UnderlyingFloat{other};
+                // §7.2/§7.3: 0/0 and ∞/∞ are invalid; finite non-zero / 0 is divide-by-zero.
+                if ((a == UnderlyingFloat(0) && b == UnderlyingFloat(0)) ||
+                    (std::isinf(a) && std::isinf(b)))
                 {
-                    f_env.set_exception_flag(LF_exception_flags::DivisionByZero);
-                    if constexpr (!derived())
-                    {
-                        f_env.set_exception_flag(LF_exception_flags::InvalidOperation);
-                    }
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::InvalidOperation);
+                }
+                else if (b == UnderlyingFloat(0) && std::isfinite(a))
+                {
+                    signal_if_754<get_NaN_Behavior_v<Derived>>(LF_exception_flags::DivisionByZero);
                 }
 #endif
                 derived() = derived() / other;
@@ -505,11 +598,13 @@ constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsToNearestEven(Bi
 // Coin-flip rounding: if any truncated bits are nonzero, round up with p=0.5.
 
 template <typename Bits, typename Roundoff>
-inline Bits Probabilistic_Round(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits Probabilistic_Round(Bits bits, Roundoff roundoff)
 {
     using lane_t = pod_type_t<Bits>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+#ifndef __CUDA_ARCH__
     std::mt19937 mt(lof_seed);
+#endif
 
     if constexpr (is_xsimd_batch<Roundoff>::value)
     {
@@ -541,8 +636,12 @@ inline Bits Probabilistic_Round(Bits bits, Roundoff roundoff)
         Bits truncated = bits & ~mask;
         Bits tail = bits & mask;
 
+#ifdef __CUDA_ARCH__
+        lane_t r01 = static_cast<lane_t>(lof_device_rand64(static_cast<uint64_t>(bits), 0x01) & 1u);
+#else
         std::uniform_int_distribution<int> d01(0, 1);
         lane_t r01 = static_cast<lane_t>(d01(mt));
+#endif
 
         Bits bump = (tail != Bits(0)) ? Bits(r01) : Bits(0);
         return truncated + (bump << roundoff);
@@ -552,18 +651,23 @@ inline Bits Probabilistic_Round(Bits bits, Roundoff roundoff)
 // ----- Stochastic_Round_A (unchanged) ---------------------------------------
 
 template <typename Bits, typename Roundoff>
-inline Bits Stochastic_Round_A(Bits bits, Roundoff roundoff, const int len = 0)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits Stochastic_Round_A(Bits bits, Roundoff roundoff, const int len = 0)
 {
     using lane_t = pod_type_t<Bits>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
-    std::mt19937 mt(lof_seed);
 
     if (len <= 0) return bits;
 
+#ifdef __CUDA_ARCH__
+    const uint64_t maxv = (uint64_t{1} << unsigned(len)) - 1u;
+    Bits to_add = static_cast<Bits>(lof_device_rand64(static_cast<uint64_t>(bits), 0x0A) & maxv);
+    return bits + (to_add << (roundoff - len));
+#else
+    std::mt19937 mt(lof_seed);
     const unsigned maxv = (1u << unsigned(len)) - 1u;
     std::uniform_int_distribution<unsigned> dist(0u, maxv);
 
-    #ifndef USE_CUDA
+  #ifndef USE_CUDA
     std::array<lane_t, lanes> samp{};
     for (std::size_t i = 0; i < lanes; ++i)
         samp[i] = static_cast<lane_t>(dist(mt));
@@ -582,21 +686,24 @@ inline Bits Stochastic_Round_A(Bits bits, Roundoff roundoff, const int len = 0)
     {
         return bits + (to_add << (roundoff - len));
     }
-    #else
+  #else
     Bits to_add = static_cast<Bits>(dist(mt));
     return bits + (to_add << (roundoff - len));
-    #endif
+  #endif
+#endif
 }
 
 // ----- Stochastic_Round_B ---------------------------------------------------
 // Bits may be scalar or batch; roundoff and len are always scalar.
 
 template <typename Bits, typename Roundoff>
-inline Bits Stochastic_Round_B(Bits bits, const Roundoff roundoff, const int len = 0)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits Stochastic_Round_B(Bits bits, const Roundoff roundoff, const int len = 0)
 {
     using lane_t = pod_type_t<Bits>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+#ifndef __CUDA_ARCH__
     std::mt19937 mt(lof_seed);
+#endif
 
     if constexpr (is_xsimd_batch<Bits>::value)
     {
@@ -630,8 +737,13 @@ inline Bits Stochastic_Round_B(Bits bits, const Roundoff roundoff, const int len
     }
     else
     {
+#ifdef __CUDA_ARCH__
+        unsigned int samp = static_cast<unsigned int>(
+            lof_device_rand64(static_cast<uint64_t>(bits), 0x0B) & ((uint64_t{1} << len) - 1u));
+#else
         std::uniform_int_distribution<unsigned int> distribution(0, (1 << (len)) - 1);
-        int samp = distribution(mt);
+        unsigned int samp = distribution(mt);
+#endif
         Bits complement = (Bits{1} << (len)) - 1;
         Bits to_add = static_cast<Bits>(samp & complement) + 1;
         const Bits lower = bits & ((Bits{1} << roundoff) - 1);
@@ -644,11 +756,13 @@ inline Bits Stochastic_Round_B(Bits bits, const Roundoff roundoff, const int len
 // ----- Stochastic_Round_C ---------------------------------------------------
 
 template <typename Bits, typename Roundoff>
-inline Bits Stochastic_Round_C(Bits bits, const Roundoff roundoff, const int len = 0)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits Stochastic_Round_C(Bits bits, const Roundoff roundoff, const int len = 0)
 {
     using lane_t = pod_type_t<Bits>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+#ifndef __CUDA_ARCH__
     std::mt19937 mt(lof_seed);
+#endif
 
     if constexpr (is_xsimd_batch<Bits>::value)
     {
@@ -683,8 +797,13 @@ inline Bits Stochastic_Round_C(Bits bits, const Roundoff roundoff, const int len
     }
     else
     {
+#ifdef __CUDA_ARCH__
+        unsigned int samp = static_cast<unsigned int>(
+            lof_device_rand64(static_cast<uint64_t>(bits), 0x0C) & ((uint64_t{1} << len) - 1u));
+#else
         std::uniform_int_distribution<unsigned int> distribution(0, (1 << (len)) - 1);
-        int samp = distribution(mt);
+        unsigned int samp = distribution(mt);
+#endif
         const unsigned int coin_bit = samp & 1;
         unsigned int remaining_bits = samp >> 1;
         Bits bottom_bits = bits & ((Bits{1} << roundoff) - 1);
@@ -693,16 +812,65 @@ inline Bits Stochastic_Round_C(Bits bits, const Roundoff roundoff, const int len
     }
 }
 
+// ----- Stochastic_Round_D ---------------------------------------------------
+// Coin-flip variant (paper Mode D): draw a len-bit random string R, flip a
+// fair coin c in {0,1}, and add (R + c) at the rounding point, then truncate.
+// Averaging over the coin gives Pr[up] = 0.5*( floor(q*xf)/q + ceil(q*xf)/q )
+// with q = 2^len (Table II). Same add-then-truncate mechanism as Mode A.
+template <typename Bits, typename Roundoff>
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits Stochastic_Round_D(Bits bits, Roundoff roundoff, const int len = 0)
+{
+    using lane_t = pod_type_t<Bits>;
+    constexpr std::size_t lanes = num_lanes_v<Bits>;
+
+    if (len <= 0) return bits;
+
+#ifdef __CUDA_ARCH__
+    const uint64_t maxv = (uint64_t{1} << unsigned(len)) - 1u;
+    const uint64_t rnd  = lof_device_rand64(static_cast<uint64_t>(bits), 0x0D);
+    // low `len` bits -> R; the next bit -> independent fair coin.
+    const Bits to_add = static_cast<Bits>((rnd & maxv) + ((rnd >> len) & 1u));
+    return bits + (to_add << (roundoff - len));
+#else
+    std::mt19937 mt(lof_seed);
+    const unsigned maxv = (1u << unsigned(len)) - 1u;
+    std::uniform_int_distribution<unsigned> dist(0u, maxv);
+    std::uniform_int_distribution<int>      coin(0, 1);
+
+  #ifndef USE_CUDA
+    std::array<lane_t, lanes> samp{};
+    for (std::size_t i = 0; i < lanes; ++i)
+        samp[i] = static_cast<lane_t>(dist(mt) + static_cast<unsigned>(coin(mt)));
+
+    Bits to_add;
+    if constexpr (lanes == 1)
+        to_add = Bits{samp[0]};
+    else
+        to_add = xsimd::load_unaligned(samp.data());
+
+    if constexpr (is_xsimd_batch<Roundoff>::value)
+        return bits + xsimd::bitwise_lshift(to_add, (roundoff - lane_t(len)));
+    else
+        return bits + (to_add << (roundoff - len));
+  #else
+    Bits to_add = static_cast<Bits>(dist(mt) + static_cast<unsigned>(coin(mt)));
+    return bits + (to_add << (roundoff - len));
+  #endif
+#endif
+}
+
 // ----- True_Stochastic_Round ------------------------------------------------
 // Rounds up with probability  tail / 2^roundoff.
 // roundoff is always a uniform scalar; Bits may be scalar or batch.
 template <typename Bits, typename Roundoff>
-inline Bits True_Stochastic_Round(Bits bits, const Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits True_Stochastic_Round(Bits bits, const Roundoff roundoff)
 {
     using lane_t = pod_type_t<Bits>;
     using roundoff_lane_t = pod_type_t<Roundoff>;
     constexpr std::size_t lanes = num_lanes_v<Bits>;
+#ifndef __CUDA_ARCH__
     std::mt19937 mt(lof_seed);
+#endif
 
     if constexpr (is_xsimd_batch<Bits>::value)
     {
@@ -751,8 +919,14 @@ inline Bits True_Stochastic_Round(Bits bits, const Roundoff roundoff)
         const Bits tail = bits & mask;
         const Bits truncated = bits & ~mask;
         const double prob = static_cast<double>(tail) / static_cast<double>(Bits{1} << roundoff);
+#ifdef __CUDA_ARCH__
+        // Uniform double in [0,1): top 53 bits of the hash over 2^53.
+        const double samp = static_cast<double>(lof_device_rand64(static_cast<uint64_t>(bits), 0x71) >> 11)
+                            * (1.0 / 9007199254740992.0);
+#else
         std::uniform_real_distribution<double> distribution(0.0, 1.0);
         const double samp = distribution(mt);
+#endif
 
         if (samp < prob)
         {
@@ -770,7 +944,7 @@ inline Bits True_Stochastic_Round(Bits bits, const Roundoff roundoff)
 // ----- RoundBitsTowardsZero -------------------------------------------------
 
 template <typename Bits, typename Roundoff>
-inline Bits RoundBitsTowardsZero(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsTowardsZero(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -798,7 +972,7 @@ inline Bits RoundBitsTowardsZero(Bits bits, Roundoff roundoff)
 // midpoint exactly (the tie case), giving ties-towards-zero behaviour.
 
 template <typename Bits, typename Roundoff>
-inline Bits RoundTiedBitsTowardsZero(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundTiedBitsTowardsZero(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -824,31 +998,37 @@ inline Bits RoundTiedBitsTowardsZero(Bits bits, Roundoff roundoff)
 // ----- RoundBitsAwayFromZero ------------------------------------------------
 
 template <typename Bits, typename Roundoff>
-inline Bits RoundBitsAwayFromZero(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsAwayFromZero(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
     if constexpr (is_xsimd_batch<Roundoff>::value)
     {
         #ifndef USE_CUDA
-        auto mask = ~(xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1));
-        Bits truncated = bits & mask;
-        Bits inc = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff));
-        return truncated + xsimd::select(bits > Bits(0), inc, Bits(0));
+        // Round the magnitude away from zero, but ONLY when the discarded tail
+        // is nonzero — an exactly-representable value must round-trip exactly.
+        Bits low_mask  = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1);
+        Bits truncated = bits & ~low_mask;
+        Bits tail      = bits & low_mask;
+        Bits inc       = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff));
+        return truncated + xsimd::select(tail != Bits(0), inc, Bits(0));
         #endif
     }
     else
     {
-        auto mask = ~((Bits{1} << roundoff) - 1);
-        Bits truncated = bits & mask;
-        return truncated + (bits > 0 ? Bits{1} << roundoff : 0);
+        // Increment by one ULP only when there is a nonzero remainder; otherwise
+        // the input is exactly representable and must be returned unchanged.
+        Bits low_mask  = (Bits{1} << roundoff) - 1;
+        Bits truncated = bits & ~low_mask;
+        Bits tail      = bits & low_mask;
+        return truncated + (tail != 0 ? (Bits{1} << roundoff) : Bits{0});
     }
 }
 
 // ----- RoundBitsToNearestOdd ------------------------------------------------
 
 template <typename Bits, typename Roundoff>
-constexpr inline Bits RoundBitsToNearestOdd(Bits bits, Roundoff roundoff)
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundBitsToNearestOdd(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -879,20 +1059,28 @@ constexpr inline Bits RoundBitsToNearestOdd(Bits bits, Roundoff roundoff)
 // Negative lanes: truncate only.
 
 template <typename Bits, typename Roundoff, typename BoolT>
-inline Bits RoundUp(Bits bits, Roundoff roundoff, BoolT positive)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundUp(Bits bits, Roundoff roundoff, BoolT positive)
 {
     using value_type = pod_type_t<Bits>;
 
     if constexpr (is_xsimd_batch<Roundoff>::value)
     {
         #ifndef USE_CUDA
-        // positive is expected to be xsimd::batch_bool<value_type>
+        // `positive` may be a scalar bool (broadcast to every lane) or a
+        // per-lane xsimd::batch_bool — the latter lets a caller round each
+        // element according to its own sign.
         Bits low_mask  = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff)) - Bits(1);
         Bits high_mask = ~low_mask;
         Bits truncated = bits & high_mask;
 
         auto has_remainder = (bits & low_mask) != Bits(0);
-        auto do_inc = positive & has_remainder;
+        auto pos_mask = [&] {
+            if constexpr (std::is_same_v<BoolT, bool>)
+                return xsimd::batch_bool<value_type>(positive);
+            else
+                return positive;
+        }();
+        auto do_inc = pos_mask & has_remainder;
 
         Bits inc = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff));
         return truncated + xsimd::select(do_inc, inc, Bits(0));
@@ -911,7 +1099,7 @@ inline Bits RoundUp(Bits bits, Roundoff roundoff, BoolT positive)
 
 // Convenience overload: default positive = true
 template <typename Bits, typename Roundoff>
-inline Bits RoundUp(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundUp(Bits bits, Roundoff roundoff)
 {
     #ifndef USE_CUDA
     if constexpr (is_xsimd_batch<Bits>::value)
@@ -931,7 +1119,7 @@ inline Bits RoundUp(Bits bits, Roundoff roundoff)
 // Negative lanes: truncate + round up (increase magnitude) if remainder.
 
 template <typename Bits, typename Roundoff, typename BoolT>
-inline Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -943,7 +1131,14 @@ inline Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
         Bits truncated = bits & high_mask;
 
         auto has_remainder = (bits & low_mask) != Bits(0);
-        auto is_negative   = !positive;
+        // `positive` may be a scalar bool (broadcast) or a per-lane batch_bool.
+        auto pos_mask = [&] {
+            if constexpr (std::is_same_v<BoolT, bool>)
+                return xsimd::batch_bool<value_type>(positive);
+            else
+                return positive;
+        }();
+        auto is_negative   = !pos_mask;
         auto do_inc = is_negative & has_remainder;
 
         Bits inc = xs::bitwise_lshift(Bits(1), xs::batch_cast<value_type>(roundoff));
@@ -952,15 +1147,15 @@ inline Bits RoundDown(Bits bits, Roundoff roundoff, BoolT positive)
     }
     else
     {
-        auto mask = ~((Bits{1} << roundoff) - 1);
-        Bits truncated = bits & mask;
-        return truncated + (!positive ? (bits > 0 ? Bits{1} << roundoff : 0) : 0);
+        const Bits low_mask = (Bits{1} << roundoff) - 1;
+        Bits truncated = bits & ~low_mask;
+        return truncated + ((!positive && (bits & low_mask) != 0) ? Bits{1} << roundoff : 0);
     }
 }
 
 // Convenience overload: default positive = true
 template <typename Bits, typename Roundoff>
-inline Bits RoundDown(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundDown(Bits bits, Roundoff roundoff)
 {
     #ifndef USE_CUDA
     if constexpr (is_xsimd_batch<Bits>::value)
@@ -979,7 +1174,7 @@ inline Bits RoundDown(Bits bits, Roundoff roundoff)
 // Round to nearest; break ties away from zero (if R==1, round up).
 
 template <typename Bits, typename Roundoff>
-inline Bits RoundTiesToAway(Bits bits, Roundoff roundoff)
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundTiesToAway(Bits bits, Roundoff roundoff)
 {
     using value_type = pod_type_t<Bits>;
 
@@ -1034,10 +1229,11 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
 }
         //#TODO: add sign to list of args for roundUp and RoundDown
         template <typename Bits>
-        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundMantissa(Bits bits, const int roundoff, const Rounding_Mode rm, const int len = 0)
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Bits RoundMantissa(Bits bits, const int roundoff, const ProjSpec ps, const bool pos = false)
         {
+            const Rounding_Mode rm = ps.rounding_mode;
+            const int len = ps.stoch_length;
 
-    
             switch (rm)
             {
             case Rounding_Mode::RoundToNearestEven:
@@ -1049,9 +1245,9 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             case Rounding_Mode::RoundAwayFromZero:
                 return RoundBitsAwayFromZero(bits, roundoff);
             case Rounding_Mode::RoundUp:
-                return RoundUp(bits, roundoff);
+                return RoundUp(bits, roundoff, pos);
             case Rounding_Mode::RoundDown:
-                return RoundDown(bits, roundoff);
+                return RoundDown(bits, roundoff, pos);
             case Rounding_Mode::RoundTiesToAway:
                 return RoundTiesToAway(bits, roundoff);
             case Rounding_Mode::StochasticRoundingA:
@@ -1060,17 +1256,30 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
                 return Stochastic_Round_B(bits, roundoff, len);
             case Rounding_Mode::StochasticRoundingC:
                 return Stochastic_Round_C(bits, roundoff, len);
+            case Rounding_Mode::StochasticRoundingD:
+                return Stochastic_Round_D(bits, roundoff, len);
             case Rounding_Mode::True_StochasticRounding:
                 return True_Stochastic_Round(bits, roundoff);
+            case Rounding_Mode::ProbabilisticRounding:
+                return Probabilistic_Round(bits, roundoff);
+            case Rounding_Mode::RoundToOdd:
+                return RoundToOdd(bits, roundoff);
+            case Rounding_Mode::RoundTiesTowardsZero:
+                return RoundTiedBitsTowardsZero(bits, roundoff);
             default:
                 return bits; // no rounding
             }
         }
 
         #ifndef USE_CUDA
-        template <typename Bits, typename Roundoff,  class arch = xsimd::default_arch>
-        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE xs::batch<Bits, arch> RoundMantissa(xs::batch<Bits, arch> bits, const xs::batch<Roundoff, arch> roundoff, const Rounding_Mode rm, const int len = 0)
+        // `Pos` defaults to bool (broadcast to all lanes) but may also be an
+        // xsimd::batch_bool so callers can supply a per-element sign for the
+        // directional RoundUp/RoundDown modes.
+        template <typename Bits, typename Roundoff,  class arch = xsimd::default_arch, typename Pos = bool>
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE xs::batch<Bits, arch> RoundMantissa(xs::batch<Bits, arch> bits, const xs::batch<Roundoff, arch> roundoff, const ProjSpec ps, const Pos pos = true)
         {
+            const Rounding_Mode rm = ps.rounding_mode;
+            const int len = ps.stoch_length;
             switch (rm)
             {
             case Rounding_Mode::RoundToNearestEven:
@@ -1082,9 +1291,9 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             case Rounding_Mode::RoundAwayFromZero:
                 return RoundBitsAwayFromZero(bits, roundoff);
             case Rounding_Mode::RoundUp:
-                return RoundUp(bits, roundoff);
+                return RoundUp(bits, roundoff, pos);
             case Rounding_Mode::RoundDown:
-                return RoundDown(bits, roundoff);
+                return RoundDown(bits, roundoff, pos);
             case Rounding_Mode::RoundTiesToAway:
                 return RoundTiesToAway(bits, roundoff);
             case Rounding_Mode::StochasticRoundingA:
@@ -1093,8 +1302,16 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
                 return Stochastic_Round_B(bits, roundoff, len);
             case Rounding_Mode::StochasticRoundingC:
                 return Stochastic_Round_C(bits, roundoff, len);
+            case Rounding_Mode::StochasticRoundingD:
+                return Stochastic_Round_D(bits, roundoff, len);
             case Rounding_Mode::True_StochasticRounding:
                 return True_Stochastic_Round(bits, roundoff);
+            case Rounding_Mode::ProbabilisticRounding:
+                return Probabilistic_Round(bits, roundoff);
+            case Rounding_Mode::RoundToOdd:
+                return RoundToOdd(bits, roundoff);
+            case Rounding_Mode::RoundTiesTowardsZero:
+                return RoundTiedBitsTowardsZero(bits, roundoff);
              default:
                 return bits; // no rounding
             }
@@ -1193,17 +1410,17 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
 
         struct Trivial_NaNChecker
         {
-            bool operator()(uint32_t)
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t)
             {
                 return false;
             }
 
-            uint32_t qNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const
             {
                 return 0;
             }
 
-            uint32_t sNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const
             {
                 return 0;
             }
@@ -1211,17 +1428,17 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
 
         struct Trivial_InfChecker
         {
-            bool operator()(uint32_t) const
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t) const
             {
                 return false;
             }
 
-            uint32_t minNegInf() const
+            LOFLOAT_HOST_DEVICE uint32_t minNegInf() const
             {
                 return 0;
             }
 
-            uint32_t minPosInf() const
+            LOFLOAT_HOST_DEVICE uint32_t minPosInf() const
             {
                 return 0;
             }
@@ -1230,17 +1447,17 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         // define FloatingPointParams for float8e4m3_fn
         struct OCP_F8E4M3_NaNChecker
         {
-            bool operator()(uint32_t bits) const
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const
             {
                 return bits == 0x000000FF;
             }
 
-            uint32_t qNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const
             {
                 return 0x000000FF;
             } // typical QNaN
 
-            uint32_t sNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const
             {
                 return 0x000000FF;
             } // some SNaN pattern
@@ -1248,17 +1465,17 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
 
         struct OCP_F8E4M3_InfChecker
         {
-            bool operator()(uint32_t bits) const
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const
             {
                 return false;
             }
 
-            uint32_t minNegInf() const
+            LOFLOAT_HOST_DEVICE uint32_t minNegInf() const
             {
                 return 0x0;
             } // -∞ => 0xFF800000
 
-            uint32_t minPosInf() const
+            LOFLOAT_HOST_DEVICE uint32_t minPosInf() const
             {
                 return 0x0;
             } // +∞ => 0x7F800000
@@ -1267,17 +1484,17 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         template <Signedness signedness = Signedness::Signed>
         struct IEEE_F8_NaNChecker
         {
-            bool operator()(uint32_t bits) const
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const
             {
                 return bits == (signedness == Signedness::Signed ? 0x00000080 : 0x000000FF);
             }
 
-            uint32_t qNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const
             {
                 return signedness == Signedness::Signed ? 0x00000080 : 0x000000FF;
             } // typical QNaN
 
-            uint32_t sNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const
             {
                 return signedness == Signedness::Signed ? 0x00000080 : 0x000000FF;
             } // some SNaN pattern
@@ -1285,17 +1502,17 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
 
         struct IEEE_F8_InfChecker
         {
-            bool operator()(uint32_t bits) const
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const
             {
                 return bits == 0x0000007F || bits == 0x000000FF;
             }
 
-            uint32_t minNegInf() const
+            LOFLOAT_HOST_DEVICE uint32_t minNegInf() const
             {
                 return 0xFF;
             } // -∞ => 0xFF800000
 
-            uint32_t minPosInf() const
+            LOFLOAT_HOST_DEVICE uint32_t minPosInf() const
             {
                 return 0x7F;
             } // +∞ => 0x7F800000
@@ -1341,17 +1558,17 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         // NaNChecker for float8e5m2
         struct OCP_F8E5M2_NaNChecker
         {
-            bool operator()(uint32_t bits)
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits)
             {
                 return bits == 0x000000FF || bits == 0x000000FE || bits == 0x000000FD;
             }
 
-            uint32_t qNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const
             {
                 return 0x000000FF;
             }
 
-            uint32_t sNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const
             {
                 return 0x000000FF;
             }
@@ -1461,7 +1678,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         template <int k, Signedness is_signed>
         struct P_3109_NaNChecker
         {
-            constexpr bool operator()(uint32_t bits) const
+            LOFLOAT_HOST_DEVICE constexpr bool operator()(uint32_t bits) const
             {
                 return bits == (is_signed == Signedness::Signed ? (1 << (k - 1)) : (1 << k) - 1);
             }
@@ -1481,12 +1698,12 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             }
             #endif
 
-            uint32_t qNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const
             {
                 return is_signed == Signedness::Signed ? (1 << (k - 1)) : (1 << k) - 1;
             } // typical QNaN
 
-            uint32_t sNanBitPattern() const
+            LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const
             {
                 return is_signed == Signedness::Signed ? (1 << (k - 1)) : (1 << k) - 1;
             } 
@@ -1495,7 +1712,7 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         template <int k, Signedness is_signed, Inf_Behaviors has_inf>
         struct P_3109_InfChecker
         {
-            constexpr bool operator()(uint32_t bits) const
+            LOFLOAT_HOST_DEVICE constexpr bool operator()(uint32_t bits) const
             {
                 if constexpr (has_inf != Inf_Behaviors::Saturating)
                 {
@@ -1528,12 +1745,12 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             }
             #endif
 
-            uint32_t minNegInf() const
+            LOFLOAT_HOST_DEVICE uint32_t minNegInf() const
             {
                 return ((is_signed == Signedness::Signed) ? ((1 << (k)) - 1) : 0);
             } // -∞ => 0xFF800000
 
-            uint32_t minPosInf() const
+            LOFLOAT_HOST_DEVICE uint32_t minPosInf() const
             {
                 return (is_signed == Signedness::Signed) ? (1 << (k - 1)) - 1 : (1 << (k)) - 2;
             } // +∞ => 0x7F800000
@@ -1551,6 +1768,65 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
             P_3109_InfChecker<k, is_signed, has_inf>(), // Inf Functor
             P_3109_NaNChecker<k, is_signed>()           // NaN Functor
         );
+
+        // ------------------------------------------------------------------
+        // OCP MX shared-scale format E8M0: 8-bit, unsigned, 8 exponent bits,
+        // 0 mantissa bits, bias 127, no Inf, no zero. The all-ones code 0xFF
+        // is NaN; X in [0,254] encodes 2^(X-127).
+        // ------------------------------------------------------------------
+        struct OCP_E8M0_NaNChecker
+        {
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t bits) const { return bits == 0xFF; }
+            LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const { return 0xFF; }
+            LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const { return 0xFF; }
+        };
+        struct OCP_E8M0_InfChecker // no infinities (Saturating)
+        {
+            LOFLOAT_HOST_DEVICE bool operator()(uint32_t) const { return false; }
+            LOFLOAT_HOST_DEVICE uint32_t minNegInf() const { return 0; }
+            LOFLOAT_HOST_DEVICE uint32_t minPosInf() const { return 0; }
+        };
+        constexpr FloatingPointParams param_ocp_e8m0(
+            8, 0, 127, Inf_Behaviors::Saturating, NaN_Behaviors::_3109, Signedness::Unsigned,
+            OCP_E8M0_InfChecker(), OCP_E8M0_NaNChecker());
+
+        // ------------------------------------------------------------------
+        // Tesla Dojo CFloat8/CFloat16: configurable float with a PROGRAMMABLE
+        // (template) exponent bias and NO Inf/NaN (every encoding is finite).
+        // Dedicated always-false checkers — do NOT reuse the P3109 checkers,
+        // which reserve encodings for NaN/Inf.
+        // ------------------------------------------------------------------
+        struct DojoInfChecker
+        {
+            LOFLOAT_HOST_DEVICE constexpr bool operator()(uint32_t) const { return false; } // no infinities, ever
+            LOFLOAT_HOST_DEVICE uint32_t minNegInf() const { return 0; }
+            LOFLOAT_HOST_DEVICE uint32_t minPosInf() const { return 0; }
+#ifndef USE_CUDA // SIMD path (mirrors P_3109_InfChecker::sim_check) — all-false
+            template <typename Int, class Arch>
+            inline xsimd::batch_bool<Int, Arch> sim_check(const xsimd::batch<Int, Arch>&) const {
+                return xsimd::batch_bool<Int, Arch>(false);
+            }
+#endif
+        };
+        struct DojoNaNChecker
+        {
+            LOFLOAT_HOST_DEVICE constexpr bool operator()(uint32_t) const { return false; } // no NaNs, ever
+            LOFLOAT_HOST_DEVICE uint32_t qNanBitPattern() const { return 0; }
+            LOFLOAT_HOST_DEVICE uint32_t sNanBitPattern() const { return 0; }
+#ifndef USE_CUDA
+            template <typename Int, class Arch>
+            inline xsimd::batch_bool<Int, Arch> sim_check(const xsimd::batch<Int, Arch>&) const {
+                return xsimd::batch_bool<Int, Arch>(false);
+            }
+#endif
+        };
+        // P3109-shaped, but bias is an explicit template parameter and the
+        // always-false checkers are used (p = mantissa+1).
+        template <int k, int p, int bias, Signedness is_signed = Signedness::Signed>
+        constexpr FloatingPointParams param_dojo_cfloat(
+            k, p - 1, bias,
+            Inf_Behaviors::Saturating, NaN_Behaviors::_3109, is_signed,
+            DojoInfChecker(), DojoNaNChecker());
 
         // ------------------------
         // Bit-pattern constants
@@ -1595,14 +1871,14 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         {
             using bits_t = float_bits::utype;
 
-            constexpr bool operator()(bits_t bits) const
+            LOFLOAT_HOST_DEVICE constexpr bool operator()(bits_t bits) const
             {
                 return ((bits & float_bits::exp) == float_bits::exp) &&
                     ((bits & float_bits::frac) != 0u);
             }
 
-            static constexpr bits_t qnan() { return float_bits::qnan; }
-            static constexpr bits_t snan() { return float_bits::snan; }
+            LOFLOAT_HOST_DEVICE static constexpr bits_t qnan() { return float_bits::qnan; }
+            LOFLOAT_HOST_DEVICE static constexpr bits_t snan() { return float_bits::snan; }
 
             #ifndef USE_CUDA
             template <class Arch>
@@ -1622,14 +1898,14 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         {
             using bits_t = double_bits::utype;
 
-            constexpr bool operator()(bits_t bits) const
+            LOFLOAT_HOST_DEVICE constexpr bool operator()(bits_t bits) const
             {
                 return ((bits & double_bits::exp) == double_bits::exp) &&
                     ((bits & double_bits::frac) != 0ull);
             }
 
-            static constexpr bits_t qnan() { return double_bits::qnan; }
-            static constexpr bits_t snan() { return double_bits::snan; }
+            LOFLOAT_HOST_DEVICE static constexpr bits_t qnan() { return double_bits::qnan; }
+            LOFLOAT_HOST_DEVICE static constexpr bits_t snan() { return double_bits::snan; }
 
             #ifndef USE_CUDA
             template <class Arch>
@@ -1654,14 +1930,14 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         {
             using bits_t = float_bits::utype;
 
-            constexpr bool operator()(bits_t bits) const
+            LOFLOAT_HOST_DEVICE constexpr bool operator()(bits_t bits) const
             {
                 return ((bits & float_bits::exp) == float_bits::exp) &&
                     ((bits & float_bits::frac) == 0u);
             }
 
-            static constexpr bits_t posinf() { return float_bits::pos_inf; }
-            static constexpr bits_t neginf() { return float_bits::neg_inf; }
+            LOFLOAT_HOST_DEVICE static constexpr bits_t posinf() { return float_bits::pos_inf; }
+            LOFLOAT_HOST_DEVICE static constexpr bits_t neginf() { return float_bits::neg_inf; }
 
             #ifndef USE_CUDA
             template <class Arch>
@@ -1681,14 +1957,14 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
         {
             using bits_t = double_bits::utype;
 
-            constexpr bool operator()(bits_t bits) const
+            LOFLOAT_HOST_DEVICE constexpr bool operator()(bits_t bits) const
             {
                 return ((bits & double_bits::exp) == double_bits::exp) &&
                     ((bits & double_bits::frac) == 0ull);
             }
 
-            static constexpr bits_t posinf() { return double_bits::pos_inf; }
-            static constexpr bits_t neginf() { return double_bits::neg_inf; }
+            LOFLOAT_HOST_DEVICE static constexpr bits_t posinf() { return double_bits::pos_inf; }
+            LOFLOAT_HOST_DEVICE static constexpr bits_t neginf() { return double_bits::neg_inf; }
 
             #ifndef USE_CUDA
             template <class Arch>
@@ -1735,6 +2011,31 @@ inline Bits RoundToOdd(Bits bits, Roundoff roundoff)
 
     template <int k, int p, lo_float::Signedness is_signed = lo_float::Signedness::Signed, lo_float::Inf_Behaviors has_inf = lo_float::Inf_Behaviors::Saturating>
     using P_3109_float = lo_float_internal::Templated_Float<lo_float_internal::param_float_p_3109<k, p, is_signed, has_inf>>;
+
+    // ----------------------------------------------------------------------
+    // Public format-preset aliases (F4)
+    // ----------------------------------------------------------------------
+    // IEEE / ML presets (reuse existing *PrecisionParams)
+    using half     = lo_float_internal::Templated_Float<halfPrecisionParams>;
+    using bfloat16 = lo_float_internal::Templated_Float<bfloatPrecisionParams>;
+    using tf32     = lo_float_internal::Templated_Float<tf32PrecisionParams>;
+    using single   = lo_float_internal::Templated_Float<singlePrecisionParams>;
+    using float16  = half;   // bit-width-explicit synonyms
+    using float32  = single;
+
+    // OCP MX element presets
+    using ocp_e4m3 = lo_float_internal::Templated_Float<lo_float_internal::param_float8_e4m3fn>;
+    using ocp_e5m2 = lo_float_internal::Templated_Float<lo_float_internal::param_float8_e5m2>;
+    using ocp_e3m2 = lo_float_internal::Templated_Float<lo_float_internal::param_float6_e3m2>;
+    using ocp_e2m1 = lo_float_internal::Templated_Float<lo_float_internal::param_float4_e2m1>;
+    using ocp_e8m0 = lo_float_internal::Templated_Float<lo_float_internal::param_ocp_e8m0>;
+
+    // Tesla Dojo configurable presets (programmable exponent bias; no Inf/NaN).
+    // Default bias = IEEE-style (1<<(exp_bits-1))-1; p = mantissa+1.
+    template <int bias = 7>   using dojo_cfloat8_1_4_3  = lo_float_internal::Templated_Float<lo_float_internal::param_dojo_cfloat<8, 4, bias>>;
+    template <int bias = 15>  using dojo_cfloat8_1_5_2  = lo_float_internal::Templated_Float<lo_float_internal::param_dojo_cfloat<8, 3, bias>>;
+    template <int bias = 127> using dojo_cfloat16_1_8_7 = lo_float_internal::Templated_Float<lo_float_internal::param_dojo_cfloat<16, 8, bias>>;
+    template <int bias = 31>  using dojo_cfloat16_1_6_9 = lo_float_internal::Templated_Float<lo_float_internal::param_dojo_cfloat<16, 10, bias>>;
 
     template <typename T>
     constexpr T ConstexprAbs(T x) { return x < T{0.0} ? -x : x; }
@@ -1970,6 +2271,38 @@ namespace lo_float
             return Fp.IsInf(a.rep()) && Fp.OV_behavior != Inf_Behaviors::Saturating;
         }
 
+#ifdef USE_CUDA
+        // nvcc cannot deduce the class-type NTTP `Fp` from a Templated_Float<Fp>
+        // argument, so the FloatingPointParams-templated abs/isnan/isinf overloads
+        // above are not viable candidates on the device. These plain-type (T)
+        // overloads ARE deducible by nvcc; they are SFINAE-constrained to the
+        // Templated_Float family via its static IsNaNFunctor member (so they never
+        // collide with the float/double/c10::Half/i_n overloads) and delegate to the
+        // type's own static members instead of a deduced Fp. Guarded by USE_CUDA so
+        // the host build keeps using the generic NTTP overloads unchanged.
+        template <class T, typename = decltype(T::IsNaNFunctor)>
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE T abs(const T &a)
+        {
+            if constexpr (get_signedness_v<T> == Signedness::Signed)
+                return T::FromRep(a.rep() & ((1 << (T::bitwidth - 1)) - 1));
+            return a;
+        }
+        template <class T, typename = decltype(T::IsNaNFunctor)>
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE bool isnan(const T &a)
+        {
+            // Reconstruct a stateless temporary instead of ODR-using the static
+            // constexpr IsNaNFunctor object (nvcc emits no device storage for it).
+            using Chk = std::remove_cv_t<std::remove_reference_t<decltype(T::IsNaNFunctor)>>;
+            return Chk{}(a.rep());
+        }
+        template <class T, typename = decltype(T::IsInfFunctor)>
+        LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE bool isinf(const T &a)
+        {
+            using Chk = std::remove_cv_t<std::remove_reference_t<decltype(T::IsInfFunctor)>>;
+            return Chk{}(a.rep()) && T::Overflow_behavior != Inf_Behaviors::Saturating;
+        }
+#endif
+
         #ifndef USE_CUDA
         template <bool OV_behavior,
         typename IsInf,
@@ -2204,14 +2537,14 @@ namespace lo_float
         template <typename Scalar>
         struct IdentityConversion
         {
-            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Scalar run(const Scalar &from, Rounding_Mode rm = Rounding_Mode::RoundAwayFromZero, int stoch_len = 0)
+            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Scalar run(const Scalar &from, ProjSpec ps = ProjSpec{})
             {
                 return from;
             }
 
             #ifndef USE_CUDA
             template <class arch = xsimd::default_arch>
-            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE void run(const Scalar* from, Scalar* to, int n, Rounding_Mode rm = Rounding_Mode::RoundAwayFromZero, int stoch_len = 0)
+            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE void run(const Scalar* from, Scalar* to, int n, ProjSpec ps = ProjSpec{})
             {
                 if (to != from) {
                     memcpy(to, from, n * sizeof(Scalar));
@@ -2241,6 +2574,12 @@ namespace lo_float
                                                           ? (BitsType{1} << (kExponentBits - 1)) - 1
                                                           : (BitsType{1} << kExponentBits) - 1;
             static constexpr BitsType kMantissaMask = (BitsType{1} << kMantissaBits) - 1;
+            // kExponentBias lives here (not only in the Traits<Templated_Float<Fp>>
+            // partial specialization) so it is still available when nvcc fails to
+            // match that specialization for a Templated_Float type and falls back to
+            // the primary Traits<Float> : TraitsBase<Float>. Uses the same get_*_v
+            // accessor machinery as the other fields above.
+            static constexpr int kExponentBias = get_bias_v<Float>;
         };
 
         template <int len, Signedness sign>
@@ -2351,6 +2690,20 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE float get_float(T val) {
     return static_cast<float>(val);
 }
 
+// Magnitude helper that is correct on BOTH host and device. An unqualified
+// abs(value) inside virtual_round() falls back to `int abs(int)` on the DEVICE
+// for native float/double (std::abs(float) is host-only there), truncating e.g.
+// 1.62f -> 1 and corrupting the exponent path so the result underflows to 0.
+// (A plain abs(float) overload here can't be used because lo_float_internal
+// already pulls in std::abs, which would make it ambiguous.) Use a uniquely
+// named helper instead.
+template <typename T>
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE T lof_abs(const T& v) {
+    if constexpr (std::is_same_v<T, float>)       return ::fabsf(v);
+    else if constexpr (std::is_same_v<T, double>) return ::fabs(v);
+    else                                          return abs(v);  // Templated_Float / c10::Half
+}
+
 #ifdef USE_CUDA
 LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE c10::Half abs(c10::Half val) {
     val.x &= 0x7FFF;  // clear sign bit
@@ -2360,23 +2713,30 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE c10::Half abs(c10::Half val) {
 
 
 template<typename From>
-LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, ProjSpec ps = ProjSpec{}) {
 
-   
+    [[maybe_unused]] const Rounding_Mode round_mode = ps.rounding_mode;
+    [[maybe_unused]] const int stoch_len = ps.stoch_length;
     using FromBits = typename Traits<From>::BitsType;
 static constexpr int kFromBits = Traits<From>::kBits;
 int kDigitShift = ToMantissaBits - Traits<From>::kMantissaBits;
 static constexpr int kFromMantissaBits = Traits<From>::kMantissaBits;
-
+     #ifdef USE_CUDA
+     const auto sign_bit = cuda::std::bit_cast<FromBits>(from) & (FromBits{1} << (kFromBits - 1));
+     #else
+     const auto sign_bit = std::bit_cast<FromBits>(from) & (FromBits{1} << (kFromBits - 1));
+     #endif
 
 #ifdef USE_CUDA
-    FromBits from_bits = cuda::std::bit_cast<FromBits>(abs(from));
-#else 
-    FromBits from_bits = std::bit_cast<FromBits>(abs(from));
+    FromBits from_bits = cuda::std::bit_cast<FromBits>(from)
+                         & ~(FromBits{1} << (kFromBits - 1));
+#else
+    FromBits from_bits = std::bit_cast<FromBits>(from)
+                         & ~(FromBits{1} << (kFromBits - 1));
 #endif
 // {
-     from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
-     const auto sign_bit = cuda::std::bit_cast<FromBits>(from) & (FromBits{1} << (kFromBits - 1));
+     from_bits = RoundMantissa(from_bits, -kDigitShift, ps, sign_bit == 0);
+
     
      from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
 // }
@@ -2397,8 +2757,10 @@ return std::bit_cast<From>(from_bits | sign_bit);
 
 #ifndef USE_CUDA
 template<typename From, class arch = xs::default_arch>
-LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, int ToMantissaBits, ProjSpec ps = ProjSpec{}) {
 
+    [[maybe_unused]] const Rounding_Mode round_mode = ps.rounding_mode;
+    [[maybe_unused]] const int stoch_len = ps.stoch_length;
     using FromBits = typename Traits<From>::BitsType;
     using FromBitsSIMD = xs::batch<FromBits, arch>;
     using FromSIMD = xs::batch<From, arch>;
@@ -2430,7 +2792,7 @@ LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results,
         FromBitsSIMD from_bits = xs::bit_cast<FromBitsSIMD>(abs_from);
         
         {
-            from_bits = RoundMantissa(from_bits, FromBitsSIMD(-kDigitShift), round_mode, stoch_len);
+            from_bits = RoundMantissa(from_bits, FromBitsSIMD(-kDigitShift), ps);
             FromBitsSIMD mask = ~((FromBitsSIMD(FromBits{1}) << (-kDigitShift)) - FromBitsSIMD(FromBits{1}));
             from_bits = from_bits & mask;
         }
@@ -2445,7 +2807,7 @@ LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results,
         auto from = values[i];
         FromBits from_bits = bit_cast<FromBits>(abs(from));
         {
-            from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
+            from_bits = RoundMantissa(from_bits, -kDigitShift, ps);
             from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
         }
         results[i] = bit_cast<From>(from_bits);
@@ -2455,18 +2817,33 @@ LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results,
 #endif
 
 
-LOFLOAT_DEVICE LOFLOAT_FORCEINLINE bool isnan(float value) {
+// HOST_DEVICE (not DEVICE-only): the FloatingPointParams virtual_round calls
+// isnan, and it must work on the host side of a CUDA (nvcc) translation unit too
+// — otherwise nvcc compiles a host stub that calls exit() at runtime.
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE bool isnan(float value) {
     return ::isnan(value);
 }
-LOFLOAT_DEVICE LOFLOAT_FORCEINLINE bool isnan(double value) {
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE bool isnan(double value) {
     return ::isnan(value);
+}
+// Native-float isinf overloads paralleling isnan above: lets the conversion
+// code call unqualified isinf()/isnan() and resolve to a device-safe overload
+// for every From type (native float/double here, Templated_Float at isinf/isnan
+// above) instead of std::isinf, which has no overload for the custom types.
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE bool isinf(float value) {
+    return ::isinf(value);
+}
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE bool isinf(double value) {
+    return ::isinf(value);
 }
 
 
 
 
 template<typename From_p, typename ToInf, typename ToNaN>
-LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From_p virtual_round(From_p& value, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From_p virtual_round(From_p& value, FloatingPointParams<ToInf, ToNaN> ToFp, ProjSpec ps = ProjSpec{}) {
+    [[maybe_unused]] const Rounding_Mode round_mode = ps.rounding_mode;
+    [[maybe_unused]] const int stoch_len = ps.stoch_length;
     //need this for const correctness
     using From = std::remove_cv_t<From_p>;
     using FromBits = typename Traits<From>::BitsType;
@@ -2483,22 +2860,78 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From_p virtual_round(From_p& value, Floa
     const int ToMin_exp = 1 - ToFp.bias;
     const float To_min_val = std::pow(2.0, ToMin_exp)*std::pow(2.0, -ToFp.mantissa_bits);
 
-    FromBits from_bits = bit_cast<FromBits>(abs(value));
+    // lof_abs (not abs): device-correct magnitude for native float/double; see note.
+    FromBits from_bits = bit_cast<FromBits>(lof_abs(value));
     int from_exp = (from_bits >> kFromMantissaBits) - kExponentBias;
 
 
-    
+
     if (isnan(value)) return std::numeric_limits<From>::quiet_NaN();
-    
-    if (get_float(abs(value)) < To_min_val) return from_double<From>(0.0); 
-    if (from_exp < ToMin_exp) kDigitShift += (from_exp - ToMin_exp);
-    
+
+    const float abs_val = get_float(lof_abs(value));
+    if (abs_val < To_min_val) {
+        // Below the smallest representable magnitude (denorm_min): the only
+        // representable outcomes are 0 and +/-denorm_min, chosen per the
+        // rounding mode (a blanket flush to 0 would round directed modes the
+        // wrong way -- e.g. RoundAwayFromZero of a tiny value must reach
+        // denorm_min, not 0). The mantissa path can't run here: -kDigitShift
+        // would exceed the source bit width. Mirrors the typed run() switch.
+        const bool pos = (sign_bit == 0);
+        bool to_min;                                    // true => +/-denorm_min
+        switch (ps.rounding_mode) {
+            case Rounding_Mode::RoundTowardsZero:  to_min = false; break;
+            // RoundToOdd (sticky): truncating to the grid gives 0 (even); a nonzero
+            // tail sets the LSB -> denorm_min (odd). So any nonzero tiny value reaches
+            // denorm_min, exactly like away-from-zero in this regime.
+            case Rounding_Mode::RoundToOdd:
+            case Rounding_Mode::RoundAwayFromZero: to_min = (abs_val > 0.0f); break;
+            case Rounding_Mode::RoundUp:           to_min =  pos && (abs_val > 0.0f); break;
+            case Rounding_Mode::RoundDown:         to_min = !pos && (abs_val > 0.0f); break;
+            case Rounding_Mode::RoundToNearestEven:
+            case Rounding_Mode::RoundToNearestOdd:
+            case Rounding_Mode::RoundTiesTowardsZero:
+            case Rounding_Mode::RoundTiesToAway: {
+                const float half = To_min_val * 0.5f;
+                if      (abs_val < half) to_min = false;
+                else if (abs_val > half) to_min = true;
+                // tie: RNE->0 (even); RoundTiesTowardsZero->0; others (RNO/TiesToAway)->denorm_min
+                else to_min = (ps.rounding_mode == Rounding_Mode::RoundToNearestOdd
+                            || ps.rounding_mode == Rounding_Mode::RoundTiesToAway);
+                break;
+            }
+            default: to_min = false; break;             // stochastic etc.: flush to 0
+        }
+        const FromBits mag_bits = to_min
+            ? bit_cast<FromBits>(from_double<From>((double)To_min_val))
+            : FromBits{0};
+        return bit_cast<From>(static_cast<FromBits>(mag_bits | sign_bit));
+    }
+    // Subnormal target range [denorm_min, min_normal): the grid is uniform with
+    // spacing denorm_min, so round in the TARGET domain. Make the source's
+    // implicit leading 1 explicit, then RoundMantissa keeps the TARGET-mantissa
+    // LSB. Rounding the raw source bits instead keys RNE/RNO tie-to-even/odd off
+    // the SOURCE exponent LSB, which picks the wrong neighbour when the tie
+    // straddles a power of two (e.g. 1.5*denorm_min). Mirrors the typed run().
+    if (from_exp < ToMin_exp) {
+        const int shift = -kDigitShift - (from_exp - ToMin_exp);   // bits to drop to reach the grid
+        FromBits sig = (from_bits & ((FromBits{1} << kFromMantissaBits) - 1))
+                       | (FromBits{1} << kFromMantissaBits);        // explicit leading 1
+        sig = RoundMantissa(sig, shift, ps, sign_bit == 0);
+        const FromBits k = static_cast<FromBits>(sig >> shift);     // integer multiple of denorm_min
+        const FromBits mag_bits = bit_cast<FromBits>(from_double<From>((double)k * (double)To_min_val));
+        return bit_cast<From>(static_cast<FromBits>(mag_bits | sign_bit));
+    }
+
     if (kDigitShift < 0)
     {
-        from_bits = RoundMantissa(from_bits, -kDigitShift, round_mode, stoch_len);
+        // pos (sign) is required for the directional modes RoundUp/RoundDown,
+        // which operate on the magnitude `from_bits`; without it a positive
+        // value is treated as negative and rounds the wrong way (matches the
+        // int-ToMantissaBits overload above, ~line 2503).
+        from_bits = RoundMantissa(from_bits, -kDigitShift, ps, sign_bit == 0);
         from_bits &= ~((FromBits{1} << (-kDigitShift)) - 1);
     }
- 
+
     from_exp = (from_bits >> kFromMantissaBits) - kExponentBias;
     if (from_exp > ToMax_exp) return ToFp.OV_behavior == Inf_Behaviors::Saturating ? value : std::numeric_limits<From>::infinity();
 
@@ -2507,7 +2940,9 @@ LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From_p virtual_round(From_p& value, Floa
 
 #ifndef USE_CUDA
 template<typename From, typename ToInf, typename ToNaN,  class arch = xs::default_arch>
-LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
+LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, FloatingPointParams<ToInf, ToNaN> ToFp, ProjSpec ps = ProjSpec{}) {
+   [[maybe_unused]] const Rounding_Mode round_mode = ps.rounding_mode;
+   [[maybe_unused]] const int stoch_len = ps.stoch_length;
    using FromBits = typename Traits<From>::BitsType;
 using FromBitsSIMD = xs::batch<FromBits, arch>;
 using FromSIMD = xs::batch<From, arch>;
@@ -2556,7 +2991,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
         result[u] = FromSIMD(From{0});
         result[u] = xs::select(is_nan, FromSIMD(std::numeric_limits<From>::quiet_NaN()), result[u]);
         
-        FromBitsSIMD processed_bits = RoundMantissa(from_bits, FromBitsSIMD(-kDigitShift), round_mode, stoch_len);
+        FromBitsSIMD processed_bits = RoundMantissa(from_bits, FromBitsSIMD(-kDigitShift), ps);
         processed_bits = processed_bits & mask;
         
         FromBitsSIMD new_exp = processed_bits >> kFromMantissaBits;
@@ -2619,8 +3054,11 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
 
             // set exception flags for overflow and underflow  here
             // current implementation cant deal with round ups near +zero and round downs near -0
-            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE To run(const From &from, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0)
+            static LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE To run(const From &from, ProjSpec ps = ProjSpec{})
             {
+                const Rounding_Mode round_mode = ps.rounding_mode;
+                const int stoch_len = ps.stoch_length;
+                const Saturation_Mode sat_mode = ps.saturation_mode;
                 // Shift bits to destination type, without sign bit.
 
                 const bool from_sign_bit = (get_signedness_v<From> == Signedness::Unsigned) ? false : bit_cast<FromBits>(from) >> (kFromBits - 1);
@@ -2629,8 +3067,10 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                 {
                     // set underflow flag
 
+                    // a negative value collapsing to 0 (or NaN) in an unsigned format
+                    // is treated as underflow here.
 #ifdef ENABLE_EXCEPT
-                    f_env.set_exception_flag(LF_exception_flags::Underflow);
+                    signal_if_754<get_NaN_Behavior_v<To>>(LF_exception_flags::Underflow);
 #endif
                     if (get_unsigned_behavior_v<To> == Unsigned_behavior::NegtoZero)
                     {
@@ -2650,7 +3090,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                         {
 // trapping NaN - call trap
 #ifdef ENABLE_EXCEPT
-                            f_env.set_exception_flag(LF_exception_flags::InvalidOperation);
+                            signal_if_754<get_NaN_Behavior_v<To>>(LF_exception_flags::InvalidOperation);
 #endif
                             return std::numeric_limits<To>::signaling_NaN();
                         }
@@ -2658,16 +3098,27 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                 }
 
                 const FromBits from_bits =
-                    bit_cast<FromBits>(abs(from));
+                    bit_cast<FromBits>(lof_abs(from));
 
                 // Special values, preserving sign.
 
-                if (std::isinf(from) && get_overflow_behavior_v<To> != Inf_Behaviors::Saturating)
+                // Infinite input. The Saturation_Mode (ps.saturation_mode) decides whether the
+                // infinity is preserved or clamped to the finite range:
+                //   OvfInf      -> propagate +/-inf when the target has infinity, else clamp to max.
+                //   SatPropagate-> propagate +/-inf when the target has infinity, else clamp to max.
+                //   SatFinite   -> always clamp to the finite max (no value is ever infinite).
+                if (isinf(from))
                 {
-                    return from_sign_bit ? -std::numeric_limits<To>::infinity()
-                                         : std::numeric_limits<To>::infinity();
+                    const bool to_has_inf = (get_overflow_behavior_v<To> != Inf_Behaviors::Saturating);
+                    if (sat_mode != Saturation_Mode::SatFinite && to_has_inf)
+                    {
+                        return from_sign_bit ? -std::numeric_limits<To>::infinity()
+                                             : std::numeric_limits<To>::infinity();
+                    }
+                    return from_sign_bit ? -std::numeric_limits<To>::max()
+                                         : std::numeric_limits<To>::max();
                 }
-                if (std::isnan(from))
+                if (isnan(from))
                 {
                     return std::numeric_limits<To>::quiet_NaN();
                 }
@@ -2720,7 +3171,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                         }
                         else
                         {
-                            bits = RoundMantissa(bits, -kDigitShift, round_mode, stoch_len);
+                            bits = RoundMantissa(bits, -kDigitShift, ps);
                             bits >>= -kDigitShift;
                         }
 
@@ -2762,7 +3213,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                             // otherwise the lower precision bits may already be lost.  There is
                             // an edge-case where rounding to a normalized value would normally
                             // round down, but for a subnormal, we need to round up.
-                            rounded_from_bits = RoundMantissa(rounded_from_bits, exponent_shift, round_mode, stoch_len);
+                            rounded_from_bits = RoundMantissa(rounded_from_bits, exponent_shift, ps);
 
                             bits = (rounded_from_bits >> exponent_shift);
                         }
@@ -2772,6 +3223,10 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                             unsigned long long widened_bits = (unsigned long long)(rounded_from_bits);
                             switch (round_mode)
                             {
+                                // RoundToOdd (sticky): a nonzero significand below the
+                                // rounding point sets the LSB -> denorm_min, same as
+                                // away-from-zero in this deep-underflow regime.
+                                case Rounding_Mode::RoundToOdd:
                                 case Rounding_Mode::RoundAwayFromZero:
                                     rounded_from_bits = (rounded_from_bits > 0 ? 1 : 0);
                                     bits = rounded_from_bits;
@@ -2806,6 +3261,11 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                                     bits = (widened_bits >> exponent_shift);
                                     break;
 
+                                case Rounding_Mode::StochasticRoundingD:
+                                    widened_bits = Stochastic_Round_D(widened_bits, exponent_shift, stoch_len);
+                                    bits = (widened_bits >> exponent_shift);
+                                    break;
+
                                 case Rounding_Mode::True_StochasticRounding:
                                     widened_bits = True_Stochastic_Round(widened_bits, exponent_shift);
                                     bits = (widened_bits >> exponent_shift);
@@ -2824,6 +3284,12 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                             }
 
                         }
+#ifdef ENABLE_EXCEPT
+                        // A non-zero input landed in the target's subnormal range: a tiny
+                        // non-zero result was detected -> underflow (§7.5).
+                        if (bits != 0)
+                            signal_if_754<get_NaN_Behavior_v<To>>(LF_exception_flags::Underflow);
+#endif
                         // Insert sign and return.
                         return from_sign_bit ? -bit_cast<To>(bits) : bit_cast<To>(bits);
                     }
@@ -2835,7 +3301,7 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                 if constexpr (kDigitShift < 0)
                 {
                     // need some logic to add leading 1 if normalized
-                    rounded_from_bits = RoundMantissa(rounded_from_bits, -kDigitShift, round_mode, stoch_len);
+                    rounded_from_bits = RoundMantissa(rounded_from_bits, -kDigitShift, ps);
                     // Zero-out tail bits.
                     rounded_from_bits &= ~((WideBits{1} << (-kDigitShift)) - 1);
                 }
@@ -2870,9 +3336,16 @@ for (int i = 0; i < n - (n % block_size); i += block_size) {
                     {
 
                     #ifdef ENABLE_EXCEPT
-                            f_env.set_exception_flag(LF_exception_flags::Overflow);
+                            signal_if_754<get_NaN_Behavior_v<To>>(LF_exception_flags::Overflow);
                     #endif
-                        if (std::numeric_limits<To>::has_infinity)
+                        // A FINITE input overflowed the target's finite range.
+                        //   OvfInf      -> +/-inf if the target has infinity (IEEE 754), else max.
+                        //   SatFinite   -> always the finite max.
+                        //   SatPropagate-> finite values clamp to max (only true infinities, handled
+                        //                  in the inf-input branch above, are propagated as inf).
+                        const bool emit_inf = (sat_mode == Saturation_Mode::OvfInf) &&
+                                              std::numeric_limits<To>::has_infinity;
+                        if (emit_inf)
                         {
                             to = from_sign_bit ? -std::numeric_limits<To>::infinity()
                                                : std::numeric_limits<To>::infinity();
@@ -2899,9 +3372,10 @@ template <typename WideBitsSIMD, typename SignedWideBitsSIMD,
 __attribute__((noinline))
 static WideBitsSIMD handle_expanding_conversion(
     WideBitsSIMD from_bits,
-    Rounding_Mode round_mode,
-    int stoch_len)
+    ProjSpec ps)
 {
+    [[maybe_unused]] const Rounding_Mode round_mode = ps.rounding_mode;
+    [[maybe_unused]] const int stoch_len = ps.stoch_length;
     auto input_exp = xs::batch_cast<SignedWideBits>(from_bits >> kFromMantissaBits);
     auto is_zero = (input_exp == SignedWideBitsSIMD(0));
     
@@ -2935,7 +3409,7 @@ static WideBitsSIMD handle_expanding_conversion(
     if constexpr (kDigitShift > 0) {
         result = result << WideBitsSIMD(kDigitShift);
     } else if constexpr (kDigitShift < 0) {
-        result = RoundMantissa(result, WideBitsSIMD(-kDigitShift), round_mode, stoch_len);
+        result = RoundMantissa(result, WideBitsSIMD(-kDigitShift), ps);
         result = result >> WideBitsSIMD(-kDigitShift);
     }
     
@@ -2960,14 +3434,15 @@ template <typename FromTraits, typename WideBitsSIMD,
 LOFLOAT_FORCEINLINE
 static WideBitsSIMD handle_shrinking_conversion(
     WideBitsSIMD from_bits,
-    Rounding_Mode round_mode,
-    int stoch_len)
+    ProjSpec ps)
 {
+    [[maybe_unused]] const Rounding_Mode round_mode = ps.rounding_mode;
+    [[maybe_unused]] const int stoch_len = ps.stoch_length;
     // Start normal path early for ILP - no dependency on subnormal checks
     WideBitsSIMD normal_result;
     if constexpr (kDigitShift < 0) {
         auto mod_digitshift = WideBitsSIMD(-kDigitShift);
-        normal_result = RoundMantissa(from_bits, mod_digitshift, round_mode, stoch_len);
+        normal_result = RoundMantissa(from_bits, mod_digitshift, ps);
         normal_result = normal_result & ~((WideBits{1} << mod_digitshift) - 1);
         normal_result = (normal_result +
             WideBitsSIMD((static_cast<WideBits>(kExponentOffset) << kFromMantissaBits)))
@@ -3005,7 +3480,7 @@ static WideBitsSIMD handle_shrinking_conversion(
         WideBitsSIMD(0),
         WideBitsSIMD(1) << WideBits(kFromMantissaBits));
     auto mantissa = (from_bits & WideBitsSIMD(static_cast<WideBits>(FromTraits::kMantissaMask))) | leading_one;
-    mantissa = RoundMantissa(mantissa, exponent_shift_unsigned, round_mode, stoch_len);
+    mantissa = RoundMantissa(mantissa, exponent_shift_unsigned, ps);
 
     auto needs_shift_unsigned = xs::batch_bool<WideBits, arch>(needs_shift);
     auto subnormal_result = xs::select(needs_shift_unsigned,
@@ -3024,9 +3499,10 @@ template <class arch = xs::default_arch>
 static LOFLOAT_HOST void run(const From* from,
                                                 To* to,
                                                 int n,
-                                                Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven,
-                                                int stoch_len = 0)
+                                                ProjSpec ps = ProjSpec{})
 {
+                [[maybe_unused]] const Rounding_Mode round_mode = ps.rounding_mode;
+                [[maybe_unused]] const int stoch_len = ps.stoch_length;
                 using FromBitsSIMD = xs::batch<FromBits, arch>;
                 using ToBitsSIMD   = xs::batch<ToBits,   arch>;
                 using WideBitsSIMD = xs::batch<WideBits, arch>;
@@ -3089,14 +3565,14 @@ static LOFLOAT_HOST void run(const From* from,
     {
        finite_out = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
                                                      WideBits, SignedWideBits, arch>(
-                from_bits, round_mode, stoch_len);
+                from_bits, ps);
     }
         else if constexpr (std::numeric_limits<To>::min_exponent >
                   std::numeric_limits<From>::min_exponent)
     {
          finite_out = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
                                                      SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
-                from_bits, round_mode, stoch_len);
+                from_bits, ps);
     }
     else 
     {
@@ -3154,10 +3630,10 @@ static LOFLOAT_HOST void run(const From* from,
             {
                 finite_out_0 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
                                                          WideBits, SignedWideBits, arch>(
-                    from_bits_0, round_mode, stoch_len);
+                    from_bits_0, ps);
                 finite_out_1 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
                                                          WideBits, SignedWideBits, arch>(
-                    from_bits_1, round_mode, stoch_len);
+                    from_bits_1, ps);
 
             }
             else if constexpr (std::numeric_limits<To>::min_exponent >
@@ -3165,10 +3641,10 @@ static LOFLOAT_HOST void run(const From* from,
             {
                 finite_out_0 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
                                                          SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
-                    from_bits_0, round_mode, stoch_len);
+                    from_bits_0, ps);
                 finite_out_1 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
                                                          SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
-                    from_bits_1, round_mode, stoch_len);
+                    from_bits_1, ps);
             }
             else
             {
@@ -3249,32 +3725,32 @@ static LOFLOAT_HOST void run(const From* from,
         {
             finite_out_0 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
                                                      WideBits, SignedWideBits, arch>(
-                from_bits_0, round_mode, stoch_len);
+                from_bits_0, ps);
             finite_out_1 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
                                                      WideBits, SignedWideBits, arch>(
-                from_bits_1, round_mode, stoch_len);
+                from_bits_1, ps);
             finite_out_2 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
                                                      WideBits, SignedWideBits, arch>(
-                from_bits_2, round_mode, stoch_len);
+                from_bits_2, ps);
             finite_out_3 = handle_expanding_conversion<WideBitsSIMD, SignedWideBitsSIMD, 
                                                      WideBits, SignedWideBits, arch>(
-                from_bits_3, round_mode, stoch_len);
+                from_bits_3, ps);
         }
         else if constexpr (std::numeric_limits<To>::min_exponent >
                            std::numeric_limits<From>::min_exponent)
         {
             finite_out_0 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
                                                      SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
-                from_bits_0, round_mode, stoch_len);
+                from_bits_0, ps);
             finite_out_1 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
                                                      SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
-                from_bits_1, round_mode, stoch_len);
+                from_bits_1, ps);
             finite_out_2 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
                                                      SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
-                from_bits_2, round_mode, stoch_len);
+                from_bits_2, ps);
             finite_out_3 = handle_shrinking_conversion<FromTraits, WideBitsSIMD, 
                                                      SignedWideBitsSIMD, WideBits, SignedWideBits, arch>(
-                from_bits_3, round_mode, stoch_len);
+                from_bits_3, ps);
         }
         else
         {
@@ -3324,16 +3800,16 @@ static LOFLOAT_HOST void run(const From* from,
 
         template <typename Derived, typename UnderlyingType>
         template <typename From>
-        Derived lo_float_base<Derived, UnderlyingType>::ConvertFrom(const From &from, Rounding_Mode rm, int stoch_len)
+        Derived lo_float_base<Derived, UnderlyingType>::ConvertFrom(const From &from, ProjSpec ps)
         {
-            return ConvertImpl<From, Derived>::run(from, rm, stoch_len);
+            return ConvertImpl<From, Derived>::run(from, ps);
         }
 
         template <typename Derived, typename UnderlyingType>
         template <typename To>
-        To lo_float_base<Derived, UnderlyingType>::ConvertTo(const Derived &from, Rounding_Mode rm, int stoch_len)
+        To lo_float_base<Derived, UnderlyingType>::ConvertTo(const Derived &from, ProjSpec ps)
         {
-            return ConvertImpl<Derived, To>::run(from, rm, stoch_len);
+            return ConvertImpl<Derived, To>::run(from, ps);
         }
 
        // ---- Proxy types ----
@@ -3341,12 +3817,11 @@ static LOFLOAT_HOST void run(const From* from,
 template <typename In>
 struct ProjectProxy {
     In x;
-    Rounding_Mode rm;
-    int stoch_len;
+    ProjSpec ps;
 
     template <typename Out>
     constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE operator Out() const noexcept {
-        return ConvertImpl<In, Out>::run(x, rm, stoch_len);
+        return ConvertImpl<In, Out>::run(x, ps);
         }
 };
 
@@ -3355,13 +3830,12 @@ template <typename In>
 struct RoundProxy {
     In* x;
     int n;
-    Rounding_Mode rm;
-    int stoch_len;
+    ProjSpec ps;
 
     template <typename Out>
     constexpr LOFLOAT_HOST LOFLOAT_FORCEINLINE operator Out() const noexcept {
         Out* y = nullptr; // or however you want to handle this
-        return ConvertImpl<In, Out>::run(x, y, n, rm, stoch_len);
+        return ConvertImpl<In, Out>::run(x, y, n, ps);
         }
 };
         #endif
@@ -3370,13 +3844,12 @@ template <typename In1, typename In2, typename Op>
 struct BinOpProxy {
     In1 x;
     In2 y;
-    Rounding_Mode rm;
-    int stoch_len;
+    ProjSpec ps;
 
     template <typename Out>
     constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE operator Out() const noexcept {
         return ConvertImpl<float, Out>::run(
-            Op{}(static_cast<float>(x), static_cast<float>(y)), rm, stoch_len);
+            Op{}(static_cast<float>(x), static_cast<float>(y)), ps);
     }
 };
 
@@ -3388,55 +3861,55 @@ struct OpDiv { constexpr float operator()(float a, float b) const noexcept { ret
 // ---- Deduced versions (no explicit out) ----
 
 template <typename In>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Project(In x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return ProjectProxy<In>{x, rm, stoch_len};
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Project(In x, ProjSpec ps = ProjSpec{}) noexcept {
+    return ProjectProxy<In>{x, ps};
 }
 
 template <typename In1, typename In2>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Add(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return BinOpProxy<In1, In2, OpAdd>{x, y, rm, stoch_len};
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Add(In1 x, In2 y, ProjSpec ps = ProjSpec{}) noexcept {
+    return BinOpProxy<In1, In2, OpAdd>{x, y, ps};
 }
 
 template <typename In1, typename In2>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Sub(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return BinOpProxy<In1, In2, OpSub>{x, y, rm, stoch_len};
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Sub(In1 x, In2 y, ProjSpec ps = ProjSpec{}) noexcept {
+    return BinOpProxy<In1, In2, OpSub>{x, y, ps};
 }
 
 template <typename In1, typename In2>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Mul(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return BinOpProxy<In1, In2, OpMul>{x, y, rm, stoch_len};
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Mul(In1 x, In2 y, ProjSpec ps = ProjSpec{}) noexcept {
+    return BinOpProxy<In1, In2, OpMul>{x, y, ps};
 }
 
 template <typename In1, typename In2>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Div(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return BinOpProxy<In1, In2, OpDiv>{x, y, rm, stoch_len};
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE auto Div(In1 x, In2 y, ProjSpec ps = ProjSpec{}) noexcept {
+    return BinOpProxy<In1, In2, OpDiv>{x, y, ps};
 }
 
 // ---- Explicit out versions (Mul<out>(x, y) style) ----
 
 template <typename Out, typename In>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Project(In x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return ConvertImpl<In, Out>::run(x, rm, stoch_len);
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Project(In x, ProjSpec ps = ProjSpec{}) noexcept {
+    return ConvertImpl<In, Out>::run(x, ps);
 }
 
 template <typename Out, typename In1, typename In2>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Add(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return ConvertImpl<float, Out>::run(static_cast<float>(x) + static_cast<float>(y), rm, stoch_len);
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Add(In1 x, In2 y, ProjSpec ps = ProjSpec{}) noexcept {
+    return ConvertImpl<float, Out>::run(static_cast<float>(x) + static_cast<float>(y), ps);
         }
 
 template <typename Out, typename In1, typename In2>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Sub(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return ConvertImpl<float, Out>::run(static_cast<float>(x) - static_cast<float>(y), rm, stoch_len);
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Sub(In1 x, In2 y, ProjSpec ps = ProjSpec{}) noexcept {
+    return ConvertImpl<float, Out>::run(static_cast<float>(x) - static_cast<float>(y), ps);
         }
 
 template <typename Out, typename In1, typename In2>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Mul(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return ConvertImpl<float, Out>::run(static_cast<float>(x) * static_cast<float>(y), rm, stoch_len);
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Mul(In1 x, In2 y, ProjSpec ps = ProjSpec{}) noexcept {
+    return ConvertImpl<float, Out>::run(static_cast<float>(x) * static_cast<float>(y), ps);
         }
 
 template <typename Out, typename In1, typename In2>
-constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Div(In1 x, In2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept {
-    return ConvertImpl<float, Out>::run(static_cast<float>(x) / static_cast<float>(y), rm, stoch_len);
+constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Div(In1 x, In2 y, ProjSpec ps = ProjSpec{}) noexcept {
+    return ConvertImpl<float, Out>::run(static_cast<float>(x) / static_cast<float>(y), ps);
         }
 
         template <typename Float>
@@ -3503,47 +3976,47 @@ constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE Out Div(In1 x, In2 y, Rounding
     using float2_batch = lo_float_internal::float2_batch<T>;
 
     template <typename out, typename in>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Project(in x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Project(in x, ProjSpec ps = ProjSpec{}) noexcept
     {
-        return lo_float_internal::Project<out, in>(x,rm, stoch_len);
+        return lo_float_internal::Project<out, in>(x, ps);
     }
 
     template <typename out, typename in>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Round(in x, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Round(in x, ProjSpec ps = ProjSpec{}) noexcept
     {
-        return lo_float_internal::Project<out, in>(x,rm, stoch_len);
+        return lo_float_internal::Project<out, in>(x, ps);
     }
 
     template <typename out, typename in1, typename in2>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Add(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Add(in1 x, in2 y, ProjSpec ps = ProjSpec{}) noexcept
     {
-        return lo_float_internal::Add<out, in1, in2>(x, y, rm, stoch_len);
+        return lo_float_internal::Add<out, in1, in2>(x, y, ps);
     }
 
     template <typename out, typename in1, typename in2>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Sub(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Sub(in1 x, in2 y, ProjSpec ps = ProjSpec{}) noexcept
     {
-        return lo_float_internal::Sub<out, in1, in2>(x, y, rm, stoch_len);
+        return lo_float_internal::Sub<out, in1, in2>(x, y, ps);
     }
 
     template <typename out, typename in1, typename in2>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Mul(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Mul(in1 x, in2 y, ProjSpec ps = ProjSpec{}) noexcept
     {
-        return lo_float_internal::Mul<out, in1, in2>(x, y, rm, stoch_len);
+        return lo_float_internal::Mul<out, in1, in2>(x, y, ps);
     }
 
     template <typename out, typename in1, typename in2>
-    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Div(in1 x, in2 y, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    constexpr LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE out Div(in1 x, in2 y, ProjSpec ps = ProjSpec{}) noexcept
     {
-        return lo_float_internal::Div<in1, in2, out>(x, y, rm, stoch_len);
+        return lo_float_internal::Div<in1, in2, out>(x, y, ps);
     }
 
     #ifndef USE_CUDA
     template <typename out, typename in, int unroll_len = 0, class arch = xsimd::default_arch>
-    LOFLOAT_HOST void Project(in* x, out *y, int n, Rounding_Mode rm = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) noexcept
+    LOFLOAT_HOST void Project(in* x, out *y, int n, ProjSpec ps = ProjSpec{}) noexcept
     {
         using Converter = lo_float_internal::ConvertImpl<in, out>;
-        Converter::template run<arch>(x, y, n, rm, stoch_len);
+        Converter::template run<arch>(x, y, n, ps);
         return;
     }
     #endif
@@ -3556,8 +4029,7 @@ void fma_vec(const In1* LOFLOAT_RESTRICT x,
             const In3* LOFLOAT_RESTRICT z,
             Out* LOFLOAT_RESTRICT out,
             int n,
-            Rounding_Mode rm = Rounding_Mode::RoundToNearestEven,
-            int stoch_len = 0) noexcept
+            ProjSpec ps = ProjSpec{}) noexcept
 {
     static_assert(std::is_trivially_copyable_v<In1> && std::is_trivially_copyable_v<In2> &&
                 std::is_trivially_copyable_v<In3> && std::is_trivially_copyable_v<Out>,
@@ -3601,7 +4073,7 @@ void fma_vec(const In1* LOFLOAT_RESTRICT x,
         
         // Round scalar-by-scalar to output type
         for (std::size_t lane = 0; lane < W; ++lane) {
-            out[i + lane] = lo_float::Round<Out>(result_fp32[lane], rm, stoch_len);
+            out[i + lane] = lo_float::Round<Out>(result_fp32[lane], ps);
         }
     };
 
@@ -3622,7 +4094,7 @@ void fma_vec(const In1* LOFLOAT_RESTRICT x,
         const float y_f = static_cast<float>(y[i]);
         const float z_f = static_cast<float>(z[i]);
         const float result = x_f * y_f + z_f;
-        out[i] = lo_float::Round<Out>(result, rm, stoch_len);
+        out[i] = lo_float::Round<Out>(result, ps);
     }
 }
 #endif
@@ -3634,8 +4106,7 @@ void add_vec(const In1* LOFLOAT_RESTRICT x,
              const In2* LOFLOAT_RESTRICT y,
              Out* LOFLOAT_RESTRICT out,
              int n,
-             Rounding_Mode rm = Rounding_Mode::RoundToNearestEven,
-             int stoch_len = 0) noexcept
+             ProjSpec ps = ProjSpec{}) noexcept
 {
     static_assert(std::is_trivially_copyable_v<In1> && std::is_trivially_copyable_v<In2> &&
                   std::is_trivially_copyable_v<Out>,
@@ -3665,7 +4136,7 @@ void add_vec(const In1* LOFLOAT_RESTRICT x,
             xsimd::store_aligned(result_fp32, fs);
 
             for (std::size_t lane = 0; lane < W; ++lane) {
-                out[i + lane] = lo_float::Round<Out>(result_fp32[lane], rm, stoch_len);
+                out[i + lane] = lo_float::Round<Out>(result_fp32[lane], ps);
             }
         }
     }
@@ -3684,14 +4155,14 @@ void add_vec(const In1* LOFLOAT_RESTRICT x,
         xsimd::store_aligned(result_fp32, fs);
 
         for (std::size_t lane = 0; lane < W; ++lane) {
-            out[i + lane] = lo_float::Round<Out>(result_fp32[lane], rm, stoch_len);
+            out[i + lane] = lo_float::Round<Out>(result_fp32[lane], ps);
         }
     }
 #endif
 
     for (int i = vec_end; i < n; ++i) {
         const float result = static_cast<float>(x[i]) + static_cast<float>(y[i]);
-        out[i] = lo_float::Round<Out>(result, rm, stoch_len);
+        out[i] = lo_float::Round<Out>(result, ps);
     }
 }
 #endif
@@ -3708,8 +4179,7 @@ void axpy(const int n,
           const int incx,
           TY* LOFLOAT_RESTRICT y,
           const int incy,
-          Rounding_Mode rm = Rounding_Mode::RoundToNearestEven,
-          int stoch_len = 0) noexcept
+          ProjSpec ps = ProjSpec{}) noexcept
 {
     static_assert(std::is_trivially_copyable_v<TA> &&
                   std::is_trivially_copyable_v<TX> &&
@@ -3749,7 +4219,7 @@ void axpy(const int n,
             xsimd::store_aligned(out_fp32, fs);
 
             for (std::size_t lane = 0; lane < W; ++lane) {
-                y[i + lane] = lo_float::Round<TY>(out_fp32[lane], rm, stoch_len);
+                y[i + lane] = lo_float::Round<TY>(out_fp32[lane], ps);
             }
         };
 
@@ -3766,7 +4236,7 @@ void axpy(const int n,
         const float xf = static_cast<float>(x[i]);
         const float yf = static_cast<float>(y[i]);
         const float result = a_f * xf + yf;
-        y[i] = lo_float::Round<TY>(result, rm, stoch_len);
+        y[i] = lo_float::Round<TY>(result, ps);
     }
 }
 else
@@ -3777,7 +4247,7 @@ else
         const float xf = static_cast<float>(x[ix]);
         const float yf = static_cast<float>(y[iy]);
         const float result = a_f * xf + yf;
-        y[iy] = lo_float::Round<TY>(result, rm, stoch_len);
+        y[iy] = lo_float::Round<TY>(result, ps);
         ix += incx;
         iy += incy;
     }
@@ -3787,26 +4257,129 @@ else
 #endif
 
 template <typename From>
-LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
-    return lo_float_internal::virtual_round(from, ToMantissaBits, round_mode, stoch_len);
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, int ToMantissaBits, ProjSpec ps = ProjSpec{}) {
+    return lo_float_internal::virtual_round(from, ToMantissaBits, ps);
 }
 
 #ifndef USE_CUDA
 template<typename From>
-LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int ToMantissaBits, int n, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
-    return lo_float_internal::virtual_round(values, results, ToMantissaBits, n, round_mode, stoch_len);
+LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int ToMantissaBits, int n, ProjSpec ps = ProjSpec{}) {
+    return lo_float_internal::virtual_round(values, results, ToMantissaBits, n, ps);
 }
 #endif
 
 template <typename From, typename ToInf, typename ToNaN>
-LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
-    return lo_float_internal::virtual_round(from, ToFp, round_mode, stoch_len);
+LOFLOAT_HOST_DEVICE LOFLOAT_FORCEINLINE From virtual_round(const From &from, FloatingPointParams<ToInf, ToNaN> ToFp, ProjSpec ps = ProjSpec{}) {
+    return lo_float_internal::virtual_round(from, ToFp, ps);
 }
 
 #ifndef USE_CUDA
 template<typename From, typename ToInf, typename ToNaN>
-LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, FloatingPointParams<ToInf, ToNaN> ToFp, Rounding_Mode round_mode = Rounding_Mode::RoundToNearestEven, int stoch_len = 0) {
-    return lo_float_internal::virtual_round(values, results, n, ToFp, round_mode, stoch_len);
+LOFLOAT_HOST LOFLOAT_FORCEINLINE void virtual_round(From* values, From* results, int n, FloatingPointParams<ToInf, ToNaN> ToFp, ProjSpec ps = ProjSpec{}) {
+    return lo_float_internal::virtual_round(values, results, n, ToFp, ps);
+}
+#endif
+
+#ifndef USE_CUDA
+// ---------------------------------------------------------------------------
+//  virtual_mx_round  (CPU / xsimd) — microscaling (MX) block quantization.
+//
+//  CPU counterpart of the virtual_mx_round CUDA kernel in Lof_kernel.cu. The
+//  input is partitioned into contiguous blocks of `block_size` elements; each
+//  block shares one scale. For each block:
+//
+//    amax  = max |x_i|                              (xsimd reduction)
+//    scale = virtual_round( amax / priv_max_normal, // share-exponent for the
+//                           params_public,          // block, rounded into the
+//                           round_mode_public )     // public (scale) format
+//    x_i  := virtual_round( x_i / scale,            // round each element into
+//                           params_private,         // the private (element)
+//                           round_mode_private,     // format, then rescale
+//                           stoch_len ) * scale
+//
+//  "Virtual": the result is written back in `From` (e.g. fp32) as the rescaled
+//  rounded value — no separate low-precision storage. This is the CPU analog of
+//  the GPU path used by fake_mx_quantize_tensor.
+//
+//  priv_max_normal is the largest finite normal of the private format, derived
+//  from its runtime params exactly as the CUDA kernel does.
+//
+//  Uses xsimd for the per-block amax reduction and the divide/multiply; the
+//  per-element rounding goes through the same scalar virtual_round the rest of
+//  the library is tested against (so the result matches that reference exactly).
+// ---------------------------------------------------------------------------
+template<typename From,
+         typename PubInf, typename PubNaN,
+         typename PrivInf, typename PrivNaN,
+         class arch = xs::default_arch>
+LOFLOAT_HOST void virtual_mx_round(
+    From* inout, int n, int block_size,
+    FloatingPointParams<PubInf, PubNaN>   params_public,
+    FloatingPointParams<PrivInf, PrivNaN> params_private,
+    ProjSpec ps_public  = ProjSpec{},
+    ProjSpec ps_private = ProjSpec{})
+{
+    using batch = xs::batch<From, arch>;
+    constexpr int W = static_cast<int>(batch::size);
+
+    if (block_size <= 0 || n <= 0) return;
+
+    // Largest finite normal of the private format (same derivation as the
+    // CUDA kernel): (2 - 2^-mant) * 2^max_exp.
+    const int priv_max_exp = params_private.is_signed == Signedness::Signed
+        ? (1 << (params_private.bitwidth - params_private.mantissa_bits - 1)) - 1 - params_private.bias
+        : (1 << (params_private.bitwidth - params_private.mantissa_bits))     - 1 - params_private.bias;
+    const From priv_max_normal = static_cast<From>(
+        std::ldexp(1.0, priv_max_exp) * (2.0 - std::ldexp(1.0, -params_private.mantissa_bits)));
+
+    for (int b0 = 0; b0 < n; b0 += block_size)
+    {
+        const int len  = std::min(block_size, n - b0);
+        From*     blk  = inout + b0;
+
+        // 1) amax over the block (xsimd full-width reduction + scalar tail).
+        From amax = From(0);
+        {
+            int i = 0;
+            if (len >= W) {
+                batch vmax = xs::abs(batch::load_unaligned(blk));
+                i = W;
+                for (; i + W <= len; i += W)
+                    vmax = xs::max(vmax, xs::abs(batch::load_unaligned(blk + i)));
+                amax = xs::reduce_max(vmax);
+            }
+            for (; i < len; ++i)
+                amax = std::max(amax, static_cast<From>(std::fabs(static_cast<double>(blk[i]))));
+        }
+
+        // 2) shared scale = round_public(amax / priv_max_normal).
+        From scale = lo_float::virtual_round(
+            static_cast<From>(amax / priv_max_normal), params_public,
+            ProjSpec{ps_public.rounding_mode, ps_public.saturation_mode, 0});
+
+        if (!(scale > From(0))) {
+            // amax underflowed to a zero scale: the block is (numerically) zero.
+            for (int i = 0; i < len; ++i) blk[i] = From(0);
+            continue;
+        }
+
+        // 3) per element: round(x / scale) into the private format, then rescale.
+        const batch vscale(scale);
+        int i = 0;
+        for (; i + W <= len; i += W)
+            (batch::load_unaligned(blk + i) / vscale).store_unaligned(blk + i);   // divide
+        for (; i < len; ++i)
+            blk[i] = blk[i] / scale;
+
+        for (int j = 0; j < len; ++j)                                             // round (private)
+            blk[j] = lo_float::virtual_round(blk[j], params_private, ps_private);
+
+        i = 0;
+        for (; i + W <= len; i += W)
+            (batch::load_unaligned(blk + i) * vscale).store_unaligned(blk + i);   // rescale
+        for (; i < len; ++i)
+            blk[i] = blk[i] * scale;
+    }
 }
 #endif
 

@@ -54,3 +54,19 @@
 
 .DS_Store
 Thumbs.db
+
+# Compiled test binaries (extensionless; sources keep their .cpp/.cu/.cuh/.py)
+test/test_*
+!test/test_*.*
+test/lo_test
+test/sine
+test/*_test
+!test/*_test.*
+get_cache
+# LLVM IR dumps from the *.ll Makefile targets
+*.ll
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.egg-info/
