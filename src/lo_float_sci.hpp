@@ -2,12 +2,13 @@
 //#ifndef LO_FLOAT_ALL_HPP
 //#define LO_FLOAT_ALL_HPP
 
+#include "platform_macros.h"
 #include <cmath>
 #include <complex>
 #include <iostream>
 #include <type_traits>
 #include <utility>
-#ifndef USE_CUDA
+#if !LOFLOAT_NVCC
 #include <cfenv>
 #endif
 #include "lo_float.h"                // hypothetical header where your types are declared
@@ -53,7 +54,7 @@ template <Float T1, Float T2>
 using exact_mult_type_v = typename exact_mult_type<T1, T2>::value;
 
 
-#ifdef ENABLE_EXCEPT
+#if LOFLOAT_ENABLE_EXCEPT
 // Gate helper for the math wrappers below: raise exception `f` on the global
 // environment, but only for formats that opted into IEEE-754 semantics
 // (NA_behavior == _754). Mirrors lo_float.h's call sites.
@@ -108,7 +109,7 @@ inline Templated_Float<Fp> floor(Templated_Float<Fp> x, ProjSpec ps = ProjSpec{}
 //  add the per-function domain (invalid operation) and pole (divide-by-zero)
 //  signals from §9.2, each gated on _754 via sci_raise<Fp>.
 // ============================================================================
-#ifdef ENABLE_EXCEPT
+#if LOFLOAT_ENABLE_EXCEPT
   #define LOF_INVALID(Fp) sci_raise<Fp>(lo_float_internal::LF_exception_flags::InvalidOperation)
   #define LOF_DIVZERO(Fp) sci_raise<Fp>(lo_float_internal::LF_exception_flags::DivisionByZero)
 #else
@@ -481,36 +482,6 @@ inline Templated_Float<Fp> atanh(Templated_Float<Fp> x, ProjSpec ps = ProjSpec{}
     return Project<Templated_Float<Fp>>(std::atanh(xd), ps);
 }
 
-#undef LOF_INVALID
-#undef LOF_DIVZERO
-
-
-
-//9) FMA — computes (x*y)+z by rounding the operands up to double, evaluating
-// std::fma (one rounding), and rounding the result back into the output format.
-// §7.2(b,c,d): 0×∞ or ∞−∞ have no usefully definable result -> invalid operation.
-// Uses RTO trick from https://ens-lyon.hal.science/inria-00080427v2/document
-template <FloatingPointParams Fp1, FloatingPointParams Fp2, FloatingPointParams Fp3, FloatingPointParams Fp_out>
-LOFLOAT_HOST LOFLOAT_INLINE Templated_Float<Fp_out> fma(
-    Templated_Float<Fp1> x, Templated_Float<Fp2> y, Templated_Float<Fp3> z, ProjSpec ps = {}) noexcept
-{
-    const double xd = static_cast<double>(x);
-    const double yd = static_cast<double>(y);
-    const double zd = static_cast<double>(z);
-    #pragma STDC FENV_ACCESS ON
-    std::feclearexcept(FE_INEXACT);
-    double res = std::fma(xd, yd, zd);
-    int inexact_flag = std::fetestexcept(FE_INEXACT) ? 1 : 0;
-    double rto_res = std::isfinite(res) ? std::bit_cast<double>(std::bit_cast<uint64_t>(res) | inexact_flag) : res;
-#ifdef ENABLE_EXCEPT
-    // A NaN result from non-NaN operands means an invalid (0×∞ or ∞−∞) arose.
-    if (std::isnan(res) && !std::isnan(xd) && !std::isnan(yd) && !std::isnan(zd))
-        sci_raise<Fp_out>(lo_float_internal::LF_exception_flags::InvalidOperation);
-#endif
-    return Project<Templated_Float<Fp_out>>(rto_res, ps);
-}
-
-
 // Fast2Sum (Dekker): returns {c, e} such that c = fl(a + b) and a + b = c + e
 // exactly, where e captures the rounding error of the floating-point sum.
 // Requires a >= b (more precisely exp(a) >= exp(b)), which holds here since the
@@ -523,6 +494,96 @@ inline std::pair<T, T> two_sum(T a, T b) noexcept
     T e = b - z;        // exact rounding error
     return {c, e};
 }
+
+// ExactAdd (Knuth's 2Sum): same postcondition as two_sum but with no ordering
+// requirement on the operands, at the cost of 6 flops instead of 3.
+template <Float T>
+inline std::pair<T, T> two_sum_full(T a, T b) noexcept
+{
+    T c  = a + b;
+    T bv = c - a;               // b as it was seen by the sum
+    T av = c - bv;              // a as it was seen by the sum
+    T e  = (a - av) + (b - bv); // exact rounding error
+    return {c, e};
+}
+
+// □_odd for the working precision: the correctly-rounded-to-odd sum a + b.
+// Round to nearest first, then, whenever the sum was inexact, force the last
+// significand bit to 1 by nudging one ulp in the direction of the discarded
+// part.  That single sticky bit is what makes a later rounding into the narrow
+// output format land on the same value as one rounding of the exact sum
+// (Boldo & Melquiond, §3) -- i.e. it defeats double rounding.
+template <Float T>
+inline T add_odd(T a, T b) noexcept
+{
+    auto [s, e] = two_sum_full(a, b);
+    if (e == T(0)) return s;   // sum was exact: nothing was discarded
+    using bits_t = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
+    if (lo_float_internal::bit_cast<bits_t>(s) & bits_t(1))
+        return s;              // significand already odd
+    return std::nextafter(s, e > T(0) ? std::numeric_limits<T>::infinity()
+                                      : -std::numeric_limits<T>::infinity());
+}
+
+//9) FMA — computes (x*y)+z with a single rounding into the output format.
+// §7.2(b,c,d): 0×∞ or ∞−∞ have no usefully definable result -> invalid operation.
+// Uses the RTO trick from https://ens-lyon.hal.science/inria-00080427v2/document
+// (Boldo & Melquiond).  With a, b, c the operands widened to the working type:
+//
+//     (u_h, u_l) = ExactMult(a, b)
+//     (t_h, t_l) = ExactAdd(c, u_h)
+//     v          = □_odd(t_l + u_l)      // round to odd
+//     z          = ∘(t_h + v)            // the one user-visible rounding
+//
+// u_l and t_l are the exact residuals of the two operations, so t_h + (t_l + u_l)
+// is the exact value of x*y + z.  Splitting it as t_h + □_odd(tail) lets the final
+// ∘ round once into the output format even when the exact value needs more than
+// the working type's precision: the odd-rounded tail carries the sticky bit that a
+// plain round-to-nearest tail would have thrown away.
+template <FloatingPointParams Fp1, FloatingPointParams Fp2, FloatingPointParams Fp3, FloatingPointParams Fp_out>
+LOFLOAT_HOST LOFLOAT_INLINE Templated_Float<Fp_out> fma(
+    Templated_Float<Fp1> x, Templated_Float<Fp2> y, Templated_Float<Fp3> z, ProjSpec ps = ProjSpec{}) noexcept
+{
+    using out_t = Templated_Float<Fp_out>;
+    using acc   = double;   // working type: wide enough for an exact ExactMult
+
+    // ExactMult is only exact if the full product of the two significands fits.
+    static_assert((Fp1.mantissa_bits + 1) + (Fp2.mantissa_bits + 1)
+                      <= std::numeric_limits<acc>::digits,
+                  "fma: operand formats too wide for an exact ExactMult in double");
+
+    const acc a = static_cast<acc>(x);
+    const acc b = static_cast<acc>(y);
+    const acc c = static_cast<acc>(z);
+
+    // (u_h, u_l) = ExactMult(a, b):  u_h = fl(a·b), u_l = a·b − u_h, exactly
+    // (a·b is exact in `acc` by the static_assert, so u_h is it and u_l is 0;
+    //  the fma keeps the split correct for wider working types as well).
+    const acc u_h = a * b;
+    const acc u_l = std::fma(a, b, -u_h);
+    // §7.2(b,c,d): 0×∞ and ∞−∞ are invalid; a NaN operand merely propagates.
+    // Non-finite values also have no meaningful error terms, so they skip the
+    // algorithm and go straight through the output conversion.
+    if (!std::isfinite(u_h) || !std::isfinite(c)) {
+        if ((std::isnan(u_h) && !std::isnan(a) && !std::isnan(b)) ||
+            (std::isinf(u_h) && std::isinf(c) && (std::signbit(u_h) != std::signbit(c))))
+            LOF_INVALID(Fp_out);
+        return Project<out_t>(u_h + c, ps);
+    }
+    // (t_h, t_l) = ExactAdd(c, u_h)
+    const auto [t_h, t_l] = two_sum_full<acc>(c, u_h);
+
+    // v = □_odd(t_l + u_l)
+    const acc v = add_odd<acc>(t_l, u_l);
+
+    // z = ∘(t_h + v).  v == 0 means t_h is already the exact result; returning it
+    // untouched also keeps the sign of a zero result (t_h + (+0) would flip −0).
+    return Project<out_t>(v == acc(0) ? t_h : add_odd<acc>(t_h, v), ps);
+}
+
+#undef LOF_INVALID
+#undef LOF_DIVZERO
+
 
 //10) FAA - uses the algorithm from https://hal.science/hal-04575249/document
 // NOTE (loft loop): faa() is unfinished WIP — its body references an `accum_type`
